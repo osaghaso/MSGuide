@@ -1,5 +1,7 @@
 # Remaining acceptance gates
 
+The product direction now includes **Guide me** and permission-scoped **Do it for me**. The local dual-mode fixture and an [experimental Notepad adapter](docs/NOTEPAD_TASK.md) are implemented. Notepad writes default off pending native acceptance. Next: pass user-assisted foreground/Stop/takeover tests and prove the selected blank-Notepad task in both modes. General desktop control and model-generated actions remain unimplemented.
+
 The current implementation is summarized in [SUMMARY.md](SUMMARY.md); detailed progress is in [PLAN.md](PLAN.md). This roadmap is not a production commitment or a claim of completed UX validation.
 
 ## 1. Unblock the synthetic desktop run

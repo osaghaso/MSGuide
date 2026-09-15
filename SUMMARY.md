@@ -16,6 +16,7 @@ September 14, 2026. **Desktop-first local MVP; end-to-end runtime validation blo
 
 ## Start here
 
+- [docs/DEMO_SCENARIOS.md](docs/DEMO_SCENARIOS.md): recommended hackathon stories, two-minute storyboard, scope and recording acceptance gates.
 - [README.md](README.md): prerequisites, launcher, workflow, and privacy limits.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md): implemented components and actual boundaries.
 - [docs/API.md](docs/API.md): route inventory and request constraints.

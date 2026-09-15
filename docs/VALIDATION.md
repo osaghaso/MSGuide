@@ -1,8 +1,24 @@
 # Validation and known blockers
 
+## Latest recorded evidence — September 15, 2026
+
+| Check | Result | Scope |
+| --- | --- | --- |
+| .NET desktop build and editor diagnostics | Passed | No new compile/editor errors. |
+| Desktop safety and Notepad policy | 9 check groups passed | Fake Notepad editor, not external-app acceptance. |
+| Demo Control components | 13 checks passed | Explicit simulated focus/time and real companion interruption handlers. |
+| Strict native demo Control | 12 checks passed, including three two-action runs | Actual foreground checks, owned demo only. |
+| Four-state capture/API | 18 checks passed | Actual selected-HWND pixels and UIA, deterministic loopback API. |
+| Full native integration | Three post-fix passes; final two have 19 checks | Zero overlay activation, foreground preservation, reposition/hide/re-show, exact bounds, hit-through, cancellation and pause. |
+| Real Notepad and live model | Pending | No native user consent available; no live provider called. |
+
+The overlay failure was traced to WPF's DPI resize path calling `SetWindowPos` without `SWP_NOACTIVATE`. [OverlayWindow](../desktop/OverlayWindow.cs) handles the source DPI event to suppress that automatic resize for its border-only visual; explicit native positioning retains physical target bounds. Its render scale stays at the initial scale, so mixed-DPI border thickness/visual quality still needs manual inspection. This policy must not be reused for text or interactive controls. No focus restoration or assertion bypass is used. [IntegrationTests](../desktop/IntegrationTests.cs) now also rejects transient activation events.
+
+Windows sometimes denies initial foreground activation; native tests now use the existing bounded real-activation wait helper, never simulated focus. Historical blank captures remain unexplained: these recent successful runs do not establish universal capture reliability. Backend source was unchanged and its full suite was **not rerun** in this increment; the 150-test result below is earlier evidence. All recent changes remain local, uncommitted and unpushed.
+
 ## Recorded evidence — September 14, 2026
 
-These results were recorded during implementation; distinguish deterministic backend, capture, and foreground checks from a live-model evaluation.
+Historical results below are superseded by the September 15 table where applicable. Distinguish deterministic backend, capture, and foreground checks from a live-model evaluation.
 
 **Latest result:** 150 backend tests pass and dependency checks are clean. Desktop builds and self-tests pass. The capture test passed once (18 checks), but the latest three reruns failed at `capture-0`; the last two diagnostics identified `blank`: Windows returned pixels rejected as blank/protected/unsupported. Native capture is therefore **not reliably verified** in this session. The stricter integration test remains blocked on activation. Keep the blank-image guard and selected-window boundary; do not substitute whole-desktop capture.
 
@@ -36,7 +52,7 @@ The executable is a Windows GUI application, so use its exit code and JSON repor
 
 [tests/local_client.py](../tests/local_client.py) wraps `httpx.ASGITransport` directly and runs application lifespan. Tests do not use Starlette's legacy TestClient/httpx constructor path, avoiding that compatibility issue without requiring a downgrade. Provider tests in [tests/test_model_provider.py](../tests/test_model_provider.py) use mocked transport and synthetic images; they are not live-model evaluations.
 
-[requirements.txt](../requirements.txt) and [requirements-dev.txt](../requirements-dev.txt) pin direct requirements only. A complete transitive lock and clean-machine reproducibility validation remain unimplemented. This workspace has **no Git repository**; do not describe these checks as a commit/branch/PR validation.
+[requirements.txt](../requirements.txt) and [requirements-dev.txt](../requirements-dev.txt) pin direct requirements only. A complete transitive lock and clean-machine reproducibility validation remain unimplemented. This workspace now has a Git repository, but current changes are uncommitted; these checks are working-tree validation, not a commit/PR validation.
 
 ## Run the real desktop harness
 
@@ -57,7 +73,7 @@ The launcher builds unless skipped, starts its own demo API/token, forces determ
 
 Allow up to four minutes. Expected success is desktop exit 0 and report `passed: true`. Failure produces desktop exit 1 and a launcher error; inspect the JSON `stage`, `failure`, and completed `checks`, and verify the report belongs to this run. If startup fails before the harness runs, an old report may remain.
 
-The harness is designed to capture its **own** real DemoWindow, inspect four UIA states, send **UIA metadata only** through the real API, validate response identities/targets, test overlay hit-through/positioning, and invalidate evidence on movement. Only this test harness invokes its own synthetic buttons; normal guidance never clicks. It also checks capture cancellation and local pause clearing, but the pause check is not a delayed-HTTP end-to-end race test.
+The harness captures its **own** real DemoWindow, inspects four UIA states, sends **UIA metadata only** through the real API, validates response identities/targets, tests overlay hit-through/positioning/zero activation, and invalidates evidence on movement. Snapshot guidance never clicks; the separate explicitly approved local Control task can invoke its fixed demo plan. The harness also checks capture cancellation and local pause clearing, but the pause check is not a delayed-HTTP end-to-end race test.
 
 At `demo-activate`, activation returned false; at `demo-foreground`, the foreground/owned-process check failed. Investigate the actual failing stage. Never substitute fabricated pixels/metadata or suppress failed assertions. A future passing report would still not establish broad Windows application support or live-model grounding.
 

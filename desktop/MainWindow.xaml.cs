@@ -149,6 +149,7 @@ public partial class MainWindow : Window
 
     private void CancelWork()
     {
+        StopDemoTask();
         generation++;
         operation?.Cancel(); operation?.Dispose(); operation = null;
         sending = false;
@@ -168,10 +169,12 @@ public partial class MainWindow : Window
         CancelWork();
         speech.Stop();
         PromptBox.Clear();
+        DraftBox.Clear();
+        TaskPlanText.Text = "Paused. Prepare a new plan to continue.";
         AnswerText.Text = "Paused. Capture, text, and response cleared. Already transmitted data cannot be recalled.";
         CitationsPanel.Children.Clear();
         SpeakButton.IsEnabled = false;
-        ModeText.Text = "PAUSED · guide only";
+        ModeText.Text = "PAUSED · no execution authority";
         StatusText.Text = "Paused · no capture, microphone, or speech active.";
     }
 
@@ -300,8 +303,10 @@ public partial class MainWindow : Window
 
     private void Timer_Tick(object? sender, EventArgs e)
     {
+        ValidateDemoTask();
         if (speech.Listening && DateTimeOffset.UtcNow - microphoneStarted > TimeSpan.FromSeconds(30)) speech.StopListening();
-        // This timer inspects identity/bounds only; it NEVER captures pixels or UI Automation.
+        // Snapshot/outline checks below inspect identity/bounds only. ValidateDemoTask above
+        // also checks Notepad tab metadata; neither path captures pixels or reads editor text here.
         if (snapshot is not null && !snapshot.Valid())
         { CancelWork(); StatusText.Text = "Snapshot expired or window moved/closed. Capture and review again."; }
         if (highlight is not { } h) return;
@@ -337,6 +342,13 @@ public partial class MainWindow : Window
             demo = new DemoWindow();
             demo.WorkflowChanged += (_, _) =>
             {
+                if (demoTask is { } task)
+                {
+                    highlight = null; overlay.Hide();
+                    if (task.Executing) return;
+                    if (task.Mode == InteractionMode.Guide && taskRunning)
+                    { TaskStatusText.Text = "Demo changed. Choose I did it · check to verify the next step."; return; }
+                }
                 CancelWork();
                 speech.Stop();
                 StatusText.Text = "Demo changed. Check next step for a fresh capture and review.";
@@ -376,7 +388,7 @@ public partial class MainWindow : Window
         timer.Stop();
         CancelWork();
         if (hotkeyRegistered) Native.UnregisterHotKey(Handle, 0x4D47);
-        HwndSource.FromHwnd(Handle)?.RemoveHook(WindowHook);
+        if (Handle != 0) HwndSource.FromHwnd(Handle)?.RemoveHook(WindowHook);
         speech.Dispose(); api?.Dispose();
         overlay.Close(); demo?.Close();
         PromptBox.Clear(); MetadataText.Clear(); AnswerText.Text = ""; CitationsPanel.Children.Clear();

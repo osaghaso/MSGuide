@@ -3,7 +3,7 @@
   <Grid Margin="20">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <StackPanel>
-      <DockPanel><TextBlock Text="MSGuide" FontSize="27" FontWeight="SemiBold"/><TextBlock Text="GUIDE ONLY" Foreground="#82DCFF" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/></DockPanel>
+      <DockPanel><TextBlock Text="MSGuide" FontSize="27" FontWeight="SemiBold"/><TextBlock Text="GUIDE + SCOPED CONTROL" Foreground="#82DCFF" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/></DockPanel>
       <TextBlock Text="Your next step, in context." Foreground="#A8BAD1" Margin="0,2,0,10"/>
       <Border Background="#182C40" CornerRadius="7" Padding="10"><TextBlock x:Name="StatusText" Text="Not connected · no capture or recording active" AutomationProperties.LiveSetting="Polite"/></Border>
     </StackPanel>
@@ -11,6 +11,31 @@
       <StackPanel>
         <TextBlock Text="Local MVP: demo mode is deterministic, not AI. Model mode uses the backend's configured provider, which may process approved data remotely. No enterprise identity or document permissions are established here. Use synthetic/public content only." Foreground="#A8BAD1" FontSize="12"/>
         <WrapPanel Margin="0,7,0,10"><Button Content="Open demo" Click="OpenDemo_Click"/><Button Content="Check service" Click="Health_Click"/></WrapPanel>
+        <Border Background="#182C40" CornerRadius="8" Padding="12" Margin="0,0,0,14">
+          <StackPanel>
+            <TextBlock Text="Try one task in two modes" FontSize="17" FontWeight="SemiBold"/>
+            <TextBlock Text="Two bounded tasks: investigate the sample build, or insert a draft into blank Notepad. Local adapters, not AI or arbitrary screen control." FontSize="12" Foreground="#A8BAD1" Margin="0,5,0,8"/>
+            <WrapPanel>
+              <RadioButton x:Name="GuideMode" Content="Guide me" GroupName="Interaction" IsChecked="True" Checked="Interaction_Changed" Foreground="White" Margin="0,0,16,8"/>
+              <RadioButton x:Name="ControlMode" Content="Do it for me" GroupName="Interaction" Checked="Interaction_Changed" Foreground="White"/>
+            </WrapPanel>
+            <Button Content="Prepare demo task" Click="PrepareTask_Click"/>
+            <Expander Header="Notepad · approved draft" Foreground="#EDF3FF" Margin="0,8,0,8">
+              <StackPanel>
+                <TextBlock Text="Experimental: use a separate Notepad window with exactly one blank tab, then refresh and select it below. Control requires MSGUIDE_ENABLE_EXPERIMENTAL_NOTEPAD_CONTROL=1 for synthetic testing pending native acceptance. No Save command is issued, but Notepad may retain unsaved tabs. Keep MSGuide foreground during insertion." FontSize="12" Margin="0,6,0,6"/>
+                <TextBox x:Name="DraftBox" Text="MSGuide demo: this draft was prepared with permission." MaxLength="1000" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64" MaxHeight="140" VerticalScrollBarVisibility="Auto" IsUndoEnabled="False" TextChanged="Draft_Changed" AutomationProperties.Name="Exact approved Notepad draft"/>
+                <Button Content="Prepare selected Notepad task" Click="PrepareNotepad_Click"/>
+              </StackPanel>
+            </Expander>
+            <TextBlock x:Name="TaskPlanText" Text="Open demo, choose a mode and prepare the task. The question below is for the separate snapshot-guidance workflow." FontSize="12" Margin="0,6,0,8"/>
+            <CheckBox x:Name="TaskConsent" Checked="TaskConsent_Changed" Unchecked="TaskConsent_Changed"><TextBlock Text="I approve this exact plan, target and local state/text checks; in Do it for me mode, I also approve its listed actions. Only synthetic content is in scope."/></CheckBox>
+            <WrapPanel>
+              <Button x:Name="StartTaskButton" Content="Start approved task" Click="StartTask_Click" IsEnabled="False"/>
+              <Button x:Name="ObserveTaskButton" Content="I did it · check" Click="ObserveTask_Click" IsEnabled="False"/>
+            </WrapPanel>
+            <TextBlock x:Name="TaskStatusText" Text="No task active." AutomationProperties.LiveSetting="Polite" Foreground="#82DCFF"/>
+          </StackPanel>
+        </Border>
         <TextBlock Text="1  Ask a question" FontWeight="SemiBold" Margin="0,0,0,6"/>
         <TextBox x:Name="PromptBox" Text="Help me find the build error" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" MaxHeight="160" MaxLength="4000" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Question or editable speech transcript" TextChanged="Prompt_Changed" IsUndoEnabled="False"/>
         <WrapPanel><Button x:Name="MicButton" Content="Start microphone" Click="Mic_Click"/><Button Content="Stop speech" Click="StopSpeech_Click"/></WrapPanel>
@@ -44,6 +69,9 @@
         <TextBlock x:Name="HotkeyText" Text="Ctrl+Alt+M · show near cursor" Foreground="#A8BAD1" FontSize="12" Margin="0,12,0,0"/>
       </StackPanel>
     </ScrollViewer>
-    <WrapPanel Grid.Row="2"><Button Content="Pause / clear" Click="Pause_Click"/><Button Content="Dismiss" Click="Dismiss_Click"/><Button Content="Exit" Click="Exit_Click"/></WrapPanel>
+    <StackPanel Grid.Row="2">
+      <WrapPanel><Button Content="Stop task" Click="StopTask_Click" Background="#803C46"/><Button Content="Take over manually" Click="TakeOver_Click"/></WrapPanel>
+      <WrapPanel><Button Content="Pause / clear" Click="Pause_Click"/><Button Content="Dismiss" Click="Dismiss_Click"/><Button Content="Exit" Click="Exit_Click"/></WrapPanel>
+    </StackPanel>
   </Grid>
 </Window>

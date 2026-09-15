@@ -5,6 +5,9 @@ internal static class SelfTests
     public static void Run()
     {
         static void Check(bool condition) { if (!condition) throw new InvalidOperationException("Desktop safety self-test failed."); }
+        Check(DemoTaskSession.Next(0)?.Label == "View logs");
+        Check(DemoTaskSession.Next(1)?.Label == "Open troubleshooting");
+        Check(DemoTaskSession.Next(2) is null && DemoTaskSession.Next(3) is null && DemoTaskSession.Next(-1) is null);
         (string Message, string Code)[] captureFailures =
         [
             ("A previous window capture is still returning. Use another application after it finishes, or restart MSGuide.", "provider-busy"),

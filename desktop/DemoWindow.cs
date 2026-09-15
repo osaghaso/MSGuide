@@ -8,6 +8,24 @@ namespace MSGuide.Desktop;
 public sealed class DemoWindow : Window
 {
     public event EventHandler? WorkflowChanged;
+    internal int WorkflowState { get; private set; }
+    internal long Revision { get; private set; }
+    internal Button? StepButton { get; private set; }
+    // Semantic invocation stays on this window's dispatcher. No queued input or global mouse/keyboard injection.
+    private sealed class DemoButton : Button
+    {
+        internal void Invoke() => OnClick();
+    }
+
+    internal void InvokeStep(Button expected, long revision)
+    {
+        Dispatcher.VerifyAccess();
+        if (revision != Revision || !ReferenceEquals(expected, StepButton)
+            || expected is not DemoButton button || Window.GetWindow(button) != this
+            || !IsVisible || !button.IsVisible || !button.IsEnabled || WorkflowState is not (0 or 1))
+            throw new InvalidOperationException("Demo target changed or is outside the approved task. No action taken.");
+        button.Invoke();
+    }
     private readonly StackPanel workflow = new();
     private readonly TextBlock step = new() { FontSize = 13, Foreground = Brushes.LightSkyBlue, Margin = new Thickness(0, 0, 0, 16) };
 
@@ -35,6 +53,9 @@ public sealed class DemoWindow : Window
 
     private void Render(int state)
     {
+        WorkflowState = state;
+        Revision++;
+        StepButton = null;
         WorkflowChanged?.Invoke(this, EventArgs.Empty);
         workflow.Children.Clear();
         step.Text = state == 3 ? "WORKFLOW COMPLETE" : $"INVESTIGATION  ·  STEP {state + 1} OF 3";
@@ -58,11 +79,12 @@ public sealed class DemoWindow : Window
         if (state < 3)
         {
             string label = state switch { 0 => "View logs", 1 => "Open troubleshooting", _ => "Mark resolved" };
-            var button = new Button { Content = label, HorizontalAlignment = HorizontalAlignment.Left, Background = new SolidColorBrush(Color.FromRgb(32, 101, 143)) };
+            var button = new DemoButton { Content = label, HorizontalAlignment = HorizontalAlignment.Left, Background = new SolidColorBrush(Color.FromRgb(32, 101, 143)) };
             AutomationProperties.SetName(button, label);
             AutomationProperties.SetAutomationId(button, "DemoStep" + state);
             button.Click += (_, _) => Render(state + 1);
             workflow.Children.Add(button);
+            StepButton = button;
         }
     }
 }

@@ -1,8 +1,8 @@
 # MSGuide desktop MVP
 
-A Windows WPF companion for reviewing a selected window and receiving one guidance step at a time. **You perform every click.** The default provider uses deterministic rules for the built-in **MSGuide Demo** only; it is not AI. An explicitly configured [optional model provider](docs/MODEL_SETUP.md) can process approved synthetic/public evidence.
+A Windows WPF companion with **Guide me** and **Do it for me** modes. The approved local task invokes two controls in its synthetic demo. An experimental Notepad adapter can guide or insert an approved draft into a selected empty editor; external writes are disabled by default pending native acceptance. This is not general screen control. The default provider is deterministic, not AI; an explicitly configured [optional model provider](docs/MODEL_SETUP.md) can process approved synthetic/public evidence.
 
-**Status, September 14, 2026:** 149 backend tests, .NET build, desktop self-test, and real window capture/API tests pass. A separate foreground/overlay integration test stops at window activation. Full interactive UX, microphone operation, and live model quality remain **unverified**. See [validation evidence](docs/VALIDATION.md).
+**Status, September 15, 2026:** desktop build, safety/component tests, strict native demo Control and the four-state capture/API test pass. A DPI-triggered overlay activation bug was fixed; full integration passed three post-fix runs, including two with stronger zero-activation and hide/re-show checks. Notepad policy tests use a fake editor; real Notepad acceptance still needs user interaction and writes remain gated. Historical intermittent blank captures, full manual UX, mixed-DPI visual quality, microphone operation and live model quality remain unresolved or unverified. See [Notepad acceptance](docs/NOTEPAD_TASK.md), [dual-mode scope](docs/DUAL_MODE.md) and [validation evidence](docs/VALIDATION.md).
 
 ## Install and start
 
@@ -31,6 +31,10 @@ No virtual-environment activation is required. The launcher expects the environm
 
 ## Try the built-in demo
 
+For the new dual-mode task: **Open demo → choose Guide me / Do it for me → Prepare demo task → review and approve → Start approved task**. Guide mode waits for your clicks and **I did it · check**. Control mode invokes View logs and Open troubleshooting, then revokes authority. **Stop task** and **Take over manually** remain available. See [the complete dual-mode instructions](docs/DUAL_MODE.md).
+
+The separate snapshot-guidance workflow is:
+
 1. Click **Open demo**, then invoke MSGuide with **Ctrl+Alt+M**. The hotkey is configurable through `MSGUIDE_HOTKEY`; use the taskbar if registration fails.
 2. Enter “Help me find the build error” **before capture**, and select **MSGuide Demo**.
 3. Click **Capture / review**. Inspect the actual image and UI Automation text/boxes, including full-size image inspection. Nothing has been uploaded.
@@ -47,15 +51,17 @@ Editing the prompt, changing the selected window, or moving/resizing the capture
 
 ## Privacy and limits
 
-- Manual selected-window capture only; no whole-desktop fallback, periodic capture, or normal-mode input injection.
-- **UI Automation names only, not pixel OCR. No pixel redaction or redaction editor.** Excluding password controls from UIA does not sanitize screenshot pixels or all accessible text. Discard sensitive captures.
+- Manual selected-window capture only; no whole-desktop fallback, periodic capture, or global input injection.
+- **Snapshot UI Automation names only, not pixel OCR. No pixel redaction or redaction editor.** Excluding password controls from UIA does not sanitize screenshot pixels or all accessible text. Discard sensitive captures. The separately approved Notepad task reads bounded editor text locally for verification.
 - Screenshot upload is opt-in per snapshot. Pillow validates PNGs and strips metadata before remote processing; it does not remove sensitive pixels. The default backend makes no remote model calls.
 - Capture data is held in memory and cleared/disposed on completion or cancellation, not deliberately saved by the application. This is not guaranteed forensic memory erasure or a promise about a remote provider's retention.
 - Protected, elevated, GPU-rendered, minimized, blank, or unresponsive windows may fail capture. A stuck native capture may require restarting MSGuide.
-- No enterprise authentication, permission-aware search, real external actions, production deployment, or approved internal-data pilot. Use synthetic/public data only.
+- No enterprise authentication, permission-aware search, general external automation, production deployment, or approved internal-data pilot. Experimental Notepad control requires explicit opt-in; use synthetic/public data only.
 
 ## Documentation
 
+- [docs/NOTEPAD_TASK.md](docs/NOTEPAD_TASK.md): experimental external task, test evidence and acceptance checklist.
+- [docs/DUAL_MODE.md](docs/DUAL_MODE.md): implemented Guide/Control fixture, authorization, test results and external-control limits.
 - [SUMMARY.md](SUMMARY.md): current status at a glance.
 - [IMPLEMENTATION.md](IMPLEMENTATION.md): implemented components and boundaries.
 - [docs/API.md](docs/API.md): current routes and contracts.
@@ -63,10 +69,3 @@ Editing the prompt, changing the selected window, or moving/resizing the capture
 - [docs/VALIDATION.md](docs/VALIDATION.md): commands, evidence, blockers, and documentation conflicts.
 - [PLAN.md](PLAN.md) and [ROADMAP.md](ROADMAP.md): evidence-based progress and remaining gates.
 - [desktop/README.md](desktop/README.md): desktop behavior and platform limitations.
-
-
-
-
-
-
-

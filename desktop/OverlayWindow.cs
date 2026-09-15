@@ -30,7 +30,15 @@ public sealed class OverlayWindow : Window
             // WS_EX_TRANSPARENT | TOOLWINDOW | NOACTIVATE. Native hit testing also fails through.
             Native.SetWindowLong(Handle, -20, Native.GetWindowLong(Handle, -20) | 0x20 | 0x80 | 0x08000000);
             Native.SetWindowDisplayAffinity(Handle, 0x11);
-            HwndSource.FromHwnd(Handle)?.AddHook(Hook);
+            var source = HwndSource.FromHwnd(Handle);
+            if (source is not null)
+            {
+                source.AddHook(Hook);
+                // WPF's default DPI resize can activate the HWND. This border-only
+                // visual keeps its initial render scale; PointAt owns physical bounds.
+                // Do not use this policy for a window containing text or controls.
+                source.DpiChanged += (_, args) => args.Handled = true;
+            }
         };
     }
 
@@ -52,7 +60,7 @@ public sealed class OverlayWindow : Window
             Math.Max(1, (int)Math.Ceiling(target.Width)), Math.Max(1, (int)Math.Ceiling(target.Height)), 0x10);
         if (!Position()) { Hide(); return; }
         Show();
-        // WM_DPICHANGED during Show can adjust size: restore the physical target rectangle.
+        // Restore the physical rectangle after WPF's initial show/layout.
         if (!Position()) Hide();
     }
 }

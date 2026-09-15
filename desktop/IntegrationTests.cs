@@ -63,6 +63,8 @@ internal static class IntegrationTests
             demo = new DemoWindow { WindowStartupLocation = WindowStartupLocation.CenterScreen };
             stage("overlay-create");
             overlay = new OverlayWindow();
+            int overlayActivations = 0;
+            overlay.Activated += (_, _) => overlayActivations++;
             var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             void OnRendered(object? sender, EventArgs args) => rendered.TrySetResult();
             demo.ContentRendered += OnRendered;
@@ -78,7 +80,7 @@ internal static class IntegrationTests
             Require(demo.IsLoaded && demo.IsVisible && demo.ActualWidth > 0 && demo.ActualHeight > 0
                 && Native.IsWindowVisible(new WindowInteropHelper(demo).Handle));
             stage("demo-activate");
-            Require(demo.Activate());
+            await NativeTests.RequireForeground(demo);
             await Idle(ct);
             stage("demo-foreground");
             var handle = new WindowInteropHelper(demo).Handle;
@@ -139,8 +141,21 @@ internal static class IntegrationTests
                 stage($"overlay-{state}");
                 Require(Native.GetForegroundWindow() == handle);
                 overlay.PointAt(evidence.Rect, target!.Box);
+                stage($"overlay-{state}-synchronous-foreground");
+                Require(Native.GetForegroundWindow() == handle && overlayActivations == 0);
                 await Idle(ct);
-                Require(overlay.IsVisible && Native.IsWindowVisible(overlay.Handle) && Native.GetForegroundWindow() == handle);
+                stage($"overlay-{state}-wpf-visible");
+                Require(overlay.IsVisible);
+                stage($"overlay-{state}-native-visible");
+                Require(Native.IsWindowVisible(overlay.Handle));
+                stage($"overlay-{state}-foreground-preserved");
+                if (Native.GetForegroundWindow() != handle)
+                {
+                    var focus = Native.GetForegroundWindow();
+                    checks.Add(focus == overlay.Handle ? "unexpected-overlay-foreground" : focus == 0 ? "unexpected-no-foreground" : "unexpected-other-foreground");
+                    checks.Add($"overlay-noactivate-style-{(Native.GetWindowLong(overlay.Handle, -20) & 0x08000000) != 0}");
+                }
+                Require(Native.GetForegroundWindow() == handle && overlayActivations == 0);
                 const int styles = 0x20 | 0x80 | 0x08000000;
                 Require((Native.GetWindowLong(overlay.Handle, -20) & styles) == styles && !overlay.IsHitTestVisible && !overlay.ShowActivated);
                 var physical = Safety.PhysicalTarget(evidence.Rect, target.Box);
@@ -149,6 +164,15 @@ internal static class IntegrationTests
                     && outline.Width == (int)Math.Ceiling(physical.Width) && outline.Height == (int)Math.Ceiling(physical.Height));
                 Require(Native.SendMessage(overlay.Handle, 0x84, 0, 0) == new nint(-1));
                 Require(Native.SendMessage(overlay.Handle, 0x21, 0, 0) == new nint(3));
+                // Reposition while visible, then hide/re-show without borrowing focus.
+                overlay.PointAt(evidence.Rect, target.Box);
+                overlay.Hide();
+                overlay.PointAt(evidence.Rect, target.Box);
+                await Idle(ct);
+                Require(overlayActivations == 0 && Native.GetForegroundWindow() == handle
+                    && overlay.IsVisible && Native.IsWindowVisible(overlay.Handle)
+                    && Native.GetWindowRect(overlay.Handle, out var reshown) && outline.Same(reshown));
+                checks.Add($"overlay-focus-preserved-{state}");
 
                 stage($"invoke-own-demo-{state}");
                 var button = Buttons(demo).Single(b => AutomationProperties.GetAutomationId(b) == "DemoStep" + state);
