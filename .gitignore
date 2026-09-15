@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+desktop/bin/
+desktop/obj/
+.env
+.env.*
+!.env.example
+*.log

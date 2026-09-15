@@ -1,0 +1,8 @@
+# Local backend and explicitly configured optional model transport.
+fastapi==0.104.1
+starlette==0.27.0
+uvicorn==0.24.0
+pydantic==2.6.4
+pydantic-core==2.16.3
+httpx==0.28.1
+Pillow==12.1.1

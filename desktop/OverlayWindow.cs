@@ -1,0 +1,58 @@
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media;
+
+namespace MSGuide.Desktop;
+
+public sealed class OverlayWindow : Window
+{
+    private readonly Border outline;
+    public nint Handle => new WindowInteropHelper(this).Handle;
+
+    public OverlayWindow()
+    {
+        Title = "MSGuide target overlay";
+        WindowStyle = WindowStyle.None;
+        ResizeMode = ResizeMode.NoResize;
+        AllowsTransparency = true;
+        Background = Brushes.Transparent;
+        ShowActivated = false;
+        ShowInTaskbar = false;
+        Topmost = true;
+        IsHitTestVisible = false;
+        Focusable = false;
+        MinWidth = MinHeight = 1;
+        outline = new Border { BorderBrush = new SolidColorBrush(Color.FromRgb(104, 224, 255)), BorderThickness = new Thickness(3), CornerRadius = new CornerRadius(5), Background = Brushes.Transparent };
+        Content = outline;
+        SourceInitialized += (_, _) =>
+        {
+            // WS_EX_TRANSPARENT | TOOLWINDOW | NOACTIVATE. Native hit testing also fails through.
+            Native.SetWindowLong(Handle, -20, Native.GetWindowLong(Handle, -20) | 0x20 | 0x80 | 0x08000000);
+            Native.SetWindowDisplayAffinity(Handle, 0x11);
+            HwndSource.FromHwnd(Handle)?.AddHook(Hook);
+        };
+    }
+
+    private nint Hook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        if (message == 0x84) { handled = true; return new nint(-1); } // HTTRANSPARENT
+        if (message == 0x21) { handled = true; return new nint(3); } // MA_NOACTIVATE
+        return 0;
+    }
+
+    public void PointAt(Native.RECT captureRect, double[] box)
+    {
+        if (!Safety.ValidBox(box)) { Hide(); return; }
+        var target = Safety.PhysicalTarget(captureRect, box);
+        // Native position/size are physical pixels. WPF only draws the border in local DIPs;
+        // no desktop-coordinate division by a single primary-monitor scale.
+        new WindowInteropHelper(this).EnsureHandle();
+        bool Position() => Native.SetWindowPos(Handle, new nint(-1), (int)Math.Floor(target.X), (int)Math.Floor(target.Y),
+            Math.Max(1, (int)Math.Ceiling(target.Width)), Math.Max(1, (int)Math.Ceiling(target.Height)), 0x10);
+        if (!Position()) { Hide(); return; }
+        Show();
+        // WM_DPICHANGED during Show can adjust size: restore the physical target rectangle.
+        if (!Position()) Hide();
+    }
+}
