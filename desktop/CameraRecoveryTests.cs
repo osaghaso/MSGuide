@@ -1,0 +1,119 @@
+namespace MSGuide.Desktop;
+
+internal static class CameraRecoveryTests
+{
+    public static void Run()
+    {
+        static void Check(bool condition, string name)
+        {
+            if (!condition) throw new InvalidOperationException($"Camera recovery test failed: {name}.");
+        }
+
+        Check(CameraRecoverySession.IsCameraHelpIntent("Help me fix my camera in Teams"), "typed intent");
+        Check(CameraRecoverySession.IsCameraHelpIntent("My meeting video is not working"), "meeting video intent");
+        Check(!CameraRecoverySession.IsCameraHelpIntent("Help me find the build error"), "unrelated intent");
+
+        var session = new CameraRecoverySession();
+        Check(session.State == CameraRecoveryState.Idle && !session.LocalVerifierPassed, "idle");
+        session.Start();
+        session.ChooseTeamsWindow("teams-1", "Weekly meeting | Microsoft Teams");
+        Check(session.State == CameraRecoveryState.NeedsTeamsObservation && session.CanInspectTeams, "choose Teams");
+        session.ApplyTeamsObservation(new("teams-1", TeamsCameraFinding.PermissionMayBeOff, ""));
+        Check(session.State == CameraRecoveryState.Diagnosis && session.CanOpenSettings, "diagnosis");
+        session.PrepareToOpenSettings();
+        session.MarkSettingsOpened();
+        Check(session.State == CameraRecoveryState.NeedsSettingsObservation && session.CanInspectSettings, "settings opened");
+        session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
+            new CameraRecoveryTarget("settings-observation-1", "Let desktop apps access your camera")));
+        Check(session.State == CameraRecoveryState.VerifiedTarget && session.CanShowTarget
+            && session.CanCheckChangedSetting, "verified target");
+        session.RecordTargetPresentation(new(true, ""));
+        session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, ""));
+        Check(session.State == CameraRecoveryState.PermissionObservedOn && !session.LocalVerifierPassed
+            && session.CanReturnToTeams, "permission alone not ready");
+        session.MarkReturnedToTeams();
+        session.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, true, ""));
+        Check(session.State == CameraRecoveryState.Ready && session.LocalVerifierPassed, "local verifier ready");
+
+        var falseReady = PermissionOnSession();
+        falseReady.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, false, ""));
+        Check(falseReady.State == CameraRecoveryState.UnresolvedAfterPermission
+            && !falseReady.LocalVerifierPassed, "false verifier cannot claim ready");
+
+        var unresolved = PermissionOnSession();
+        unresolved.ApplyVerification(new("teams-1", CameraVerificationFinding.Unresolved, false, ""));
+        Check(unresolved.State == CameraRecoveryState.UnresolvedAfterPermission, "unresolved after permission");
+
+        var alreadyOn = StartedSession();
+        alreadyOn.ApplyTeamsObservation(new("teams-1",
+            TeamsCameraFinding.PermissionAlreadyOnOrDifferentCause, "Camera ready"));
+        Check(alreadyOn.State == CameraRecoveryState.AlreadyOnOrWrongCause
+            && !alreadyOn.Detail.Contains("Camera ready", StringComparison.OrdinalIgnoreCase),
+            "already on wrong cause cannot inject ready claim");
+
+        var managed = StartedSession();
+        managed.ApplyTeamsObservation(new("teams-1", TeamsCameraFinding.ManagedOrDisabled, ""));
+        Check(managed.State == CameraRecoveryState.ManagedOrDisabled, "managed");
+
+        var stale = StartedSession();
+        stale.ApplyTeamsObservation(new("other-window", TeamsCameraFinding.PermissionMayBeOff, ""));
+        Check(stale.State == CameraRecoveryState.StaleOrMoved, "stale target");
+
+        var unsupported = StartedSession();
+        unsupported.ApplyTeamsObservation(new("teams-1", TeamsCameraFinding.Unsupported, ""));
+        Check(unsupported.State == CameraRecoveryState.Unsupported
+            && unsupported.Detail.Contains("No camera-recovery screenshot", StringComparison.Ordinal),
+            "unsupported");
+
+        var settingsManaged = SettingsSession();
+        settingsManaged.ApplySettingsObservation(new(CameraSettingsFinding.ManagedOrDisabled, ""));
+        Check(settingsManaged.State == CameraRecoveryState.ManagedOrDisabled, "settings managed");
+
+        var settingsStale = SettingsSession();
+        settingsStale.ApplySettingsObservation(new(CameraSettingsFinding.StaleOrMoved, ""));
+        Check(settingsStale.State == CameraRecoveryState.StaleOrMoved, "settings stale");
+
+        var cancelled = StartedSession();
+        cancelled.Cancel();
+        Check(cancelled.State == CameraRecoveryState.Cancelled && !cancelled.LocalVerifierPassed, "cancelled");
+
+        bool invalidTransitionRejected = false;
+        try { new CameraRecoverySession().MarkReturnedToTeams(); }
+        catch (InvalidOperationException) { invalidTransitionRejected = true; }
+        Check(invalidTransitionRejected, "invalid transition");
+    }
+
+    private static CameraRecoverySession StartedSession()
+    {
+        var session = new CameraRecoverySession();
+        session.Start();
+        session.ChooseTeamsWindow("teams-1", "Microsoft Teams");
+        return session;
+    }
+
+    private static CameraRecoverySession PermissionOnSession()
+    {
+        var session = SettingsSession();
+        session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, ""));
+        session.MarkReturnedToTeams();
+        return session;
+    }
+
+    private static CameraRecoverySession SettingsSession()
+    {
+        var session = StartedSession();
+        session.ApplyTeamsObservation(new("teams-1", TeamsCameraFinding.PermissionMayBeOff, ""));
+        session.PrepareToOpenSettings();
+        session.MarkSettingsOpened();
+        return session;
+    }
+}
+
+public partial class App
+{
+    static App()
+    {
+        if (Environment.GetEnvironmentVariable("MSGUIDE_CAMERA_RECOVERY_TESTS") == "1")
+            CameraRecoveryTests.Run();
+    }
+}

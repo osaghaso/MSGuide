@@ -29,6 +29,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializeCameraRecovery();
         speech.Transcribed += text => Dispatcher.BeginInvoke(() =>
         {
             if (!closing && speech.Listening)
@@ -124,6 +125,7 @@ public partial class MainWindow : Window
         WindowPicker.SelectedItem = windows.FirstOrDefault(w => w.Id == selected?.Id)
             ?? windows.FirstOrDefault(w => w.Title == "MSGuide Demo");
         refreshing = false;
+        RefreshCameraWindows(windows);
     }
 
     private CancellationToken BeginWork()
@@ -147,8 +149,9 @@ public partial class MainWindow : Window
         SendButton.IsEnabled = false;
     }
 
-    private void CancelWork()
+    private void CancelWork(bool cancelCameraRecovery = true)
     {
+        if (cancelCameraRecovery) CancelCameraRecoveryForSupersession();
         StopDemoTask();
         generation++;
         operation?.Cancel(); operation?.Dispose(); operation = null;
@@ -362,7 +365,13 @@ public partial class MainWindow : Window
     private void Refresh_Click(object sender, RoutedEventArgs e) { CancelWork(); RefreshWindows(); }
     private async void Health_Click(object sender, RoutedEventArgs e) => await CheckHealth();
     private void Window_Changed(object sender, SelectionChangedEventArgs e) { if (loaded && !refreshing) CancelWork(); }
-    private void Prompt_Changed(object sender, TextChangedEventArgs e) { if (loaded) CancelWork(); }
+    private void Prompt_Changed(object sender, TextChangedEventArgs e)
+    {
+        if (!loaded) return;
+        bool cameraIntent = CameraRecoverySession.IsCameraHelpIntent(PromptBox.Text);
+        CancelWork();
+        if (cameraIntent) StartCameraRecovery(fromPrompt: true);
+    }
     private void Approval_Changed(object sender, RoutedEventArgs e)
     {
         if (!loaded) return;
@@ -375,11 +384,16 @@ public partial class MainWindow : Window
     private void Exit_Click(object sender, RoutedEventArgs e) => Close();
     private void Mic_Click(object sender, RoutedEventArgs e)
     {
-        CancelWork();
+        CancelWork(cancelCameraRecovery: false);
         microphoneStarted = DateTimeOffset.UtcNow;
         speech.Toggle();
     }
-    private void StopSpeech_Click(object sender, RoutedEventArgs e) { speech.Stop(); CancelWork(); StatusText.Text = "Speech and pending guidance stopped."; }
+    private void StopSpeech_Click(object sender, RoutedEventArgs e)
+    {
+        speech.Stop();
+        CancelWork(cancelCameraRecovery: false);
+        StatusText.Text = "Speech and pending generic guidance stopped. Camera recovery, if active, remains guide-only.";
+    }
     private void Speak_Click(object sender, RoutedEventArgs e) => speech.Speak(AnswerText.Text);
 
     private void Cleanup()
