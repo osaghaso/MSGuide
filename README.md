@@ -33,6 +33,9 @@ No virtual-environment activation is required. The launcher expects the environm
   local state and verification.
 - `-CameraFixture`: run the camera recovery card against its clearly labelled
   deterministic fixture. This does not claim real Teams camera recovery.
+- `-Shareable`: explicitly allow MSGuide and its guidance overlay to appear in
+  full-screen sharing. They are excluded from capture by default. Share the
+  **Screen**, not an individual Teams window.
 
 ## Try the built-in demo
 

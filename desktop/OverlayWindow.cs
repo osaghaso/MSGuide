@@ -29,7 +29,7 @@ public sealed class OverlayWindow : Window
         {
             // WS_EX_TRANSPARENT | TOOLWINDOW | NOACTIVATE. Native hit testing also fails through.
             Native.SetWindowLong(Handle, -20, Native.GetWindowLong(Handle, -20) | 0x20 | 0x80 | 0x08000000);
-            Native.SetWindowDisplayAffinity(Handle, 0x11);
+            Native.SetWindowDisplayAffinity(Handle, Native.MSGuideDisplayAffinity);
             var source = HwndSource.FromHwnd(Handle);
             if (source is not null)
             {

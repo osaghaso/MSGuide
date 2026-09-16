@@ -8,6 +8,23 @@ internal static class SelfTests
         Check(DemoTaskSession.Next(0)?.Label == "View logs");
         Check(DemoTaskSession.Next(1)?.Label == "Open troubleshooting");
         Check(DemoTaskSession.Next(2) is null && DemoTaskSession.Next(3) is null && DemoTaskSession.Next(-1) is null);
+        string? previousShareable = Environment.GetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE");
+        try
+        {
+            Environment.SetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE", null);
+            Check(!Native.ShareableDemo
+                && Native.MSGuideDisplayAffinity == Native.DisplayAffinityExcludeFromCapture);
+            Environment.SetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE", "1");
+            Check(Native.ShareableDemo
+                && Native.MSGuideDisplayAffinity == Native.DisplayAffinityNone);
+            Environment.SetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE", "true");
+            Check(!Native.ShareableDemo
+                && Native.MSGuideDisplayAffinity == Native.DisplayAffinityExcludeFromCapture);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE", previousShareable);
+        }
         (string Message, string Code)[] captureFailures =
         [
             ("A previous window capture is still returning. Use another application after it finishes, or restart MSGuide.", "provider-busy"),

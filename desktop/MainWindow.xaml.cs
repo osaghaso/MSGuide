@@ -29,6 +29,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ConfigureScreenShareStatus();
         InitializeCameraRecovery();
         speech.Transcribed += text => Dispatcher.BeginInvoke(() =>
         {
@@ -61,7 +62,13 @@ public partial class MainWindow : Window
 
     private void InitializeNative(object? sender, EventArgs e)
     {
-        Native.SetWindowDisplayAffinity(Handle, 0x11);
+        if (!Native.SetWindowDisplayAffinity(Handle, Native.MSGuideDisplayAffinity))
+        {
+            ScreenShareText.Text = "SHARE STATUS UNKNOWN";
+            ScreenSharePill.SetResourceReference(Border.BackgroundProperty, "DangerSoftBrush");
+            ScreenShareText.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
+            ScreenSharePill.ToolTip = "Windows did not confirm the requested screen-sharing protection.";
+        }
         HwndSource.FromHwnd(Handle)?.AddHook(WindowHook);
         string configured = Environment.GetEnvironmentVariable("MSGUIDE_HOTKEY") ?? "Ctrl+Alt+M";
         try
@@ -78,6 +85,19 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
         { HotkeyText.Text = "Invalid MSGUIDE_HOTKEY. Use Ctrl+Alt+M format; taskbar invocation is still available."; }
+    }
+
+    private void ConfigureScreenShareStatus()
+    {
+        bool shareable = Native.ShareableDemo;
+        ScreenShareText.Text = shareable ? "VISIBLE IN SHARE" : "NOT SHARED";
+        ScreenSharePill.SetResourceReference(Border.BackgroundProperty,
+            shareable ? "WarningSoftBrush" : "SurfaceRaisedBrush");
+        ScreenShareText.SetResourceReference(TextBlock.ForegroundProperty,
+            shareable ? "WarningBrush" : "MutedTextBrush");
+        ScreenSharePill.ToolTip = shareable
+            ? "Demo mode: MSGuide and its guidance overlay can appear in full-screen sharing."
+            : "Privacy default: MSGuide and its guidance overlay are excluded from screen capture.";
     }
 
     private nint WindowHook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)

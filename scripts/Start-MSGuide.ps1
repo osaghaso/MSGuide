@@ -6,7 +6,8 @@ param(
     [switch]$CaptureTest,
     [switch]$SkipBuild,
     [switch]$Copilot,
-    [switch]$CameraFixture
+    [switch]$CameraFixture,
+    [switch]$Shareable
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +55,9 @@ try {
         if ($CameraFixture) {
             $info.Environment['MSGUIDE_CAMERA_RECOVERY_MODE'] = 'fixture'
         }
+        if ($Shareable) {
+            $info.Environment['MSGUIDE_ALLOW_SCREEN_SHARE'] = '1'
+        }
         if ($Copilot) {
             $copilotCommand = Get-Command copilot -ErrorAction Stop
             $info.Environment['MSGUIDE_GUIDANCE_PROVIDER'] = 'copilot-sdk'
@@ -93,6 +97,9 @@ try {
     }
     if (!$ready) { throw 'Local API did not become ready. Check dependency installation and optional provider configuration.' }
     Write-Host "MSGuide ready at $url (local single-user mode). No token is written to disk."
+    if ($Shareable) {
+        Write-Warning 'Shareable demo mode is on. MSGuide can appear when you share the full screen.'
+    }
     $start = New-LocalProcess $desktop
     # Only the Python service receives remote model credentials.
     [void]$start.Environment.Remove('MSGUIDE_MODEL_API_KEY')

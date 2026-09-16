@@ -5,6 +5,14 @@ namespace MSGuide.Desktop;
 
 public static class Native
 {
+    public const uint DisplayAffinityNone = 0;
+    public const uint DisplayAffinityExcludeFromCapture = 0x11;
+    public static bool ShareableDemo =>
+        string.Equals(Environment.GetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE"), "1",
+            StringComparison.Ordinal);
+    public static uint MSGuideDisplayAffinity =>
+        ShareableDemo ? DisplayAffinityNone : DisplayAffinityExcludeFromCapture;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {

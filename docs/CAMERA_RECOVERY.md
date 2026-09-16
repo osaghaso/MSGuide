@@ -89,8 +89,12 @@ desktop\bin\Debug\net10.0-windows10.0.19041.0\MSGuide.Desktop.exe --self-test --
 ### Fixture first
 
 ```powershell
-.\scripts\Start-MSGuide.ps1 -CameraFixture
+.\scripts\Start-MSGuide.ps1 -CameraFixture -Shareable
 ```
+
+`-Shareable` is an explicit demo-only opt-in. MSGuide remains excluded from
+screen capture by default; in Teams, share the full **Screen** rather than the
+Teams application window.
 
 1. Open Teams and choose its window in the camera card.
 2. Run the complete guide. The first verification requests reinitialization;
