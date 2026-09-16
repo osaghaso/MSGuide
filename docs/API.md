@@ -67,7 +67,7 @@ The desktop opts in on the existing `/v1/guidance` route and must select an expl
 
 This path bypasses the configured guidance provider. The server derives and retains only bounded, volatile session progress from fresh observations. `teams-camera-recovery-win11-24h2-en-US-fixture-v1` is a synthetic fixture fallback, not a live Windows Settings UIA support claim. Its predicates rank exact automation IDs above exact fixture labels and also require the configured application, role, framework, and confidence.
 
-The optional response `cameraRecovery` contains `profile`, `evidenceBasis` (`fixture` or `liveProbe`), `fixtureSupported`, `settingsUiaProven`, `rawPixelEvidenceUsed` (always `false`), `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `teams_settings_menu_open`, `teams_devices_open`, `camera_settings_open`, `system_camera_settings_unverified`, `system_camera_settings_uninspectable`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
+The optional response `cameraRecovery` contains `profile`, `evidenceBasis` (`fixture` or `liveProbe`), `fixtureSupported`, `settingsUiaProven`, `rawPixelEvidenceUsed` (always `false`), optional pinned `settingsLaunchUri`, `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `teams_settings_menu_open`, `teams_devices_open`, `camera_settings_open`, `system_camera_settings_unverified`, `system_camera_settings_uninspectable`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
 
 The live-probe profile is:
 
@@ -79,7 +79,7 @@ The live-probe profile is:
 }
 ```
 
-It recognizes only probe-backed New Teams navigation evidence: `more-options-header`, the Settings item, the Devices `TabItem`, Devices-page markers `AudioSettings`/`VideoSettings`, and `open_camera_settings`. The September 16 target-machine probe selected Teams PID 4444 while accessible WebView descendants reported PID 16836, so the backend deliberately does not impose same-process filtering after the desktop has rooted capture to the selected HWND.
+It recognizes only probe-backed New Teams navigation evidence: `more-options-header`, the Settings item, the Devices `TabItem`, Devices-page markers `AudioSettings`/`VideoSettings`, and the originally observed `open_camera_settings`. The September 16 target-machine probe selected Teams PID 4444 while accessible WebView descendants reported PID 16836, so the backend deliberately does not impose same-process filtering after the desktop has rooted capture to the selected HWND.
 
 That v1 profile preserves the first probe's fail-closed result: zero UIA descendants from the then-active Settings windows. It never targets Windows Settings or accepts completion.
 
@@ -101,7 +101,11 @@ After closing the specific existing `SystemSettings` process and relaunching `ms
 
 Both global toggles must be explicitly on. The packaged Teams toggle must be enabled, onscreen, and uniquely matched. The pinned golden path is that individual toggle observed off, highlighted for the user to change, then observed on in a newer capture. Already-on, wrong-page, global-off, disabled, offscreen, ambiguous, stale, or changed evidence fails closed. `SystemSettings_CapabilityAccess_Camera_ClassicGlobal_ToggleSwitch` may be present offscreen but is not the selected packaged-app target.
 
-The pinned profile then requires the probe-backed Teams Devices surface and Camera `ComboBox`, followed by the existing fresh bound `localCameraReady` verifier. Permission-on alone remains incomplete. Settings and Teams provider PIDs may differ from their top-level processes; selected-HWND rooting, not PID equality, is the capture boundary.
+The 20-read stability census found `VideoSettings` and `MSTeams_8wekyb3d8bbwe_ToggleSwitch` in 20/20 reads, each completing in 119–232 ms. System global, app global, and Teams permission states were consistently on; the Teams toggle was enabled and visible. Provider PIDs consistently differed from top-level PIDs. This evidence is scoped only to the current open pages and pinned machine.
+
+`open_camera_settings` was not realized in any of those 20 reads. The pinned profile therefore does not return that UIA target. On the Teams Devices state it returns untargeted `next_step` guidance with `settingsLaunchUri: "ms-settings:privacy-webcam"`. The desktop may use that hard-coded pinned URI, but must then capture and verify all exact Camera page IDs; URI dispatch is never proof of landing.
+
+After permission restoration, the pinned profile requires the probe-backed Teams Devices surface and Camera `ComboBox`, followed by the existing fresh bound `localCameraReady` verifier. Permission-on alone remains incomplete. Settings and Teams provider PIDs may differ from their top-level processes; selected-HWND rooting, not PID equality, is the capture boundary.
 
 On this machine, `PrintWindow` flag 0 returned black while flag 2 returned rendered New Teams and Camera Settings content, including the live preview. Flag 2 is undocumented and remains a desktop-measured, pinned-machine fallback, never a backend invariant. Raw `imageBase64` is sanitized in memory, ignored by the deterministic engine, never used to advance state, and never persisted by this service. Preview pixels may be personal; the desktop must avoid saving them. The earlier blank `CaptureTest` and demo-activation `IntegrationTest` failure are not treated as successful end-to-end validation.
 

@@ -491,6 +491,37 @@ def test_profile_switch_cannot_reuse_fixture_permission_progress(client):
     data = post(client, sid, devices, profile=PINNED_PROFILE).json()
     assert data["status"] == "next_step"
     assert data["cameraRecovery"]["state"] == "teams_devices_open"
+    assert data["cameraRecovery"]["settingsLaunchUri"] == "ms-settings:privacy-webcam"
+    assert data["target"] is None
+
+
+def test_pinned_devices_uses_verified_uri_flow_without_unrealized_button(client):
+    sid = start(client)
+    devices = observation(
+        "stable-video-settings",
+        "Microsoft Teams",
+        [
+            element(
+                "group", "Video settings", "VideoSettings", "WebView2",
+                target_id="stable.video", process_id=16836,
+            ),
+            element(
+                "combobox", "Camera", "camera-selector", "WebView2",
+                target_id="stable.camera", process_id=16836,
+                is_offscreen=False,
+            ),
+        ],
+    )
+    devices["rootProcessId"] = 4444
+    data = post(client, sid, devices, profile=PINNED_PROFILE).json()
+    assert data["status"] == "next_step"
+    assert data["target"] is None
+    assert data["cameraRecovery"]["settingsLaunchUri"] == "ms-settings:privacy-webcam"
+    assert data["cameraRecovery"]["evidence"] == [
+        "teams_selected_window",
+        "teams_devices_surface",
+        "pinned_camera_settings_uri",
+    ]
 
 
 def test_unknown_camera_profile_is_rejected(client):

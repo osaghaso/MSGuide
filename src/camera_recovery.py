@@ -316,8 +316,9 @@ class CameraRecoveryEngine:
         *,
         verified: bool = False,
         profile: str = FIXTURE_PROFILE,
+        settings_launch_uri: str | None = None,
     ) -> CameraRecoveryResponse:
-        return CameraRecoveryResponse(
+        payload = dict(
             profile=profile,
             evidenceBasis=(CameraEvidenceBasis.FIXTURE
                            if profile == FIXTURE_PROFILE else CameraEvidenceBasis.LIVE_PROBE),
@@ -329,6 +330,9 @@ class CameraRecoveryEngine:
             permissionState=permission,
             verificationRequired=not verified,
         )
+        if settings_launch_uri is not None:
+            payload["settingsLaunchUri"] = settings_launch_uri
+        return CameraRecoveryResponse(**payload)
 
     @staticmethod
     def _clarification(
@@ -363,6 +367,25 @@ class CameraRecoveryEngine:
                 target=self._target(session_id, observation, index),
             ),
             self._recovery(state, evidence, permission, profile=profile),
+        )
+
+    def _untargeted_next_step(
+        self,
+        state: CameraRecoveryState,
+        instruction: str,
+        evidence: list[CameraEvidenceKind],
+        *,
+        profile: str,
+        settings_launch_uri: str,
+    ) -> CameraDecision:
+        return CameraDecision(
+            GuidanceResult(status="next_step", instruction=instruction),
+            self._recovery(
+                state,
+                evidence,
+                profile=profile,
+                settings_launch_uri=settings_launch_uri,
+            ),
         )
 
     def guide(
@@ -525,6 +548,15 @@ class CameraRecoveryEngine:
             )
         if _has_match(observation, LIVE_DEVICES_MARKER):
             evidence.append(CameraEvidenceKind.TEAMS_DEVICES_SURFACE)
+            if profile_name == PINNED_PROFILE:
+                evidence.append(CameraEvidenceKind.PINNED_CAMERA_SETTINGS_URI)
+                return self._untargeted_next_step(
+                    CameraRecoveryState.TEAMS_DEVICES_OPEN,
+                    "Open the pinned Camera privacy URI, then verify the exact Camera page IDs; do not assume the URI landing.",
+                    evidence,
+                    profile=profile_name,
+                    settings_launch_uri="ms-settings:privacy-webcam",
+                )
             status, index = _candidate(observation, LIVE_OPEN_CAMERA_SETTINGS)
             if status == "ambiguous":
                 return self._clarification(

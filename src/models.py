@@ -84,6 +84,7 @@ class CameraEvidenceKind(str, Enum):
     TEAMS_DEVICES_SURFACE = "teams_devices_surface"
     TEAMS_CAMERA_SELECTOR = "teams_camera_selector"
     OPEN_SYSTEM_CAMERA_SETTINGS = "open_system_camera_settings"
+    PINNED_CAMERA_SETTINGS_URI = "pinned_camera_settings_uri"
     CAMERA_TOGGLE_OFF = "camera_toggle_off"
     CAMERA_TOGGLE_ON = "camera_toggle_on"
     CAMERA_BLOCK_INDICATOR = "camera_block_indicator"
@@ -258,6 +259,7 @@ class CameraRecoveryResponse(Contract):
     fixtureSupported: StrictBool
     settingsUiaProven: StrictBool
     rawPixelEvidenceUsed: Literal[False] = False
+    settingsLaunchUri: Literal["ms-settings:privacy-webcam"] | None = None
     state: CameraRecoveryState
     evidence: Annotated[list[CameraEvidenceKind], Field(max_length=12)]
     permissionState: CameraPermissionState = CameraPermissionState.UNKNOWN
@@ -270,6 +272,10 @@ class CameraRecoveryResponse(Contract):
                 or fixture != (self.evidenceBasis == CameraEvidenceBasis.FIXTURE)
                 or self.settingsUiaProven != self.profile.endswith("-pinned-20260916-v2")):
             raise ValueError("Camera evidence basis must match the selected profile")
+        if (self.settingsLaunchUri is not None
+                and (not self.profile.endswith("-pinned-20260916-v2")
+                     or self.state != CameraRecoveryState.TEAMS_DEVICES_OPEN)):
+            raise ValueError("Camera settings launch URI is limited to the pinned Devices state")
         return self
 
 
@@ -289,6 +295,8 @@ class GuidanceResponse(GuidanceResult):
                 or (ready and self.cameraRecovery.profile
                     == "teams-camera-recovery-new-teams-uia-probe-20260916-v1")):
             raise ValueError("Camera completion requires accepted readiness evidence")
+        if self.cameraRecovery.settingsLaunchUri is not None and self.status != "next_step":
+            raise ValueError("Camera settings launch guidance must be a next step")
         return self
 
 
