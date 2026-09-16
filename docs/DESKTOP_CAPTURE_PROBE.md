@@ -35,3 +35,21 @@ References:
 
 - https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/tree/master/dotnet/WPF/ScreenCapture
 - https://learn.microsoft.com/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow
+
+## Live target findings (2026-09-16)
+
+- New Teams exposed a rich WebView UIA subtree whose provider process differed
+  from the selected top-level window process. Production traversal therefore
+  anchors the Raw View walk at the exact selected HWND and permits bounded
+  cross-process descendants. Evidence includes AutomationId, FrameworkId,
+  enabled/targetable state, and TogglePattern state. Observed Teams IDs included
+  `more-options-header`, `AudioSettings`, `VideoSettings`, and
+  `open_camera_settings`.
+- Windows Camera Settings exposed zero UIA descendants from both its CoreWindow
+  and ApplicationFrameWindow on the probed Windows build; exact searches also
+  found no camera-access toggles. Settings UIA targeting is unproven. Share WGC
+  visual evidence only with explicit image consent; otherwise keep fixture or
+  unsupported fallback explicit.
+- On the same machine, the legacy owned-window CaptureTest produced a blank
+  PrintWindow frame and IntegrationTest failed foreground activation. Neither
+  result is treated as evidence that PrintWindow or Settings UIA is supported.

@@ -151,7 +151,7 @@ public static class CaptureService
         var text = new List<string>();
         var clock = Stopwatch.StartNew();
         int visited = 0, chars = 0;
-        string note = "Bounded UI Automation evidence only (not pixel OCR). Password/offscreen subtrees excluded; image is NOT redacted.";
+        string note = "Bounded UI Automation evidence only (not pixel OCR). Password/offscreen subtrees excluded; cross-process descendants are included only beneath the selected HWND root; image is NOT redacted.";
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -184,7 +184,7 @@ public static class CaptureService
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
                         bool enabled = value.IsEnabled;
                         elements.Add(new(role, name, box, TargetId: AutomationEvidence.TargetId(window,
-                            role, name, box, automationId, frameworkId, runtimeId),
+                            role, name, box, automationId, frameworkId, value.ProcessId, runtimeId),
                             AutomationId: automationId, FrameworkId: frameworkId,
                             IsEnabled: enabled, Targetable: enabled, ToggleState: toggleState,
                             HelpText: AutomationEvidence.Optional(value.HelpText, 256),

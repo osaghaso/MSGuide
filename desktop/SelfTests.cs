@@ -77,11 +77,13 @@ internal static class SelfTests
         Check(!identity.SameIdentity(43, "Chrome_WidgetWin_1"));
         Check(!identity.SameIdentity(42, "ApplicationFrameWindow"));
         string stableTarget = AutomationEvidence.TargetId(identity, "button", "Camera",
-            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", [1, 2, 3]);
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", 16836, [1, 2, 3]);
         Check(stableTarget == AutomationEvidence.TargetId(identity, "button", "Camera",
-            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", [1, 2, 3]));
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", 16836, [1, 2, 3]));
         Check(stableTarget != AutomationEvidence.TargetId(identity, "button", "Camera",
-            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", [1, 2, 4]));
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", 16836, [1, 2, 4]));
+        Check(stableTarget != AutomationEvidence.TargetId(identity, "button", "Camera",
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", 4444, [1, 2, 3]));
         Check(stableTarget.StartsWith("uia-") && stableTarget.Length == 28
             && !stableTarget.Contains("camera", StringComparison.OrdinalIgnoreCase));
         var windowBounds = new Native.RECT { Left = -100, Top = 20, Right = 700, Bottom = 620 };

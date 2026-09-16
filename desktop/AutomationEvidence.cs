@@ -22,12 +22,13 @@ internal static class AutomationEvidence
     }
 
     internal static string TargetId(WindowChoice window, string role, string label, double[] box,
-        string automationId, string frameworkId, IReadOnlyList<int>? runtimeId)
+        string automationId, string frameworkId, int providerProcessId, IReadOnlyList<int>? runtimeId)
     {
         var canonical = new StringBuilder(512)
             .Append("uia-v1|").Append(window.Id).Append('|').Append(window.ClassName)
             .Append('|').Append(role).Append('|').Append(label)
-            .Append('|').Append(automationId).Append('|').Append(frameworkId).Append('|');
+            .Append('|').Append(automationId).Append('|').Append(frameworkId)
+            .Append('|').Append(providerProcessId).Append('|');
         foreach (double coordinate in box)
             canonical.Append(coordinate.ToString("R", CultureInfo.InvariantCulture)).Append(',');
         canonical.Append('|');
