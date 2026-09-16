@@ -54,6 +54,7 @@ public partial class MainWindow
         cameraRecovery.Start();
         cameraTargetPresentationAttempted = false;
         cameraTargetShown = false;
+        RefreshWindows();
         if (CameraWindowPicker.SelectedItem is WindowChoice selected)
             cameraRecovery.ChooseTeamsWindow(selected.Id, selected.Title);
         cameraRecoveryNotice = fromPrompt
@@ -125,7 +126,11 @@ public partial class MainWindow
         CameraStartButton.IsEnabled = !cameraRecoveryBusy;
         CameraChooseWindowButton.IsEnabled = !cameraRecoveryBusy;
         CameraWindowPicker.IsEnabled = !cameraRecoveryBusy;
-        CameraInspectButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanInspectTeams;
+        bool selectedWindowValid = CameraWindowPicker.SelectedItem is WindowChoice selectedWindow
+            && selectedWindow.Matches();
+        CameraInspectButton.IsEnabled = !cameraRecoveryBusy
+            && cameraRecovery.CanInspectTeams
+            && selectedWindowValid;
         CameraPrivateCheckButton.IsEnabled = !cameraRecoveryBusy
             && (cameraRecovery.CanInspectSettings || cameraRecovery.CanVerifyTeams);
         CameraPrivateCheckButton.Content = cameraRecovery.CanInspectSettings
@@ -138,7 +143,8 @@ public partial class MainWindow
         CameraShowButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanShowTarget;
         CameraChangedCheckButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanCheckChangedSetting;
         CameraReturnButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanReturnToTeams;
-        bool canStop = cameraRecovery.State is not (CameraRecoveryState.Idle or CameraRecoveryState.Cancelled);
+        bool canStop = !cameraRecovery.IsTerminal
+            && cameraRecovery.State is not (CameraRecoveryState.Idle or CameraRecoveryState.Cancelled);
         CameraStopButton.IsEnabled = canStop;
         CameraTakeOverButton.IsEnabled = canStop;
 
@@ -146,10 +152,11 @@ public partial class MainWindow
             && (cameraRecovery.State == CameraRecoveryState.Idle || cameraRecovery.IsTerminal);
         CameraStartButton.Visibility = showRestart ? Visibility.Visible : Visibility.Collapsed;
         CameraSelectionPanel.Visibility = cameraRecovery.State == CameraRecoveryState.Idle
+                || cameraRecovery.IsTerminal
             ? Visibility.Collapsed : Visibility.Visible;
         CameraChooseWindowButton.Visibility = !cameraRecoveryBusy
                 && cameraRecovery.State == CameraRecoveryState.NeedsTeamsObservation
-                && CameraWindowPicker.SelectedItem is null
+                && !selectedWindowValid
             ? Visibility.Visible : Visibility.Collapsed;
         CameraInspectButton.Visibility = CameraInspectButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
         CameraOpenSettingsButton.Visibility = CameraOpenSettingsButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
