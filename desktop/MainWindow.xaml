@@ -25,6 +25,7 @@
               <TextBlock Text="GUIDE ONLY" Foreground="#82DCFF" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center" AutomationProperties.Name="Guide mode only"/>
             </DockPanel>
             <TextBlock Text="MSGuide can point out a verified setting, but you make every click and setting change. Permission-on is never treated as camera-ready." FontSize="12" Foreground="#D8E5F3" Margin="0,5,0,8"/>
+            <TextBlock Text="An already-open Teams camera session may survive a permission change. MSGuide may ask you to reopen prejoin or the camera surface, or relaunch Teams yourself, before the final check." FontSize="12" Foreground="#D8E5F3" Margin="0,0,0,6"/>
             <TextBlock x:Name="CameraSensingText" Text="SENSING · unsupported fallback · no screenshot" FontSize="11" Foreground="#E8C98B" AutomationProperties.Name="Camera sensing mode"/>
             <Button x:Name="CameraStartButton" Content="Start camera recovery" Click="CameraStart_Click" Background="#20658F" HorizontalAlignment="Left" AutomationProperties.Name="Start Teams camera recovery"/>
             <TextBlock x:Name="CameraStateText" Text="IDLE · no camera recovery active" FontWeight="SemiBold" Margin="0,8,0,3" AutomationProperties.LiveSetting="Assertive" AutomationProperties.Name="Camera recovery state"/>

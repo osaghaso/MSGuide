@@ -12,7 +12,7 @@ MSGuide now presents Teams camera recovery as the primary, guide-only journey. T
 6. Show a verified target, if supplied. MSGuide never clicks it.
 7. Make the change yourself and check again.
 8. Return to Teams.
-9. Run the local private verifier.
+9. Run the local private verifier. If the existing camera session survived the permission change, reopen prejoin or the camera surface, or relaunch Teams yourself, then verify again.
 
 Permission observed on is an intermediate state. Only a supplied local verifier result with `LocalVerifierPassed == true` can produce the camera-ready state.
 
@@ -22,7 +22,7 @@ Managed/disabled, permission-already-on or wrong-cause, stale/moved, unsupported
 
 The camera journey does not call the existing full-window `CaptureService` and does not fall back to that raw screenshot workflow. Teams and Settings observations enter through `ICameraRecoverySensing`; the provider must disclose whether it is controls-only, private visual, fixture, or unsupported. The default implementation reports unsupported and captures nothing.
 
-`FixtureCameraRecoverySensing` provides a deterministic test-only journey using the pinned packaged-Teams toggle ID `MSTeams_8wekyb3d8bbwe_ToggleSwitch`. It is never selected by default and ends in the distinct `FixtureComplete` state, not `Ready`. `PendingCameraRecoverySensing` is the explicit runtime fallback and reports unsupported without trying `PrintWindow`.
+`FixtureCameraRecoverySensing` provides a deterministic test-only journey using the pinned packaged-Teams toggle ID `MSTeams_8wekyb3d8bbwe_ToggleSwitch`. Prepare it with permission Off before Teams initializes the camera. The fixture requires a simulated camera reinitialization check and ends in the distinct `FixtureComplete` state, not `Ready`. `PendingCameraRecoverySensing` is the explicit runtime fallback and reports unsupported without trying `PrintWindow`.
 
 The Advanced / developer area retains the raw snapshot workflow. Its **Capture / review** action creates a local full-window screenshot before approval controls appear; nothing is uploaded until the user reviews and approves it.
 
@@ -45,6 +45,7 @@ Observations carry the selected Teams window ID so stale or mismatched results f
 - `ms-settings:privacy-webcam` can land on Settings Home when an existing Settings process is alive. Launch success is not page success. A supported observation must report `Page == CameraPrivacy`; otherwise the session enters `WrongSettingsPage` without accepting a toggle or permission claim. MSGuide never closes Settings automatically.
 - When the Camera page was reached correctly, rooted UIA exposed cross-process provider elements including `SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch`, `SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch`, `MSTeams_8wekyb3d8bbwe_ToggleSwitch`, and `SystemSettings_CapabilityAccess_Camera_ClassicGlobal_ToggleSwitch`. All three relevant visible states were on throughout the census. An initial on observation ends as already-on/wrong-cause; it does not force the permission story. The pinned golden fixture still models the individual packaged Teams toggle changed by the user from off to on.
 - On the pinned machine, `PrintWindow` flag 0 rendered black while flag 2 rendered Teams and Settings, including the live Teams preview. Flag 2 is undocumented and remains a measured, fail-closed option only. Any image-backed preview may contain personal pixels and must not be persisted.
+- A reversible live test showed that changing the packaged Teams toggle while a preview was already active caused no immediate Camera combo-box, error, or preview-contrast change in either direction after four seconds. A live toggle change is therefore neither failure nor recovery evidence. The deterministic demo must prepare permission Off before Teams initializes its camera, and final readiness may require a user-driven prejoin/camera-surface reopen or Teams relaunch.
 - Current-machine integration also saw a demo activation failure. It is not treated as camera-sensing acceptance.
 
 ## Deterministic tests

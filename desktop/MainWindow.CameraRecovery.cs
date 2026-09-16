@@ -93,7 +93,7 @@ public partial class MainWindow
         CameraStateText.Text = CameraStateLabel(cameraRecovery.State);
         CameraSensingText.Text = cameraRecoverySensing.Mode switch
         {
-            CameraRecoverySensingMode.Fixture => "SENSING · deterministic fixture · no real Teams or Settings claim",
+            CameraRecoverySensingMode.Fixture => $"SENSING · fixture · {CameraRecoveryPinnedTargets.FixturePreparation}",
             CameraRecoverySensingMode.Connected => "SENSING · connected local provider · modality must be disclosed",
             _ => "SENSING · unsupported fallback · no screenshot"
         };
@@ -129,6 +129,7 @@ public partial class MainWindow
         CameraRecoveryState.VerifiedTarget => "STEP 5 · verified target available",
         CameraRecoveryState.PermissionObservedOn => "STEP 6 · permission observed on · not yet camera-ready",
         CameraRecoveryState.NeedsLocalVerification => "STEP 7 · needs local Teams verification",
+        CameraRecoveryState.NeedsCameraReinitialization => "STEP 7 · reopen or reinitialize Teams camera, then verify again",
         CameraRecoveryState.Ready => "VERIFIED · local camera readiness check passed",
         CameraRecoveryState.FixtureComplete => "FIXTURE COMPLETE · simulated verifier passed · not camera-ready",
         CameraRecoveryState.WrongSettingsPage => "STOPPED · Windows Settings did not verify as the Camera page",
@@ -179,7 +180,8 @@ public partial class MainWindow
         CameraRecoveryState.NeedsSettingsObservation => CameraPrivateCheckButton,
         CameraRecoveryState.VerifiedTarget => CameraShowButton,
         CameraRecoveryState.PermissionObservedOn => CameraReturnButton,
-        CameraRecoveryState.NeedsLocalVerification => CameraPrivateCheckButton,
+        CameraRecoveryState.NeedsLocalVerification or CameraRecoveryState.NeedsCameraReinitialization
+            => CameraPrivateCheckButton,
         _ => CameraStartButton
     };
 

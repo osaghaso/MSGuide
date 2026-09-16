@@ -10,6 +10,7 @@ internal enum CameraRecoveryState
     VerifiedTarget,
     PermissionObservedOn,
     NeedsLocalVerification,
+    NeedsCameraReinitialization,
     Ready,
     FixtureComplete,
     WrongSettingsPage,
@@ -42,6 +43,7 @@ internal enum CameraSettingsFinding
 internal enum CameraVerificationFinding
 {
     Ready,
+    NeedsReinitialization,
     Unresolved,
     StaleOrMoved,
     Unsupported
@@ -73,6 +75,8 @@ internal static class CameraRecoveryPinnedTargets
 {
     public const string TeamsVideoSettings = "VideoSettings";
     public const string PackagedTeamsCameraToggle = "MSTeams_8wekyb3d8bbwe_ToggleSwitch";
+    public const string FixturePreparation =
+        "Set the packaged Teams camera permission Off before Teams initializes its camera.";
 }
 
 internal sealed record TeamsCameraObservation(string WindowId, TeamsCameraFinding Finding, string Detail);
@@ -134,6 +138,7 @@ internal sealed class PendingCameraRecoverySensing : ICameraRecoverySensing
 internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
 {
     private int settingsObservations;
+    private int verificationAttempts;
 
     public CameraRecoverySensingMode Mode => CameraRecoverySensingMode.Fixture;
 
@@ -165,8 +170,12 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
         WindowChoice window, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(new CameraVerificationResult(window.Id,
-            CameraVerificationFinding.Ready, true, "Fixture: simulated verifier passed.", IsFixture: true));
+        verificationAttempts++;
+        return Task.FromResult(verificationAttempts == 1
+            ? new CameraVerificationResult(window.Id, CameraVerificationFinding.NeedsReinitialization,
+                false, "Fixture: reopen the camera surface.", IsFixture: true)
+            : new CameraVerificationResult(window.Id, CameraVerificationFinding.Ready,
+                true, "Fixture: simulated verifier passed.", IsFixture: true));
     }
 
     public Task<CameraTargetPresentation> ShowTargetAsync(
@@ -193,7 +202,8 @@ internal sealed class CameraRecoverySession
     public bool CanShowTarget => State == CameraRecoveryState.VerifiedTarget && Target is not null;
     public bool CanCheckChangedSetting => State == CameraRecoveryState.VerifiedTarget;
     public bool CanReturnToTeams => State == CameraRecoveryState.PermissionObservedOn;
-    public bool CanVerifyTeams => State == CameraRecoveryState.NeedsLocalVerification
+    public bool CanVerifyTeams => State is CameraRecoveryState.NeedsLocalVerification
+            or CameraRecoveryState.NeedsCameraReinitialization
         && !string.IsNullOrWhiteSpace(TeamsWindowId);
     public bool IsTerminal => State is CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete
         or CameraRecoveryState.WrongSettingsPage or CameraRecoveryState.ManagedOrDisabled
@@ -357,7 +367,8 @@ internal sealed class CameraRecoverySession
 
     public void ApplyVerification(CameraVerificationResult result)
     {
-        Require(State == CameraRecoveryState.NeedsLocalVerification, "A Teams camera verification is not expected now.");
+        Require(State is CameraRecoveryState.NeedsLocalVerification or CameraRecoveryState.NeedsCameraReinitialization,
+            "A Teams camera verification is not expected now.");
         if (TeamsWindowId is null || result.WindowId != TeamsWindowId
             || result.Finding == CameraVerificationFinding.StaleOrMoved)
         {
@@ -367,6 +378,13 @@ internal sealed class CameraRecoverySession
         }
 
         LocalVerifierPassed = result.LocalVerifierPassed;
+        if (result.Finding == CameraVerificationFinding.NeedsReinitialization)
+        {
+            LocalVerifierPassed = false;
+            MoveTo(CameraRecoveryState.NeedsCameraReinitialization,
+                "The existing Teams camera session may have survived the permission change. Reopen prejoin or the camera surface, or relaunch Teams yourself, then run Private visual check again.");
+            return;
+        }
         if (result.Finding == CameraVerificationFinding.Ready && result.LocalVerifierPassed)
         {
             MoveTo(result.IsFixture ? CameraRecoveryState.FixtureComplete : CameraRecoveryState.Ready,

@@ -59,6 +59,15 @@ internal static class CameraRecoveryTests
         unresolved.ApplyVerification(new("teams-1", CameraVerificationFinding.Unresolved, false, ""));
         Check(unresolved.State == CameraRecoveryState.UnresolvedAfterPermission, "unresolved after permission");
 
+        var reinitialize = PermissionOnSession();
+        reinitialize.ApplyVerification(new("teams-1",
+            CameraVerificationFinding.NeedsReinitialization, false, ""));
+        Check(reinitialize.State == CameraRecoveryState.NeedsCameraReinitialization
+            && reinitialize.CanVerifyTeams && !reinitialize.LocalVerifierPassed,
+            "live camera session requires reinitialization");
+        reinitialize.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, true, ""));
+        Check(reinitialize.State == CameraRecoveryState.Ready, "ready after explicit reinitialization");
+
         var alreadyOn = StartedSession();
         alreadyOn.ApplyTeamsObservation(new("teams-1",
             TeamsCameraFinding.PermissionAlreadyOnOrDifferentCause, "Camera ready"));
@@ -137,6 +146,10 @@ internal static class CameraRecoveryTests
         fixtureSession.ApplySettingsObservation(
             fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
         fixtureSession.MarkReturnedToTeams();
+        fixtureSession.ApplyVerification(
+            fixture.VerifyTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
+        Check(fixtureSession.State == CameraRecoveryState.NeedsCameraReinitialization
+            && fixtureSession.CanVerifyTeams, "fixture requires camera reinitialization");
         fixtureSession.ApplyVerification(
             fixture.VerifyTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
         Check(fixture.Mode == CameraRecoverySensingMode.Fixture
