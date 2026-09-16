@@ -75,6 +75,14 @@ References:
   realized in those reads and is not a page-verification requirement. Use the
   fixed Camera Settings URI, then verify the Camera page markers before
   presenting the user-performed toggle step.
+- A reversible live test showed that an already-open Teams camera session
+  survived changing the packaged Teams permission Off and back On: after four
+  seconds there was no Camera ComboBox change, error signal, or preview-region
+  contrast change. Treat the toggle state as configuration evidence, not proof
+  of failure or recovery. Prepare the fixture with permission Off before Teams
+  initializes the camera. After the user restores On, readiness may require
+  explicit camera reinitialization, reopening prejoin/Devices, or relaunching
+  Teams. Never infer recovery solely from the permission transition.
 - The legacy owned-window CaptureTest produced a blank PrintWindow frame and
   IntegrationTest failed foreground activation earlier on this machine. Those
   results do not weaken WGC or page-verification requirements.
