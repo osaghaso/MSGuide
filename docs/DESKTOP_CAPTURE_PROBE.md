@@ -40,11 +40,14 @@ References:
 ## Live target findings (2026-09-16)
 
 - On the pinned target machine, PrintWindow flag `0` returned black for both New
-  Teams and Camera Settings. Flag `2` returned rendered content for both,
-  including the live Teams preview. Flag `2` remains diagnostic-only because it
-  is undocumented; results must be measured and blank/protected failures remain
-  fail-closed. Delete probe artifacts after review and never persist preview
-  pixels.
+  Teams and Camera Settings. An in-memory 20-run census of flag `2` succeeded
+  20/20 for both: Teams preview ROI had minimum sampled contrast 220, maximum
+  latency 43 ms, and average latency 34 ms; Camera Settings had minimum contrast
+  206, maximum latency 29 ms, and average latency 20.6 ms. Flag `2` remains
+  available behind `ISelectedWindowFrameCapture` and in the bake-off probe as a
+  measured pinned-machine contingency, but is not an automatic fallback because
+  it is undocumented. Blank/protected failures remain fail-closed. Delete probe
+  artifacts after review and never persist preview pixels.
 - New Teams exposed a rich WebView UIA subtree whose provider process differed
   from the selected top-level window process. Production traversal therefore
   anchors the Raw View walk at the exact selected HWND and permits bounded
