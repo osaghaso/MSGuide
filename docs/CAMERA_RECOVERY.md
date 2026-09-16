@@ -22,6 +22,8 @@ Managed/disabled, permission-already-on or wrong-cause, stale/moved, unsupported
 
 The camera journey does not call the existing full-window `CaptureService`. It requests controls-only sensing through `ICameraRecoverySensing` and does not fall back to a screenshot. The default implementation reports unsupported because controls-only sensing is not available on this branch.
 
+`FixtureCameraRecoverySensing` provides a deterministic test-only journey. It is never selected by default and ends in the distinct `FixtureComplete` state, not `Ready`. `PendingCameraRecoverySensing` is the explicit runtime fallback and reports unsupported without trying `PrintWindow`.
+
 The Advanced / developer area retains the raw snapshot workflow. Its **Capture / review** action creates a local full-window screenshot before approval controls appear; nothing is uploaded until the user reviews and approves it.
 
 ## Integration seam

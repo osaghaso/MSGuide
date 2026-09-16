@@ -11,6 +11,7 @@ internal enum CameraRecoveryState
     PermissionObservedOn,
     NeedsLocalVerification,
     Ready,
+    FixtureComplete,
     ManagedOrDisabled,
     AlreadyOnOrWrongCause,
     StaleOrMoved,
@@ -45,16 +46,24 @@ internal enum CameraVerificationFinding
     Unsupported
 }
 
+internal enum CameraRecoverySensingMode
+{
+    UnsupportedFallback,
+    Fixture,
+    Connected
+}
+
 internal sealed record TeamsCameraObservation(string WindowId, TeamsCameraFinding Finding, string Detail);
 internal sealed record CameraRecoveryTarget(string ObservationId, string Label);
 internal sealed record CameraSettingsObservation(
     CameraSettingsFinding Finding, string Detail, CameraRecoveryTarget? Target = null);
 internal sealed record CameraVerificationResult(
-    string WindowId, CameraVerificationFinding Finding, bool LocalVerifierPassed, string Detail);
+    string WindowId, CameraVerificationFinding Finding, bool LocalVerifierPassed, string Detail, bool IsFixture = false);
 internal sealed record CameraTargetPresentation(bool Shown, string Detail);
 
 internal interface ICameraRecoverySensing
 {
+    CameraRecoverySensingMode Mode { get; }
     Task<TeamsCameraObservation> ObserveTeamsAsync(WindowChoice window, CancellationToken cancellationToken);
     Task<CameraSettingsObservation> ObserveSettingsAsync(CancellationToken cancellationToken);
     Task<CameraVerificationResult> VerifyTeamsAsync(WindowChoice window, CancellationToken cancellationToken);
@@ -65,6 +74,8 @@ internal sealed class PendingCameraRecoverySensing : ICameraRecoverySensing
 {
     private const string Pending =
         "Controls-only camera sensing is not available in this branch yet. This action did not take a screenshot or send data.";
+
+    public CameraRecoverySensingMode Mode => CameraRecoverySensingMode.UnsupportedFallback;
 
     public Task<TeamsCameraObservation> ObserveTeamsAsync(WindowChoice window, CancellationToken cancellationToken)
     {
@@ -94,6 +105,46 @@ internal sealed class PendingCameraRecoverySensing : ICameraRecoverySensing
     }
 }
 
+internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
+{
+    private int settingsObservations;
+
+    public CameraRecoverySensingMode Mode => CameraRecoverySensingMode.Fixture;
+
+    public Task<TeamsCameraObservation> ObserveTeamsAsync(
+        WindowChoice window, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new TeamsCameraObservation(window.Id,
+            TeamsCameraFinding.PermissionMayBeOff, "Fixture: permission diagnosis."));
+    }
+
+    public Task<CameraSettingsObservation> ObserveSettingsAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        settingsObservations++;
+        return Task.FromResult(settingsObservations == 1
+            ? new CameraSettingsObservation(CameraSettingsFinding.PermissionOff,
+                "Fixture: permission off.", new CameraRecoveryTarget("fixture-settings-1", "Fixture camera permission"))
+            : new CameraSettingsObservation(CameraSettingsFinding.PermissionOn, "Fixture: permission on."));
+    }
+
+    public Task<CameraVerificationResult> VerifyTeamsAsync(
+        WindowChoice window, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CameraVerificationResult(window.Id,
+            CameraVerificationFinding.Ready, true, "Fixture: simulated verifier passed.", IsFixture: true));
+    }
+
+    public Task<CameraTargetPresentation> ShowTargetAsync(
+        CameraRecoveryTarget target, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CameraTargetPresentation(true, "Fixture: simulated target shown."));
+    }
+}
+
 internal sealed class CameraRecoverySession
 {
     public CameraRecoveryState State { get; private set; } = CameraRecoveryState.Idle;
@@ -112,7 +163,8 @@ internal sealed class CameraRecoverySession
     public bool CanReturnToTeams => State == CameraRecoveryState.PermissionObservedOn;
     public bool CanVerifyTeams => State == CameraRecoveryState.NeedsLocalVerification
         && !string.IsNullOrWhiteSpace(TeamsWindowId);
-    public bool IsTerminal => State is CameraRecoveryState.Ready or CameraRecoveryState.ManagedOrDisabled
+    public bool IsTerminal => State is CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete
+        or CameraRecoveryState.ManagedOrDisabled
         or CameraRecoveryState.AlreadyOnOrWrongCause or CameraRecoveryState.StaleOrMoved
         or CameraRecoveryState.UnresolvedAfterPermission or CameraRecoveryState.Unsupported
         or CameraRecoveryState.Cancelled;
@@ -264,8 +316,10 @@ internal sealed class CameraRecoverySession
         LocalVerifierPassed = result.LocalVerifierPassed;
         if (result.Finding == CameraVerificationFinding.Ready && result.LocalVerifierPassed)
         {
-            MoveTo(CameraRecoveryState.Ready,
-                "Locally verified: the supplied Teams camera readiness check passed.");
+            MoveTo(result.IsFixture ? CameraRecoveryState.FixtureComplete : CameraRecoveryState.Ready,
+                result.IsFixture
+                    ? "Fixture complete: the simulated verifier passed. Real camera-ready was not claimed."
+                    : "Locally verified: the supplied Teams camera readiness check passed.");
             return;
         }
 

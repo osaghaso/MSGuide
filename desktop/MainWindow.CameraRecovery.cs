@@ -21,6 +21,7 @@ public partial class MainWindow
         if (loaded || cameraRecovery.State != CameraRecoveryState.Idle)
             throw new InvalidOperationException("Camera recovery sensing must be connected before the window is loaded.");
         cameraRecoverySensing = sensing;
+        UpdateCameraRecoveryUi();
     }
 
     private void InitializeCameraRecovery() => UpdateCameraRecoveryUi();
@@ -90,6 +91,12 @@ public partial class MainWindow
     {
         if (CameraStateText is null) return;
         CameraStateText.Text = CameraStateLabel(cameraRecovery.State);
+        CameraSensingText.Text = cameraRecoverySensing.Mode switch
+        {
+            CameraRecoverySensingMode.Fixture => "SENSING · deterministic fixture · no real Teams or Settings claim",
+            CameraRecoverySensingMode.Connected => "SENSING · connected controls-only provider",
+            _ => "SENSING · unsupported fallback · no screenshot"
+        };
         CameraStepText.Text = cameraRecoveryNotice ?? cameraRecovery.Detail;
         CameraStartButton.Content = cameraRecovery.State == CameraRecoveryState.Idle
             ? "Start camera recovery" : "Start over";
@@ -120,6 +127,7 @@ public partial class MainWindow
         CameraRecoveryState.PermissionObservedOn => "STEP 6 · permission observed on · not yet camera-ready",
         CameraRecoveryState.NeedsLocalVerification => "STEP 7 · needs local Teams verification",
         CameraRecoveryState.Ready => "VERIFIED · local camera readiness check passed",
+        CameraRecoveryState.FixtureComplete => "FIXTURE COMPLETE · simulated verifier passed · not camera-ready",
         CameraRecoveryState.ManagedOrDisabled => "STOPPED · camera access is managed or disabled",
         CameraRecoveryState.AlreadyOnOrWrongCause => "STOPPED · permission is already on or not the cause",
         CameraRecoveryState.StaleOrMoved => "STOPPED · observed screen is stale, moved, or closed",
@@ -336,7 +344,9 @@ public partial class MainWindow
             if (!CurrentCameraOperation(generation, token)) return;
             cameraRecoveryNotice = null;
             cameraRecovery.ApplyVerification(result);
-            StatusText.Text = cameraRecovery.State == CameraRecoveryState.Ready
+            StatusText.Text = cameraRecovery.State == CameraRecoveryState.FixtureComplete
+                ? "Fixture complete · simulated local verifier passed; real camera-ready was not claimed."
+                : cameraRecovery.State == CameraRecoveryState.Ready
                 ? "Camera ready · passed a local verifier supplied to the camera recovery session."
                 : "Camera not verified ready · see the explicit recovery state.";
         }

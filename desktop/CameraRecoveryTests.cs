@@ -13,6 +13,14 @@ internal static class CameraRecoveryTests
         Check(CameraRecoverySession.IsCameraHelpIntent("My meeting video is not working"), "meeting video intent");
         Check(!CameraRecoverySession.IsCameraHelpIntent("Help me find the build error"), "unrelated intent");
 
+        var pendingSensing = new PendingCameraRecoverySensing();
+        var pendingResult = pendingSensing.ObserveTeamsAsync(
+            new WindowChoice(0, 0, "Synthetic Teams"), CancellationToken.None).GetAwaiter().GetResult();
+        Check(pendingSensing.Mode == CameraRecoverySensingMode.UnsupportedFallback
+            && pendingResult.Finding == TeamsCameraFinding.Unsupported
+            && pendingResult.Detail.Contains("did not take a screenshot", StringComparison.Ordinal),
+            "explicit unsupported fallback");
+
         var session = new CameraRecoverySession();
         Check(session.State == CameraRecoveryState.Idle && !session.LocalVerifierPassed, "idle");
         session.Start();
@@ -81,6 +89,29 @@ internal static class CameraRecoveryTests
         try { new CameraRecoverySession().MarkReturnedToTeams(); }
         catch (InvalidOperationException) { invalidTransitionRejected = true; }
         Check(invalidTransitionRejected, "invalid transition");
+
+        var fixture = new FixtureCameraRecoverySensing();
+        var fixtureWindow = new WindowChoice(0, 0, "Synthetic Teams fixture");
+        var fixtureSession = new CameraRecoverySession();
+        fixtureSession.Start();
+        fixtureSession.ChooseTeamsWindow(fixtureWindow.Id, fixtureWindow.Title);
+        fixtureSession.ApplyTeamsObservation(
+            fixture.ObserveTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
+        fixtureSession.PrepareToOpenSettings();
+        fixtureSession.MarkSettingsOpened();
+        fixtureSession.ApplySettingsObservation(
+            fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
+        fixtureSession.RecordTargetPresentation(
+            fixture.ShowTargetAsync(fixtureSession.Target!, CancellationToken.None).GetAwaiter().GetResult());
+        fixtureSession.ApplySettingsObservation(
+            fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
+        fixtureSession.MarkReturnedToTeams();
+        fixtureSession.ApplyVerification(
+            fixture.VerifyTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
+        Check(fixture.Mode == CameraRecoverySensingMode.Fixture
+            && fixtureSession.State == CameraRecoveryState.FixtureComplete
+            && fixtureSession.Detail.Contains("not claimed", StringComparison.OrdinalIgnoreCase),
+            "deterministic fixture path");
     }
 
     private static CameraRecoverySession StartedSession()
