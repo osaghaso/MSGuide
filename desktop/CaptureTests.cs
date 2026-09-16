@@ -18,7 +18,7 @@ internal static class CaptureTests
     internal sealed class CaptureFailure(InvalidOperationException error) : InvalidOperationException(error.Message switch
     {
         "A previous window capture is still returning. Use another application after it finishes, or restart MSGuide." => "provider-busy",
-        "Window capture timed out. No snapshot was sent. This application may not support PrintWindow/UI Automation." => "timeout",
+        "Window capture timed out. No snapshot was sent. This application may not support Windows Graphics Capture/UI Automation." => "timeout",
         "Selected window disappeared, changed, is minimized, or is not responding. Refresh the chooser." => "window-unavailable",
         "Unsupported window dimensions. Resize the selected window and retry." => "unsupported-dimensions",
         "PNG exceeds the 2 MB limit; select a smaller window." => "image-too-large",
@@ -26,6 +26,8 @@ internal static class CaptureTests
         "Cannot allocate a window capture context." => "context-allocation",
         "Cannot allocate a window bitmap." => "bitmap-allocation",
         "This window does not support PrintWindow capture. No desktop fallback is used." => "unsupported",
+        "Windows Graphics Capture is unavailable. No desktop or PrintWindow fallback is used." => "wgc-unavailable",
+        "Windows Graphics Capture did not return a frame. Nothing was sent." => "wgc-frame",
         "Capture appears blank, protected, or unsupported. Nothing was sent. Try the built-in demo; there is no desktop fallback." => "blank",
         _ => "unclassified"
     });

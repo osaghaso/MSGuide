@@ -13,6 +13,25 @@ internal interface ISelectedWindowFrameCapture
     BitmapSource Capture(WindowChoice window, Native.RECT rect, CancellationToken ct);
 }
 
+internal readonly record struct CaptureQuality(int SampleMinimum, int SampleMaximum)
+{
+    internal bool Blank => SampleMaximum < 8 || SampleMaximum - SampleMinimum < 3;
+
+    internal static CaptureQuality Measure(byte[] pixels, int width, int height)
+    {
+        int min = 255, max = 0;
+        for (int y = height / 10; y < height * 9 / 10; y += Math.Max(1, height / 80))
+        for (int x = width / 10; x < width * 9 / 10; x += Math.Max(1, width / 80))
+        {
+            int i = (y * width + x) * 4;
+            int light = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+            min = Math.Min(min, light);
+            max = Math.Max(max, light);
+        }
+        return new(min, max);
+    }
+}
+
 internal sealed class PrintWindowFrameCapture(uint flags) : ISelectedWindowFrameCapture
 {
     private sealed record Result(bool NativeSucceeded, bool Blank, int SampleMinimum,
@@ -67,24 +86,15 @@ internal sealed class PrintWindowFrameCapture(uint flags) : ISelectedWindowFrame
             if (!Native.PrintWindow(hwnd, dc, flags)) return new(false, false, -1, -1, null);
             ct.ThrowIfCancellationRequested();
             Marshal.Copy(bits, pixels, 0, pixels.Length);
-            int min = 255, max = 0;
-            for (int y = rect.Height / 10; y < rect.Height * 9 / 10; y += Math.Max(1, rect.Height / 80))
-            for (int x = rect.Width / 10; x < rect.Width * 9 / 10; x += Math.Max(1, rect.Width / 80))
-            {
-                int i = (y * rect.Width + x) * 4;
-                int light = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
-                min = Math.Min(min, light);
-                max = Math.Max(max, light);
-            }
-            bool blank = max < 8 || max - min < 3;
+            var quality = CaptureQuality.Measure(pixels, rect.Width, rect.Height);
             BitmapSource? frame = null;
-            if (includeFrame && !blank)
+            if (includeFrame && !quality.Blank)
             {
                 frame = BitmapSource.Create(rect.Width, rect.Height, 96, 96, PixelFormats.Bgr32,
                     null, pixels, rect.Width * 4);
                 frame.Freeze();
             }
-            return new(true, blank, min, max, frame);
+            return new(true, quality.Blank, quality.SampleMinimum, quality.SampleMaximum, frame);
         }
         finally
         {
@@ -97,7 +107,7 @@ internal sealed class PrintWindowFrameCapture(uint flags) : ISelectedWindowFrame
     }
 }
 
-public sealed record CaptureAttemptDiagnostic(string Backend, uint Flags, bool NativeSucceeded,
+public sealed record CaptureAttemptDiagnostic(string Backend, uint? Flags, bool NativeSucceeded,
     bool Accepted, string Outcome, int SampleMinimum, int SampleMaximum, long ElapsedMilliseconds);
 
 public sealed record CaptureProbeReport(int Version, DateTimeOffset CapturedAt, string WindowId,
@@ -106,7 +116,13 @@ public sealed record CaptureProbeReport(int Version, DateTimeOffset CapturedAt, 
 
 public static class CaptureProbe
 {
-    public static CaptureProbeReport Run(nint hwnd, CancellationToken ct = default)
+    public static CaptureProbeReport Run(nint hwnd, CancellationToken ct = default) =>
+        Run(hwnd, includePrintWindow: true, ct);
+
+    public static CaptureProbeReport RunWgcOnly(nint hwnd, CancellationToken ct = default) =>
+        Run(hwnd, includePrintWindow: false, ct);
+
+    private static CaptureProbeReport Run(nint hwnd, bool includePrintWindow, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         Native.GetWindowThreadProcessId(hwnd, out var pid);
@@ -120,17 +136,21 @@ public static class CaptureProbe
                 || (long)rect.Width * rect.Height > 32_000_000)
                 throw new InvalidOperationException("The requested HWND has unsupported dimensions.");
 
-            CaptureAttemptDiagnostic[] attempts =
-            [
-                new PrintWindowFrameCapture(0).Probe(window, rect, ct),
-                new PrintWindowFrameCapture(2).Probe(window, rect, ct)
-            ];
+            var attempts = new List<CaptureAttemptDiagnostic>
+            {
+                new WindowsGraphicsCaptureFrameCapture().Probe(window, rect, ct)
+            };
+            if (includePrintWindow)
+            {
+                attempts.Add(new PrintWindowFrameCapture(0).Probe(window, rect, ct));
+                attempts.Add(new PrintWindowFrameCapture(2).Probe(window, rect, ct));
+            }
             var automation = AutomationEvidence.Probe(window, rect, ct);
             ct.ThrowIfCancellationRequested();
             if (!window.Matches() || !Native.GetWindowRect(hwnd, out var after) || !rect.Same(after))
                 throw new InvalidOperationException("The requested HWND changed during the probe.");
             return new(1, DateTimeOffset.UtcNow, window.Id, pid, window.ClassName,
-                rect.Width, rect.Height, attempts, automation);
+                rect.Width, rect.Height, attempts.ToArray(), automation);
         }
         finally { Native.SetThreadDpiAwarenessContext(previousDpi); }
     }

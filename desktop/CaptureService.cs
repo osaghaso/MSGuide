@@ -36,10 +36,10 @@ public sealed class Snapshot(WindowChoice window, Native.RECT rect, DateTimeOffs
 
 public static class CaptureService
 {
-    private static readonly ISelectedWindowFrameCapture FrameCapture = new PrintWindowFrameCapture(2);
+    private static readonly ISelectedWindowFrameCapture FrameCapture = new WindowsGraphicsCaptureFrameCapture();
 
     // ponytail: one outstanding native capture. A stuck provider cannot queue more workers;
-    // process-isolate PrintWindow/UIA if support for unresponsive applications becomes required.
+    // process-isolate UIA if support for unresponsive applications becomes required.
     private static int busy;
     internal static Task WhenIdle { get; private set; } = Task.CompletedTask;
 
@@ -79,7 +79,7 @@ public static class CaptureService
         {
             // A native call cannot be aborted safely. Drop and clear anything it returns later.
             _ = task.ContinueWith(t => { if (t.IsCompletedSuccessfully) t.Result.Dispose(); else _ = t.Exception; }, TaskScheduler.Default);
-            if (!ct.IsCancellationRequested) throw new InvalidOperationException("Window capture timed out. No snapshot was sent. This application may not support PrintWindow/UI Automation.");
+            if (!ct.IsCancellationRequested) throw new InvalidOperationException("Window capture timed out. No snapshot was sent. This application may not support Windows Graphics Capture/UI Automation.");
             throw;
         }
     }
