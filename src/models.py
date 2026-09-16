@@ -60,7 +60,10 @@ class CameraRecoveryState(str, Enum):
     START = "start"
     TEAMS_PREJOIN_OBSERVED = "teams_prejoin_observed"
     CAMERA_BLOCK_CONFIRMED = "camera_block_confirmed"
+    TEAMS_SETTINGS_MENU_OPEN = "teams_settings_menu_open"
+    TEAMS_DEVICES_OPEN = "teams_devices_open"
     CAMERA_SETTINGS_OPEN = "camera_settings_open"
+    SYSTEM_CAMERA_SETTINGS_UNINSPECTABLE = "system_camera_settings_uninspectable"
     APPLICABLE_PERMISSION_OFF = "applicable_permission_off"
     USER_ACTION_REQUIRED = "user_action_required"
     APPLICABLE_PERMISSION_ON = "applicable_permission_on"
@@ -72,7 +75,13 @@ class CameraRecoveryState(str, Enum):
 
 
 class CameraEvidenceKind(str, Enum):
+    TEAMS_SELECTED_WINDOW = "teams_selected_window"
     TEAMS_PREJOIN_SURFACE = "teams_prejoin_surface"
+    TEAMS_MORE_OPTIONS = "teams_more_options"
+    TEAMS_SETTINGS_ITEM = "teams_settings_item"
+    TEAMS_DEVICES_TAB = "teams_devices_tab"
+    TEAMS_DEVICES_SURFACE = "teams_devices_surface"
+    OPEN_SYSTEM_CAMERA_SETTINGS = "open_system_camera_settings"
     CAMERA_TOGGLE_OFF = "camera_toggle_off"
     CAMERA_TOGGLE_ON = "camera_toggle_on"
     CAMERA_BLOCK_INDICATOR = "camera_block_indicator"
@@ -82,6 +91,8 @@ class CameraEvidenceKind(str, Enum):
     PERMISSION_TOGGLE_ENABLED = "permission_toggle_enabled"
     RETURNED_TO_TEAMS = "returned_to_teams"
     LOCAL_CAMERA_VERIFIER = "local_camera_verifier"
+    SYSTEM_CAMERA_SETTINGS_SURFACE = "system_camera_settings_surface"
+    UIA_NO_DESCENDANTS = "uia_no_descendants"
 
 
 class CameraPermissionState(str, Enum):
@@ -89,6 +100,11 @@ class CameraPermissionState(str, Enum):
     OFF = "off"
     ON = "on"
     MANAGED = "managed"
+
+
+class CameraEvidenceBasis(str, Enum):
+    FIXTURE = "fixture"
+    LIVE_PROBE = "liveProbe"
 
 
 def utc_timestamp(value: datetime) -> datetime:
@@ -109,6 +125,7 @@ class UIElement(Contract):
     label: Label
     box: tuple[Unit, Unit, Unit, Unit]
     confidence: Unit
+    processId: Annotated[int, Field(strict=True, ge=1, le=4_294_967_295)] | None = None
     targetId: EvidenceId | None = None
     automationId: EvidenceName | None = None
     frameworkId: EvidenceName | None = None
@@ -122,6 +139,7 @@ class Observation(Contract):
     id: Identifier
     windowId: Identifier
     application: Label
+    rootProcessId: Annotated[int, Field(strict=True, ge=1, le=4_294_967_295)] | None = None
     capturedAt: datetime
     width: Annotated[int, Field(strict=True, ge=1, le=16384)]
     height: Annotated[int, Field(strict=True, ge=1, le=16384)]
@@ -162,7 +180,10 @@ class CameraReadyVerification(Contract):
 
 
 class CameraRecoveryRequest(Contract):
-    profile: Literal["teams-camera-recovery-win11-24h2-en-US-fixture-v1"]
+    profile: Literal[
+        "teams-camera-recovery-win11-24h2-en-US-fixture-v1",
+        "teams-camera-recovery-new-teams-uia-probe-20260916-v1",
+    ]
     verification: CameraReadyVerification | None = None
 
 
@@ -194,6 +215,7 @@ class Target(Contract):
     label: Label
     box: tuple[Unit, Unit, Unit, Unit]
     confidence: Annotated[float, Field(strict=True, ge=0.8, le=1)]
+    processId: Annotated[int, Field(strict=True, ge=1, le=4_294_967_295)] | None = None
     targetId: EvidenceId | None = None
     automationId: EvidenceName | None = None
     frameworkId: EvidenceName | None = None
@@ -218,12 +240,25 @@ class GuidanceResult(Contract):
 
 
 class CameraRecoveryResponse(Contract):
-    profile: Literal["teams-camera-recovery-win11-24h2-en-US-fixture-v1"]
-    fixtureSupported: Literal[True] = True
+    profile: Literal[
+        "teams-camera-recovery-win11-24h2-en-US-fixture-v1",
+        "teams-camera-recovery-new-teams-uia-probe-20260916-v1",
+    ]
+    evidenceBasis: CameraEvidenceBasis
+    fixtureSupported: StrictBool
+    settingsUiaProven: Literal[False] = False
     state: CameraRecoveryState
     evidence: Annotated[list[CameraEvidenceKind], Field(max_length=12)]
     permissionState: CameraPermissionState = CameraPermissionState.UNKNOWN
     verificationRequired: StrictBool
+
+    @model_validator(mode="after")
+    def evidence_basis_matches_profile(self):
+        fixture = self.profile.endswith("-fixture-v1")
+        if (fixture != self.fixtureSupported
+                or fixture != (self.evidenceBasis == CameraEvidenceBasis.FIXTURE)):
+            raise ValueError("Camera evidence basis must match the selected profile")
+        return self
 
 
 class GuidanceResponse(GuidanceResult):
@@ -237,7 +272,9 @@ class GuidanceResponse(GuidanceResult):
         if self.cameraRecovery is None:
             return self
         ready = self.cameraRecovery.state == CameraRecoveryState.CAMERA_READY_VERIFIED
-        if ready != (self.status == "completed") or ready == self.cameraRecovery.verificationRequired:
+        if (ready != (self.status == "completed")
+                or ready == self.cameraRecovery.verificationRequired
+                or (ready and self.cameraRecovery.evidenceBasis != CameraEvidenceBasis.FIXTURE)):
             raise ValueError("Camera completion requires accepted readiness evidence")
         return self
 

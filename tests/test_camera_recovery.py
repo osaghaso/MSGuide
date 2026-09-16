@@ -12,6 +12,7 @@ from tests.local_client import TestClient
 
 
 PROFILE = "teams-camera-recovery-win11-24h2-en-US-fixture-v1"
+LIVE_PROFILE = "teams-camera-recovery-new-teams-uia-probe-20260916-v1"
 
 
 @pytest.fixture
@@ -25,7 +26,10 @@ def client():
         yield value
 
 
-def element(role, label, automation_id, framework, toggle=None, enabled=True, box=None, target_id=None):
+def element(
+    role, label, automation_id, framework, toggle=None, enabled=True, box=None,
+    target_id=None, process_id=None,
+):
     value = {
         "role": role,
         "label": label,
@@ -39,6 +43,8 @@ def element(role, label, automation_id, framework, toggle=None, enabled=True, bo
         value["toggleState"] = toggle
     if target_id is not None:
         value["targetId"] = target_id
+    if process_id is not None:
+        value["processId"] = process_id
     return value
 
 
@@ -85,8 +91,8 @@ def windows_settings(obs_id, toggle=None, *, enabled=True, duplicate=False, offs
     return observation(obs_id, "Settings", elements, offset_ms)
 
 
-def request(session_id, observed, verification=None):
-    camera = {"profile": PROFILE}
+def request(session_id, observed, verification=None, profile=PROFILE):
+    camera = {"profile": profile}
     if verification is not None:
         camera["verification"] = verification
     return {
@@ -98,8 +104,11 @@ def request(session_id, observed, verification=None):
     }
 
 
-def post(client, session_id, observed, verification=None):
-    return client.post("/v1/guidance", json=request(session_id, observed, verification))
+def post(client, session_id, observed, verification=None, profile=PROFILE):
+    return client.post(
+        "/v1/guidance",
+        json=request(session_id, observed, verification, profile),
+    )
 
 
 def start(client):
@@ -125,7 +134,9 @@ def test_strict_sequence_requires_local_readiness_verifier(client):
     assert data["status"] == "next_step"
     assert data["cameraRecovery"] == {
         "profile": PROFILE,
+        "evidenceBasis": "fixture",
         "fixtureSupported": True,
+        "settingsUiaProven": False,
         "state": "camera_block_confirmed",
         "evidence": ["teams_prejoin_surface", "camera_toggle_off", "camera_block_indicator"],
         "permissionState": "unknown",
@@ -181,6 +192,118 @@ def test_camera_path_never_calls_guidance_provider():
         response = post(client, start(client), teams("provider-bypass"))
         assert response.status_code == 200
         assert response.json()["cameraRecovery"]["state"] == "camera_block_confirmed"
+
+
+def test_live_teams_tree_allows_webview_process_different_from_selected_process(client):
+    sid = start(client)
+    observed = observation(
+        "live-header",
+        "Microsoft Teams",
+        [
+            element(
+                "button",
+                "Settings and more",
+                "more-options-header",
+                "WebView2",
+                target_id="live.more",
+                process_id=16836,
+            )
+        ],
+    )
+    observed["rootProcessId"] = 4444
+    data = post(client, sid, observed, profile=LIVE_PROFILE).json()
+    assert data["status"] == "next_step"
+    assert data["target"]["targetId"] == "live.more"
+    assert data["target"]["processId"] == 16836
+    assert data["cameraRecovery"]["evidenceBasis"] == "liveProbe"
+    assert data["cameraRecovery"]["fixtureSupported"] is False
+    assert data["cameraRecovery"]["settingsUiaProven"] is False
+
+
+def test_live_teams_settings_devices_navigation_is_probe_bounded(client):
+    sid = start(client)
+    settings_item = observation(
+        "live-settings-item",
+        "Microsoft Teams",
+        [element("menuitem", "Settings", "settings", "WebView2", target_id="live.settings")],
+    )
+    settings = post(client, sid, settings_item, profile=LIVE_PROFILE).json()
+    assert settings["cameraRecovery"]["state"] == "teams_settings_menu_open"
+    assert settings["target"]["targetId"] == "live.settings"
+
+    devices_tab = observation(
+        "live-devices-tab",
+        "Microsoft Teams",
+        [element("tabitem", "Devices", "devices", "WebView2", target_id="live.devices")],
+        offset_ms=1,
+    )
+    devices = post(client, sid, devices_tab, profile=LIVE_PROFILE).json()
+    assert devices["cameraRecovery"]["state"] == "teams_settings_menu_open"
+    assert devices["target"]["targetId"] == "live.devices"
+
+    devices_page = observation(
+        "live-devices-page",
+        "Microsoft Teams",
+        [
+            element("group", "Audio settings", "AudioSettings", "WebView2",
+                    target_id="live.audio"),
+            element("group", "Video settings", "VideoSettings", "WebView2",
+                    target_id="live.video"),
+            element("button", "Open camera settings", "open_camera_settings", "WebView2",
+                    target_id="live.open-camera"),
+        ],
+        offset_ms=2,
+    )
+    page = post(client, sid, devices_page, profile=LIVE_PROFILE).json()
+    assert page["cameraRecovery"]["state"] == "teams_devices_open"
+    assert page["cameraRecovery"]["evidence"][-1] == "open_system_camera_settings"
+    assert page["target"]["targetId"] == "live.open-camera"
+
+
+def test_live_windows_settings_uia_is_explicitly_unproven_and_untargeted(client):
+    sid = start(client)
+    observed = observation("settings-empty", "Settings", [])
+    data = post(client, sid, observed, profile=LIVE_PROFILE).json()
+    assert data["status"] == "clarification"
+    assert data["target"] is None
+    assert data["cameraRecovery"]["state"] == "system_camera_settings_uninspectable"
+    assert data["cameraRecovery"]["settingsUiaProven"] is False
+    assert data["cameraRecovery"]["evidence"] == [
+        "system_camera_settings_surface",
+        "uia_no_descendants",
+    ]
+
+
+def test_live_profile_cannot_claim_permission_or_completion(client):
+    sid = start(client)
+    observed = observation("settings-synthetic", "Settings", [
+        element("switch", "Let desktop apps access your camera",
+                "windows-camera-app-permission-toggle", "XAML", "on"),
+    ])
+    data = post(client, sid, observed, profile=LIVE_PROFILE).json()
+    assert data["status"] == "clarification"
+    assert data["cameraRecovery"]["state"] == "system_camera_settings_uninspectable"
+    assert data["cameraRecovery"]["permissionState"] == "unknown"
+
+    verification = {
+        "kind": "localCameraReady",
+        "source": "desktopLocalCameraVerifier",
+        "evidenceId": "live-not-supported",
+        "sessionId": sid,
+        "observationId": observed["id"],
+        "windowId": observed["windowId"],
+        "capturedAt": observed["capturedAt"],
+        "cameraActive": True,
+        "framesObserved": 2,
+    }
+    assert post(client, sid, observed, verification, LIVE_PROFILE).status_code == 422
+
+
+def test_unknown_camera_profile_is_rejected(client):
+    sid = start(client)
+    body = request(sid, teams("unknown-profile"))
+    body["cameraRecovery"]["profile"] = "unprobed-profile"
+    assert client.post("/v1/guidance", json=body).status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -323,6 +446,8 @@ def test_wrong_automation_id_does_not_fall_back_to_english_label(client):
     [
         lambda body: body["observation"]["elements"][0].update(isEnabled="true"),
         lambda body: body["observation"]["elements"][0].update(toggleState="invalid"),
+        lambda body: body["observation"]["elements"][0].update(processId="16836"),
+        lambda body: body["observation"].update(rootProcessId="4444"),
         lambda body: body["observation"]["elements"][0].update(unbounded="value"),
         lambda body: body["observation"]["elements"].append(
             dict(body["observation"]["elements"][0])

@@ -271,7 +271,12 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                     fresh(verification.capturedAt)
                     if abs((verification.capturedAt - body.observation.capturedAt).total_seconds()) > 5:
                         raise HTTPException(422, "Camera verification must be captured with the same observation")
-                decision = camera_recovery.guide(body.sessionId, body.observation, verification)
+                decision = camera_recovery.guide(
+                    body.sessionId,
+                    body.observation,
+                    verification,
+                    body.cameraRecovery.profile,
+                )
                 result, recovery = decision.guidance, decision.recovery
                 if result.target is not None and not camera_recovery.target_matches(
                         body.sessionId, body.observation, result.target):
@@ -292,6 +297,8 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                             element.label == result.target.label
                             and element.box == result.target.box
                             and element.confidence >= result.target.confidence
+                            and (result.target.processId is None
+                                 or element.processId == result.target.processId)
                             and (result.target.automationId is None
                                  or element.automationId == result.target.automationId)
                             and (result.target.frameworkId is None

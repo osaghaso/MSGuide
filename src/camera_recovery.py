@@ -1,4 +1,4 @@
-"""Deterministic, fixture-bounded Teams camera recovery evidence engine."""
+"""Deterministic, explicitly profiled Teams camera recovery evidence engine."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import hmac
 import json
 
 from src.models import (
+    CameraEvidenceBasis,
     CameraEvidenceKind,
     CameraPermissionState,
     CameraReadyVerification,
@@ -23,7 +24,8 @@ from src.models import (
 )
 
 
-PROFILE = "teams-camera-recovery-win11-24h2-en-US-fixture-v1"
+FIXTURE_PROFILE = "teams-camera-recovery-win11-24h2-en-US-fixture-v1"
+LIVE_PROFILE = "teams-camera-recovery-new-teams-uia-probe-20260916-v1"
 
 
 class CameraRecoveryError(ValueError):
@@ -36,6 +38,7 @@ class ElementPredicate:
     labels: tuple[str, ...]
     roles: tuple[str, ...]
     frameworks: tuple[str, ...]
+    label_fallback_with_automation: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,7 @@ class EvidenceProfile:
 
 
 SUPPORTED_PROFILE = EvidenceProfile(
-    name=PROFILE,
+    name=FIXTURE_PROFILE,
     teams_applications=("Microsoft Teams",),
     settings_applications=("Settings", "Windows Settings"),
     teams_camera=ElementPredicate(
@@ -77,6 +80,39 @@ SUPPORTED_PROFILE = EvidenceProfile(
         roles=("checkbox", "switch", "togglebutton"),
         frameworks=("xaml",),
     ),
+)
+
+LIVE_MORE_OPTIONS = ElementPredicate(
+    automation_ids=("more-options-header",),
+    labels=("Settings and more",),
+    roles=("button",),
+    frameworks=("chrome", "webview2"),
+)
+LIVE_SETTINGS_ITEM = ElementPredicate(
+    automation_ids=("settings", "settings-menu-item"),
+    labels=("Settings",),
+    roles=("button", "menuitem"),
+    frameworks=("chrome", "webview2"),
+    label_fallback_with_automation=True,
+)
+LIVE_DEVICES_TAB = ElementPredicate(
+    automation_ids=("devices",),
+    labels=("Devices",),
+    roles=("tabitem",),
+    frameworks=("chrome", "webview2"),
+    label_fallback_with_automation=True,
+)
+LIVE_DEVICES_MARKER = ElementPredicate(
+    automation_ids=("audiosettings", "videosettings"),
+    labels=(),
+    roles=("custom", "group", "pane", "section", "text"),
+    frameworks=("chrome", "webview2"),
+)
+LIVE_OPEN_CAMERA_SETTINGS = ElementPredicate(
+    automation_ids=("open_camera_settings",),
+    labels=("Open camera settings",),
+    roles=("button", "hyperlink", "link"),
+    frameworks=("chrome", "webview2"),
 )
 
 
@@ -109,7 +145,10 @@ def _rank(element: UIElement, predicate: ElementPredicate) -> int:
             or _normalized(element.frameworkId) not in predicate.frameworks):
         return 0
     if element.automationId is not None:
-        return 100 if _normalized(element.automationId) in predicate.automation_ids else 0
+        if _normalized(element.automationId) in predicate.automation_ids:
+            return 100
+        if not predicate.label_fallback_with_automation:
+            return 0
     if element.label in predicate.labels:
         return 50
     return 0
@@ -125,6 +164,10 @@ def _candidate(observation: Observation, predicate: ElementPredicate) -> tuple[s
     if len(winners) != 1:
         return "ambiguous", None
     return "matched", winners[0]
+
+
+def _has_match(observation: Observation, predicate: ElementPredicate) -> bool:
+    return any(_rank(element, predicate) for element in observation.elements)
 
 
 class CameraRecoveryEngine:
@@ -198,6 +241,7 @@ class CameraRecoveryEngine:
             label=element.label,
             box=element.box,
             confidence=element.confidence,
+            processId=element.processId,
             automationId=element.automationId,
             frameworkId=element.frameworkId,
             isEnabled=element.isEnabled,
@@ -220,6 +264,7 @@ class CameraRecoveryEngine:
                 element.label == target.label
                 and element.box == target.box
                 and element.confidence >= target.confidence
+                and element.processId == target.processId
                 and element.automationId == target.automationId
                 and element.frameworkId == target.frameworkId
                 and element.isEnabled == target.isEnabled
@@ -234,10 +279,14 @@ class CameraRecoveryEngine:
         permission: CameraPermissionState = CameraPermissionState.UNKNOWN,
         *,
         verified: bool = False,
+        profile: str = FIXTURE_PROFILE,
     ) -> CameraRecoveryResponse:
         return CameraRecoveryResponse(
-            profile=PROFILE,
-            fixtureSupported=True,
+            profile=profile,
+            evidenceBasis=(CameraEvidenceBasis.FIXTURE
+                           if profile == FIXTURE_PROFILE else CameraEvidenceBasis.LIVE_PROBE),
+            fixtureSupported=profile == FIXTURE_PROFILE,
+            settingsUiaProven=False,
             state=state,
             evidence=evidence,
             permissionState=permission,
@@ -250,10 +299,12 @@ class CameraRecoveryEngine:
         instruction: str,
         evidence: list[CameraEvidenceKind],
         permission: CameraPermissionState = CameraPermissionState.UNKNOWN,
+        *,
+        profile: str = FIXTURE_PROFILE,
     ) -> CameraDecision:
         return CameraDecision(
             GuidanceResult(status="clarification", instruction=instruction),
-            CameraRecoveryEngine._recovery(state, evidence, permission),
+            CameraRecoveryEngine._recovery(state, evidence, permission, profile=profile),
         )
 
     def _next_step(
@@ -265,6 +316,8 @@ class CameraRecoveryEngine:
         instruction: str,
         evidence: list[CameraEvidenceKind],
         permission: CameraPermissionState = CameraPermissionState.UNKNOWN,
+        *,
+        profile: str = FIXTURE_PROFILE,
     ) -> CameraDecision:
         return CameraDecision(
             GuidanceResult(
@@ -272,7 +325,7 @@ class CameraRecoveryEngine:
                 instruction=instruction,
                 target=self._target(session_id, observation, index),
             ),
-            self._recovery(state, evidence, permission),
+            self._recovery(state, evidence, permission, profile=profile),
         )
 
     def guide(
@@ -280,15 +333,19 @@ class CameraRecoveryEngine:
         session_id: str,
         observation: Observation,
         verification: CameraReadyVerification | None,
+        profile_name: str = FIXTURE_PROFILE,
     ) -> CameraDecision:
         record = self._record(session_id)
         self._accept_observation(record, observation)
         record.last_target_id = None
         record.last_target_digest = None
-        profile = SUPPORTED_PROFILE
-        if observation.application in profile.teams_applications:
+        if profile_name == LIVE_PROFILE:
+            decision = self._guide_live(session_id, observation, verification)
+        elif profile_name != FIXTURE_PROFILE:
+            raise CameraRecoveryError("Unsupported camera recovery profile")
+        elif observation.application in SUPPORTED_PROFILE.teams_applications:
             decision = self._guide_teams(session_id, record, observation, verification)
-        elif observation.application in profile.settings_applications:
+        elif observation.application in SUPPORTED_PROFILE.settings_applications:
             decision = self._guide_settings(session_id, record, observation, verification)
         else:
             if verification is not None:
@@ -300,6 +357,117 @@ class CameraRecoveryEngine:
             )
         record.last_state = decision.recovery.state
         return decision
+
+    def _guide_live(
+        self,
+        session_id: str,
+        observation: Observation,
+        verification: CameraReadyVerification | None,
+    ) -> CameraDecision:
+        if verification is not None:
+            raise CameraRecoveryError(
+                "The live-probe profile cannot verify permission restoration or camera readiness"
+            )
+        if observation.application in SUPPORTED_PROFILE.teams_applications:
+            return self._guide_live_teams(session_id, observation)
+        if observation.application in SUPPORTED_PROFILE.settings_applications:
+            evidence = [CameraEvidenceKind.SYSTEM_CAMERA_SETTINGS_SURFACE]
+            if not observation.elements:
+                evidence.append(CameraEvidenceKind.UIA_NO_DESCENDANTS)
+            return self._clarification(
+                CameraRecoveryState.SYSTEM_CAMERA_SETTINGS_UNINSPECTABLE,
+                "Windows Camera Settings UIA targeting is not probe-backed on this build; use an explicitly approved private visual verifier or a fixture, not a UIA target.",
+                evidence,
+                profile=LIVE_PROFILE,
+            )
+        return self._clarification(
+            CameraRecoveryState.UNSUPPORTED,
+            "The live-probe profile supports only the selected Teams HWND tree and fail-closed Windows Settings detection.",
+            [],
+            profile=LIVE_PROFILE,
+        )
+
+    def _guide_live_teams(self, session_id: str, observation: Observation) -> CameraDecision:
+        evidence = [CameraEvidenceKind.TEAMS_SELECTED_WINDOW]
+        if _has_match(observation, LIVE_DEVICES_MARKER):
+            evidence.append(CameraEvidenceKind.TEAMS_DEVICES_SURFACE)
+            status, index = _candidate(observation, LIVE_OPEN_CAMERA_SETTINGS)
+            if status == "ambiguous":
+                return self._clarification(
+                    CameraRecoveryState.AMBIGUOUS,
+                    "More than one equally ranked open-camera-settings control was observed.",
+                    evidence,
+                    profile=LIVE_PROFILE,
+                )
+            if status == "matched" and observation.elements[index].isEnabled is True:
+                evidence.append(CameraEvidenceKind.OPEN_SYSTEM_CAMERA_SETTINGS)
+                return self._next_step(
+                    session_id,
+                    observation,
+                    index,
+                    CameraRecoveryState.TEAMS_DEVICES_OPEN,
+                    "Open Windows camera settings yourself. The backend will not assume its UIA tree is inspectable.",
+                    evidence,
+                    profile=LIVE_PROFILE,
+                )
+            return self._clarification(
+                CameraRecoveryState.TEAMS_DEVICES_OPEN,
+                "The probe-backed Teams Devices surface is visible, but no unique enabled open-camera-settings control is safe to target.",
+                evidence,
+                profile=LIVE_PROFILE,
+            )
+        for predicate, kind, state, instruction in (
+            (
+                LIVE_DEVICES_TAB,
+                CameraEvidenceKind.TEAMS_DEVICES_TAB,
+                CameraRecoveryState.TEAMS_SETTINGS_MENU_OPEN,
+                "Open the Teams Devices tab yourself.",
+            ),
+            (
+                LIVE_SETTINGS_ITEM,
+                CameraEvidenceKind.TEAMS_SETTINGS_ITEM,
+                CameraRecoveryState.TEAMS_SETTINGS_MENU_OPEN,
+                "Open Teams Settings yourself.",
+            ),
+            (
+                LIVE_MORE_OPTIONS,
+                CameraEvidenceKind.TEAMS_MORE_OPTIONS,
+                CameraRecoveryState.TEAMS_PREJOIN_OBSERVED,
+                "Open Settings and more yourself.",
+            ),
+        ):
+            status, index = _candidate(observation, predicate)
+            if status == "ambiguous":
+                return self._clarification(
+                    CameraRecoveryState.AMBIGUOUS,
+                    "More than one equally ranked probe-backed Teams navigation control was observed.",
+                    evidence,
+                    profile=LIVE_PROFILE,
+                )
+            if status == "matched":
+                evidence.append(kind)
+                if observation.elements[index].isEnabled is True:
+                    return self._next_step(
+                        session_id,
+                        observation,
+                        index,
+                        state,
+                        instruction,
+                        evidence,
+                        profile=LIVE_PROFILE,
+                    )
+                return self._clarification(
+                    state,
+                    "The probe-backed Teams navigation control is not explicitly enabled.",
+                    evidence,
+                    profile=LIVE_PROFILE,
+                )
+        return self._clarification(
+            CameraRecoveryState.TEAMS_PREJOIN_OBSERVED,
+            "The selected Teams HWND tree was observed, but no unique probe-backed camera-settings navigation control is visible.",
+            evidence,
+            profile=LIVE_PROFILE,
+        )
 
     def _guide_teams(
         self,

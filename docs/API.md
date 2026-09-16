@@ -45,7 +45,7 @@ Session creation returns `sessionId` and `expiresAt`. Guidance requires:
 
 Boxes are normalized `[x, y, width, height]`, nonempty and entirely inside `[0,1]`. Labels are 1–256 characters, roles 1–64; element confidence is 0–1. PNGs must be single-frame, no more than 1600 pixels per side, match the declared dimensions, and fit within 2,000,000 bytes before and after sanitization (base64 cap 2,666,668 characters). Pillow verifies and re-encodes pixels without metadata. This is not pixel redaction.
 
-Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `isEnabled`, and `toggleState` (`off`, `on`, or `indeterminate`). Strings and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. These are evidence, not authority.
+Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `processId`, `isEnabled`, and `toggleState` (`off`, `on`, or `indeterminate`); the observation may provide `rootProcessId`. Strings, integers, and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. A tree remains rooted to the selected `windowId`, but descendant `processId` is evidence only and is not required to equal `rootProcessId`: New Teams WebView descendants can belong to a different process than the selected top-level HWND. These fields are never authority.
 
 Guidance returns `instruction`, `status` (`next_step`, `clarification`, `completed`), optional `target`, `citations`, `mode`, `correlationId`, and echoed `observationId`/`windowId`. A target is allowed only for `next_step`, must have confidence at least 0.8, and must match an observed label/box with sufficient confidence. The client checks freshness and correspondence again before displaying an outline.
 
@@ -55,7 +55,7 @@ The default provider uses only MSGuide Demo UIA evidence; valid images are accep
 
 ## Deterministic Teams camera recovery
 
-The desktop opts in on the existing `/v1/guidance` route:
+The desktop opts in on the existing `/v1/guidance` route and must select an explicit evidence profile:
 
 ```json
 {
@@ -65,11 +65,25 @@ The desktop opts in on the existing `/v1/guidance` route:
 }
 ```
 
-This path bypasses the configured guidance provider. The server derives and retains only bounded, volatile session progress from fresh observations. The fixture is evidence-supported only for its named Windows 11 24H2, en-US Teams pre-join/Windows Settings profile; it is not a general claim about other builds, locales, applications, or automation trees. Predicates rank exact automation IDs above exact fixture labels and also require the configured application, role, framework, and confidence.
+This path bypasses the configured guidance provider. The server derives and retains only bounded, volatile session progress from fresh observations. `teams-camera-recovery-win11-24h2-en-US-fixture-v1` is a synthetic fixture fallback, not a live Windows Settings UIA support claim. Its predicates rank exact automation IDs above exact fixture labels and also require the configured application, role, framework, and confidence.
 
-The optional response `cameraRecovery` contains `profile`, `fixtureSupported`, `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `camera_settings_open`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
+The optional response `cameraRecovery` contains `profile`, `evidenceBasis` (`fixture` or `liveProbe`), `fixtureSupported`, `settingsUiaProven` (currently always `false`), `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `teams_settings_menu_open`, `teams_devices_open`, `camera_settings_open`, `system_camera_settings_uninspectable`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
 
-Permission-on is not completion. The server returns `completed` only for `camera_ready_verified`, after this session first observed the configured Teams block, then an enabled applicable permission off, then that permission on, then a matching Teams camera-on observation with this explicit verifier payload:
+The live-probe profile is:
+
+```json
+{
+  "cameraRecovery": {
+    "profile": "teams-camera-recovery-new-teams-uia-probe-20260916-v1"
+  }
+}
+```
+
+It recognizes only probe-backed New Teams navigation evidence: `more-options-header`, the Settings item, the Devices `TabItem`, Devices-page markers `AudioSettings`/`VideoSettings`, and `open_camera_settings`. The September 16 target-machine probe selected Teams PID 4444 while accessible WebView descendants reported PID 16836, so the backend deliberately does not impose same-process filtering after the desktop has rooted capture to the selected HWND.
+
+The same probe found zero UIA descendants from both the SystemSettings `CoreWindow` and `ApplicationFrameWindow`, and exact global UIA searches found no Camera access toggles. Therefore the live profile returns `system_camera_settings_uninspectable`, never a Windows Settings target, permission-on claim, or completion. `imageBase64` remains ignored by this engine and does not become visual proof. A future private local visual verifier must be separately and strictly modeled; until then only the explicitly named synthetic fixture can exercise the permission-toggle sequence. The probe's existing `CaptureTest` was blank and `IntegrationTest` failed demo activation, so these findings do not constitute end-to-end desktop validation.
+
+Permission-on is not completion. In the synthetic fixture profile, the server returns `completed` only for `camera_ready_verified`, after this session first observed the configured Teams block, then an enabled applicable permission off, then that permission on, then a matching Teams camera-on observation with this explicit verifier payload:
 
 ```json
 {
