@@ -273,7 +273,6 @@ public partial class MainWindow
             {
                 UseShellExecute = true
             });
-            if (launched is null) throw new InvalidOperationException();
             cameraRecovery.MarkSettingsOpened();
             StatusText.Text = "Windows Settings launch requested by your click · Camera page not yet verified · MSGuide changed nothing.";
             UpdateCameraRecoveryUi(CameraPrivateCheckButton);
