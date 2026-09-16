@@ -4,15 +4,20 @@ param(
     [ValidateRange(1024, 65535)][int]$Port = 8765,
     [switch]$IntegrationTest,
     [switch]$CaptureTest,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$Copilot,
+    [switch]$CameraFixture
 )
 
 $ErrorActionPreference = 'Stop'
 if ($IntegrationTest -and $CaptureTest) { throw 'Choose one test mode.' }
+if ($Copilot -and ($IntegrationTest -or $CaptureTest)) {
+    throw 'Copilot mode is for the interactive app, not deterministic test harnesses.'
+}
 $root = Split-Path $PSScriptRoot -Parent
 $python = Join-Path $root 'venv/Scripts/python.exe'
 $project = Join-Path $root 'desktop/MSGuide.Desktop.csproj'
-$desktop = Join-Path $root 'desktop/bin/Debug/net10.0-windows/MSGuide.Desktop.exe'
+$desktop = Join-Path $root 'desktop/bin/Debug/net10.0-windows10.0.19041.0/MSGuide.Desktop.exe'
 if (!(Test-Path $python)) { throw 'Set up the Python environment first; see README.md.' }
 if (!(Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET 10 SDK is required.' }
 $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
@@ -46,6 +51,15 @@ try {
         $info.Environment['MSGUIDE_API_URL'] = $url
         $info.Environment['MSGUIDE_MODE'] = 'demo'
         $info.Environment['PYTHONUTF8'] = '1'
+        if ($CameraFixture) {
+            $info.Environment['MSGUIDE_CAMERA_RECOVERY_MODE'] = 'fixture'
+        }
+        if ($Copilot) {
+            $copilotCommand = Get-Command copilot -ErrorAction Stop
+            $info.Environment['MSGUIDE_GUIDANCE_PROVIDER'] = 'copilot-sdk'
+            $info.Environment['MSGUIDE_COPILOT_MODEL'] = 'auto'
+            $info.Environment['COPILOT_CLI_PATH'] = $copilotCommand.Source
+        }
         if ($IntegrationTest -or $CaptureTest) { $info.Environment['MSGUIDE_GUIDANCE_PROVIDER'] = 'demo' }
         return $info
     }

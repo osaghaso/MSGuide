@@ -35,6 +35,7 @@ internal enum CameraSettingsFinding
 {
     PermissionOff,
     PermissionOn,
+    WrongPage,
     ManagedOrDisabled,
     StaleOrMoved,
     Unsupported
@@ -86,7 +87,8 @@ internal sealed record CameraSettingsObservation(
     CameraSettingsObservationSource Source = CameraSettingsObservationSource.Unknown,
     bool ProbeValidated = false, CameraSettingsPage Page = CameraSettingsPage.Unknown);
 internal sealed record CameraVerificationResult(
-    string WindowId, CameraVerificationFinding Finding, bool LocalVerifierPassed, string Detail, bool IsFixture = false);
+    string WindowId, CameraVerificationFinding Finding, bool LocalVerifierPassed, string Detail,
+    bool IsFixture = false, bool Reinitialized = false);
 internal sealed record CameraTargetPresentation(bool Shown, string Detail);
 
 internal interface ICameraRecoverySensing
@@ -175,7 +177,7 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
             ? new CameraVerificationResult(window.Id, CameraVerificationFinding.NeedsReinitialization,
                 false, "Fixture: reopen the camera surface.", IsFixture: true)
             : new CameraVerificationResult(window.Id, CameraVerificationFinding.Ready,
-                true, "Fixture: simulated verifier passed.", IsFixture: true));
+                true, "Fixture: simulated verifier passed.", IsFixture: true, Reinitialized: true));
     }
 
     public Task<CameraTargetPresentation> ShowTargetAsync(
@@ -202,8 +204,8 @@ internal sealed class CameraRecoverySession
     public bool CanShowTarget => State == CameraRecoveryState.VerifiedTarget && Target is not null;
     public bool CanCheckChangedSetting => State == CameraRecoveryState.VerifiedTarget;
     public bool CanReturnToTeams => State == CameraRecoveryState.PermissionObservedOn;
-    public bool CanVerifyTeams => State is CameraRecoveryState.NeedsLocalVerification
-            or CameraRecoveryState.NeedsCameraReinitialization
+    public bool CanVerifyTeams => State is (CameraRecoveryState.NeedsLocalVerification
+            or CameraRecoveryState.NeedsCameraReinitialization)
         && !string.IsNullOrWhiteSpace(TeamsWindowId);
     public bool IsTerminal => State is CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete
         or CameraRecoveryState.WrongSettingsPage or CameraRecoveryState.ManagedOrDisabled
@@ -228,11 +230,26 @@ internal sealed class CameraRecoverySession
         State = CameraRecoveryState.NeedsTeamsObservation;
         Target = null;
         LocalVerifierPassed = false;
-        Detail = "Choose the exact Teams window, then inspect controls only.";
+        Detail = "Open Teams Settings > Devices, choose that Teams window, then inspect controls only.";
     }
 
     public void ChooseTeamsWindow(string windowId, string title)
     {
+        bool reinitializing = State is CameraRecoveryState.PermissionObservedOn
+            or CameraRecoveryState.NeedsLocalVerification
+            or CameraRecoveryState.NeedsCameraReinitialization;
+        if (reinitializing)
+        {
+            TeamsWindowId = string.IsNullOrWhiteSpace(windowId) ? null : windowId;
+            TeamsWindowTitle = Clean(title);
+            Target = null;
+            LocalVerifierPassed = false;
+            State = CameraRecoveryState.NeedsCameraReinitialization;
+            Detail = TeamsWindowId is null
+                ? "Choose the reopened Teams window before running the private visual check."
+                : $"Rebound to “{TeamsWindowTitle}”. Open Teams Devices or prejoin, then run Private visual check.";
+            return;
+        }
         if (State is CameraRecoveryState.Idle or CameraRecoveryState.Cancelled || IsTerminal) Start();
         TeamsWindowId = string.IsNullOrWhiteSpace(windowId) ? null : windowId;
         TeamsWindowTitle = Clean(title);
@@ -241,7 +258,7 @@ internal sealed class CameraRecoverySession
         State = CameraRecoveryState.NeedsTeamsObservation;
         Detail = TeamsWindowId is null
             ? "Choose the exact Teams window before inspection."
-            : $"Selected “{TeamsWindowTitle}”. Inspect controls only when Teams shows the camera problem.";
+            : $"Selected “{TeamsWindowTitle}”. Open Settings > Devices, then inspect controls only.";
     }
 
     public void ApplyTeamsObservation(TeamsCameraObservation observation)
@@ -318,7 +335,18 @@ internal sealed class CameraRecoverySession
         }
         switch (observation.Finding)
         {
+            case CameraSettingsFinding.WrongPage:
+                MoveTo(CameraRecoveryState.WrongSettingsPage,
+                    "Windows Settings did not verify as the Camera privacy page. No permission claim or target was accepted.");
+                break;
             case CameraSettingsFinding.PermissionOff when observation.Target is not null:
+                if (observation.Target.AutomationId != CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle
+                    || string.IsNullOrWhiteSpace(observation.Target.ObservationId))
+                {
+                    MoveTo(CameraRecoveryState.Unsupported,
+                        "The Camera Settings target did not match the pinned Teams permission control.");
+                    break;
+                }
                 Target = observation.Target;
                 MoveTo(CameraRecoveryState.VerifiedTarget,
                     "A current Camera Settings target was verified. Choose Show me; MSGuide will not click it.");
@@ -378,6 +406,13 @@ internal sealed class CameraRecoverySession
         }
 
         LocalVerifierPassed = result.LocalVerifierPassed;
+        if (result.Finding == CameraVerificationFinding.Ready && !result.Reinitialized)
+        {
+            LocalVerifierPassed = false;
+            MoveTo(CameraRecoveryState.NeedsCameraReinitialization,
+                "The verifier did not prove that Teams reinitialized its camera after permission restoration. Reopen prejoin or Teams Devices, or relaunch Teams yourself, then check again.");
+            return;
+        }
         if (result.Finding == CameraVerificationFinding.NeedsReinitialization)
         {
             LocalVerifierPassed = false;

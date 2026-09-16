@@ -375,9 +375,16 @@ class CopilotProvider:
             for approved in context.targets:
                 element = observation.elements[approved.elementIndex]
                 targets[approved.id] = Target(
+                    targetId=element.targetId,
                     label=element.label,
                     box=element.box,
                     confidence=element.confidence,
+                    processId=element.processId,
+                    automationId=element.automationId,
+                    frameworkId=element.frameworkId,
+                    isEnabled=element.isEnabled,
+                    isOffscreen=element.isOffscreen,
+                    toggleState=element.toggleState,
                 )
         except (IndexError, ValidationError):
             raise CopilotProviderFailure(

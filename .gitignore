@@ -6,6 +6,8 @@ __pycache__/
 htmlcov/
 desktop/bin/
 desktop/obj/
+desktop/CaptureProbe/bin/
+desktop/CaptureProbe/obj/
 .env
 .env.*
 !.env.example

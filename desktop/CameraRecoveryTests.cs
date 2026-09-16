@@ -48,10 +48,17 @@ internal static class CameraRecoveryTests
             && session.CanReturnToTeams, "permission alone not ready");
         session.MarkReturnedToTeams();
         session.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, true, ""));
+        Check(session.State == CameraRecoveryState.NeedsCameraReinitialization
+            && !session.LocalVerifierPassed, "first verification requires camera reinitialization");
+        session.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, true, "",
+            Reinitialized: true));
         Check(session.State == CameraRecoveryState.Ready && session.LocalVerifierPassed, "local verifier ready");
 
         var falseReady = PermissionOnSession();
-        falseReady.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, false, ""));
+        falseReady.ApplyVerification(new("teams-1", CameraVerificationFinding.NeedsReinitialization,
+            false, ""));
+        falseReady.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, false, "",
+            Reinitialized: true));
         Check(falseReady.State == CameraRecoveryState.UnresolvedAfterPermission
             && !falseReady.LocalVerifierPassed, "false verifier cannot claim ready");
 
@@ -65,7 +72,8 @@ internal static class CameraRecoveryTests
         Check(reinitialize.State == CameraRecoveryState.NeedsCameraReinitialization
             && reinitialize.CanVerifyTeams && !reinitialize.LocalVerifierPassed,
             "live camera session requires reinitialization");
-        reinitialize.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, true, ""));
+        reinitialize.ApplyVerification(new("teams-1", CameraVerificationFinding.Ready, true, "",
+            Reinitialized: true));
         Check(reinitialize.State == CameraRecoveryState.Ready, "ready after explicit reinitialization");
 
         var alreadyOn = StartedSession();
@@ -108,11 +116,19 @@ internal static class CameraRecoveryTests
             "unproven Settings UIA rejected");
 
         var wrongSettingsPage = SettingsSession();
-        wrongSettingsPage.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
+        wrongSettingsPage.ApplySettingsObservation(new(CameraSettingsFinding.WrongPage, "",
             Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
             Page: CameraSettingsPage.Other));
         Check(wrongSettingsPage.State == CameraRecoveryState.WrongSettingsPage
             && !wrongSettingsPage.LocalVerifierPassed, "Settings URI landing verified");
+
+        var wrongPinnedTarget = SettingsSession();
+        wrongPinnedTarget.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
+            new CameraRecoveryTarget("wrong", "Another app", "wrong-toggle"),
+            CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
+        Check(wrongPinnedTarget.State == CameraRecoveryState.Unsupported,
+            "wrong pinned target rejected");
 
         var alreadyOnInSettings = SettingsSession();
         alreadyOnInSettings.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
@@ -124,6 +140,14 @@ internal static class CameraRecoveryTests
         var cancelled = StartedSession();
         cancelled.Cancel();
         Check(cancelled.State == CameraRecoveryState.Cancelled && !cancelled.LocalVerifierPassed, "cancelled");
+
+        var rebind = PermissionOnSession();
+        rebind.ApplyVerification(new("teams-1", CameraVerificationFinding.NeedsReinitialization,
+            false, ""));
+        rebind.ChooseTeamsWindow("teams-2", "Reopened Microsoft Teams");
+        Check(rebind.State == CameraRecoveryState.NeedsCameraReinitialization
+            && rebind.TeamsWindowId == "teams-2" && rebind.CanVerifyTeams,
+            "reopened Teams window can be rebound without losing permission evidence");
 
         bool invalidTransitionRejected = false;
         try { new CameraRecoverySession().MarkReturnedToTeams(); }

@@ -145,7 +145,7 @@ public static class CaptureService
         return bytes;
     }
 
-    private static (ElementInfo[], string, string) ReadAutomation(WindowChoice window, Native.RECT rect, CancellationToken ct)
+    internal static (ElementInfo[], string, string) ReadAutomation(WindowChoice window, Native.RECT rect, CancellationToken ct)
     {
         var elements = new List<ElementInfo>();
         var text = new List<string>();

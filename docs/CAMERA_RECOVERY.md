@@ -20,9 +20,18 @@ Managed/disabled, permission-already-on or wrong-cause, stale/moved, unsupported
 
 ## Privacy
 
-The camera journey does not call the existing full-window `CaptureService` and does not fall back to that raw screenshot workflow. Teams and Settings observations enter through `ICameraRecoverySensing`; the provider must disclose whether it is controls-only, private visual, fixture, or unsupported. The default implementation reports unsupported and captures nothing.
+The initial Teams and Camera Settings inspections use UI Automation only and do
+not create screenshot pixels. The final **Private visual check** captures two
+selected-window frames locally through Windows Graphics Capture, compares a
+bounded preview region for motion, and disposes the evidence without uploading
+or saving it. This check is initiated only by the user's button click.
 
 `FixtureCameraRecoverySensing` provides a deterministic test-only journey using the pinned packaged-Teams toggle ID `MSTeams_8wekyb3d8bbwe_ToggleSwitch`. Prepare it with permission Off before Teams initializes the camera. The fixture requires a simulated camera reinitialization check and ends in the distinct `FixtureComplete` state, not `Ready`. `PendingCameraRecoverySensing` is the explicit runtime fallback and reports unsupported without trying `PrintWindow`.
+
+`LiveCameraRecoverySensing` is the default. Set
+`MSGUIDE_CAMERA_RECOVERY_MODE=fixture` or launch with `-CameraFixture` to run the
+clearly labelled deterministic fixture. Use `disabled` only to test the explicit
+unsupported fallback.
 
 The Advanced / developer area retains the raw snapshot workflow. Its **Capture / review** action creates a local full-window screenshot before approval controls appear; nothing is uploaded until the user reviews and approves it.
 
@@ -36,6 +45,11 @@ Connect a sensing implementation before `MainWindow` loads by calling `UseCamera
 - a final local Teams verification result.
 
 Observations carry the selected Teams window ID so stale or mismatched results fail closed. The target presenter owns any richer evidence or controls-only geometry integration; camera recovery does not add fields to shared contracts.
+
+The live provider requires the user to reopen Teams Devices or prejoin after
+permission restoration. If Teams recreates its HWND during relaunch, selecting
+the reopened Teams window rebinds the verification step without discarding the
+already observed permission transition.
 
 ### Live probe constraints
 
@@ -54,5 +68,34 @@ Observations carry the selected Teams window ID so stale or mismatched results f
 
 ```powershell
 $env:MSGUIDE_CAMERA_RECOVERY_TESTS = "1"
-desktop\bin\Debug\net10.0-windows\MSGuide.Desktop.exe --self-test --test-results camera-self-test.json
+desktop\bin\Debug\net10.0-windows10.0.19041.0\MSGuide.Desktop.exe --self-test --test-results camera-self-test.json
 ```
+
+## Test the journey
+
+### Fixture first
+
+```powershell
+.\scripts\Start-MSGuide.ps1 -CameraFixture
+```
+
+1. Open Teams and choose its window in the camera card.
+2. Run the complete guide. The first verification requests reinitialization;
+   the second completes as **Fixture complete**, never real camera-ready.
+
+### Pinned live machine
+
+1. Close Teams.
+2. Open `ms-settings:privacy-webcam`.
+3. Leave both global Camera toggles on and turn only the packaged
+   **Microsoft Teams** toggle off.
+4. Start Teams, open **Settings > Devices**, and keep the Video section and
+   Preview visible.
+5. Start MSGuide normally and follow the camera recovery card.
+6. After MSGuide outlines the exact Teams permission, turn it on yourself.
+7. Reopen Teams Devices or relaunch Teams, reselect the new Teams window if
+   needed, and move slightly in the preview during **Private visual check**.
+
+The live check reaches **Verified** only when the Teams Camera selector is
+enabled, Windows reports the packaged Teams app using the camera, and two local
+preview-region frames show motion.

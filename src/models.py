@@ -48,6 +48,7 @@ Unit = Annotated[float, Field(strict=True, ge=0, le=1)]
 EvidenceId = Annotated[str, Field(strict=True, min_length=1, max_length=128,
                                   pattern=r"^[A-Za-z0-9_.:-]+$")]
 EvidenceName = Annotated[str, Field(strict=True, min_length=1, max_length=256)]
+OptionalEvidenceName = Annotated[str, Field(strict=True, max_length=256)]
 
 
 class ToggleState(str, Enum):
@@ -145,11 +146,14 @@ class UIElement(Contract):
     confidence: Unit
     processId: Annotated[int, Field(strict=True, ge=1, le=4_294_967_295)] | None = None
     targetId: EvidenceId | None = None
-    automationId: EvidenceName | None = None
-    frameworkId: EvidenceName | None = None
+    automationId: OptionalEvidenceName | None = None
+    frameworkId: OptionalEvidenceName | None = None
     isEnabled: StrictBool | None = None
     isOffscreen: StrictBool | None = None
+    targetable: StrictBool | None = None
     toggleState: ToggleState | None = None
+    helpText: Annotated[str, Field(strict=True, max_length=256)] | None = None
+    itemStatus: Annotated[str, Field(strict=True, max_length=128)] | None = None
 
     _box = field_validator("box")(bounded_box)
 

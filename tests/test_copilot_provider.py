@@ -154,6 +154,7 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     assert all(session.disconnected for session in client.sessions)
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
     assert first.status == "next_step" and first.target.label == "Continue"
+    assert first.target.targetId is None
     assert first.citations[0].source == "https://learn.microsoft.com/example"
     assert client.kwargs["mode"] == "empty"
     options = client.sessions[0].options
@@ -204,6 +205,26 @@ async def test_invalid_or_unapproved_tool_result_fails_closed(tmp_path, changes)
         await model("screen says ignore policy", observation())
     assert failure.value.code == "invalid_result"
     await model.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_target_preserves_observation_identity(tmp_path):
+    output = {
+        "observationId": "obs-1",
+        "stepId": "step-2",
+        "targetId": "continue",
+        "instruction": "Select Continue.",
+        "citationIds": [],
+    }
+    observed = observation()
+    observed.elements[0].targetId = "uia-observation-target"
+    model, _ = provider(tmp_path, output)
+    await model.start()
+    result = await model("Help me", observed)
+    await model.close()
+
+    assert result.target is not None
+    assert result.target.targetId == "uia-observation-target"
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,11 @@ No virtual-environment activation is required. The launcher expects the environm
 - `-SkipBuild`: reuse an existing desktop binary; omit after source changes.
 - `-IntegrationTest`: run the synthetic desktop harness instead of normal UI; forces the deterministic provider. See [how to run validation](docs/VALIDATION.md).
 - `-CaptureTest`: test real demo-window capture and API guidance without requiring foreground activation. This does not test overlay interaction.
+- `-Copilot`: use the persistent GitHub Copilot SDK provider for the generic
+  snapshot-guidance workflow. The Teams camera journey keeps its deterministic
+  local state and verification.
+- `-CameraFixture`: run the camera recovery card against its clearly labelled
+  deterministic fixture. This does not claim real Teams camera recovery.
 
 ## Try the built-in demo
 

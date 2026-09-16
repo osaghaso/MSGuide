@@ -24,7 +24,16 @@ public partial class MainWindow
         UpdateCameraRecoveryUi();
     }
 
-    private void InitializeCameraRecovery() => UpdateCameraRecoveryUi();
+    private void InitializeCameraRecovery()
+    {
+        cameraRecoverySensing = Environment.GetEnvironmentVariable("MSGUIDE_CAMERA_RECOVERY_MODE") switch
+        {
+            "fixture" => new FixtureCameraRecoverySensing(),
+            "disabled" => new PendingCameraRecoverySensing(),
+            _ => new LiveCameraRecoverySensing(overlay)
+        };
+        UpdateCameraRecoveryUi();
+    }
 
     private void RefreshCameraWindows(IReadOnlyList<WindowChoice> windows)
     {
@@ -106,8 +115,11 @@ public partial class MainWindow
         CameraInspectButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanInspectTeams;
         CameraPrivateCheckButton.IsEnabled = !cameraRecoveryBusy
             && (cameraRecovery.CanInspectSettings || cameraRecovery.CanVerifyTeams);
+        CameraPrivateCheckButton.Content = cameraRecovery.CanInspectSettings
+            ? "Inspect Camera Settings"
+            : "Private visual check";
         AutomationProperties.SetName(CameraPrivateCheckButton, cameraRecovery.CanInspectSettings
-            ? "Run a private Camera Settings visual check"
+            ? "Inspect Camera Settings controls without capturing pixels"
             : "Run the local Teams camera readiness verifier");
         CameraOpenSettingsButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanOpenSettings;
         CameraShowButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanShowTarget;

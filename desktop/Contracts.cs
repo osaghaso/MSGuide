@@ -5,7 +5,9 @@ using System.Windows;
 namespace MSGuide.Desktop;
 
 public sealed record ElementInfo(string Role, string Label, double[] Box, double Confidence = 0.95,
-    string TargetId = "", string AutomationId = "", string FrameworkId = "",
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] string TargetId = "",
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] string AutomationId = "",
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] string FrameworkId = "",
     bool IsEnabled = true, bool Targetable = true,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ToggleState = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? HelpText = null,

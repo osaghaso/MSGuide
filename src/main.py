@@ -9,8 +9,10 @@ import hashlib
 import ipaddress
 import json
 import os
+from pathlib import Path
 import re
 import secrets
+import sys
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -23,6 +25,11 @@ from starlette.datastructures import Headers
 from src import guidance
 from src.actions import ActionRunner, ActionStatus
 from src.camera_recovery import CameraRecoveryEngine, CameraRecoveryError
+from src.copilot_provider import (
+    AgencyMicrosoftLearnConfig,
+    CopilotProvider,
+    CopilotProviderConfig,
+)
 from src.model_provider import ModelConfig, OpenAICompatibleProvider
 from src.models import (
     ActionRiskLevel, AssistRequest, ExecuteRequest, GuidanceRequest, GuidanceResponse,
@@ -175,11 +182,45 @@ def fresh(captured_at):
         raise HTTPException(422, "Observation must be at most 60 seconds old and at most 5 seconds in the future")
 
 
+def _copilot_context(observation):
+    targets = []
+    for index, element in enumerate(observation.elements):
+        if element.confidence < 0.8 or element.isEnabled is False or element.isOffscreen is True:
+            continue
+        targets.append({
+            "id": element.targetId or f"element-{index}",
+            "elementIndex": index,
+        })
+    citations = []
+    if "teams" in observation.application.casefold():
+        citations.append({
+            "id": "teams-camera-support",
+            "citation": {
+                "source": "https://support.microsoft.com/en-us/teams/meetings/my-camera-isn-t-working-in-microsoft-teams",
+                "title": "My camera isn't working in Microsoft Teams",
+            },
+        })
+    if "settings" in observation.application.casefold():
+        citations.append({
+            "id": "windows-camera-permissions",
+            "citation": {
+                "source": "https://support.microsoft.com/en-us/windows/privacy/manage-app-permissions-for-a-camera-in-windows",
+                "title": "Manage app permissions for a camera in Windows",
+            },
+        })
+    return {
+        "observationId": observation.id,
+        "stepId": "screen-guidance",
+        "targets": targets,
+        "citations": citations,
+    }
+
+
 def create_app(config: Config | None = None, *, guidance_provider=None) -> FastAPI:
     config = config or Config.from_env()
     if config.mode != "demo":
         raise ValueError("Only local MSGUIDE_MODE=demo is supported")
-    if config.guidance_provider not in {"demo", "openai-compatible"}:
+    if config.guidance_provider not in {"demo", "openai-compatible", "copilot-sdk"}:
         raise ValueError("Unknown guidance provider")
     if config.max_body_bytes < 1 or config.max_records < 1:
         raise ValueError("Limits must be positive")
@@ -189,6 +230,24 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
         model_config.validate()
         if guidance_provider is None:
             provider = OpenAICompatibleProvider(model_config)
+    if config.guidance_provider == "copilot-sdk" and guidance_provider is None:
+        base_directory = Path(os.getenv(
+            "MSGUIDE_COPILOT_HOME",
+            str(Path(os.getenv("LOCALAPPDATA", Path.home())) / "MSGuide" / "copilot"),
+        )).expanduser().resolve()
+        configured_cli = os.getenv("COPILOT_CLI_PATH", "")
+        provider = CopilotProvider(
+            CopilotProviderConfig(
+                model=os.getenv("MSGUIDE_COPILOT_MODEL", "auto"),
+                base_directory=base_directory,
+                cli_path=Path(configured_cli).expanduser().resolve() if configured_cli else None,
+                agency_microsoft_learn=AgencyMicrosoftLearnConfig(
+                    enabled=os.getenv("MSGUIDE_ENABLE_AGENCY_LEARN", "").lower() == "true",
+                ),
+            ),
+            _copilot_context,
+        )
+    lifecycle_provider = provider if isinstance(provider, CopilotProvider) else None
     camera_recovery = CameraRecoveryEngine(secrets.token_bytes(32))
     runner = ActionRunner()
     sessions: dict[str, Session] = {}
@@ -199,13 +258,19 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
 
     @asynccontextmanager
     async def lifespan(app):
-        yield
-        await runner.close()
-        sessions.clear()
-        previews.clear()
-        grants.clear()
-        audit.clear()
-        camera_recovery.clear()
+        if lifecycle_provider is not None:
+            await lifecycle_provider.start()
+        try:
+            yield
+        finally:
+            await runner.close()
+            if lifecycle_provider is not None:
+                await lifecycle_provider.close()
+            sessions.clear()
+            previews.clear()
+            grants.clear()
+            audit.clear()
+            camera_recovery.clear()
 
     app = FastAPI(title="MSGuide local demo", version="0.2.0", lifespan=lifespan)
     app.add_middleware(LocalBoundary, config=config)
@@ -217,8 +282,11 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         # Pydantic v2 errors include input: never reflect raw prompt/image/text or tool payloads.
-        return JSONResponse({"detail": [{"loc": error["loc"], "type": error["type"],
-                                          "msg": "Invalid request value"} for error in exc.errors()]}, status_code=422)
+        errors = [{"loc": error["loc"], "type": error["type"],
+                   "msg": "Invalid request value"} for error in exc.errors()]
+        if os.getenv("MSGUIDE_DEBUG_VALIDATION", "").lower() == "true":
+            print(json.dumps(errors, default=str), file=sys.stderr)
+        return JSONResponse({"detail": errors}, status_code=422)
 
     def event(correlation, outcome):
         if config.enable_audit:
