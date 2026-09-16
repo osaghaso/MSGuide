@@ -2,6 +2,19 @@
 
 MSGuide now presents Teams camera recovery as the primary, guide-only journey. The shared editable prompt accepts typed text and local click-to-toggle dictation; camera-help intent is recognized locally without calling the guidance backend.
 
+## Companion shell
+
+The desktop shell keeps one contextual camera action visible at a time. Start
+recovery, choose the exact Teams window, and follow the primary button in the
+camera card. Progress, the current step, and the selected window remain together
+so loading, reinitialization, terminal errors, and verified completion are not
+mistaken for success.
+
+Build Center, Notepad, service checks, raw snapshot diagnostics, and detailed
+privacy/technical notes are collapsed under **Advanced**. The camera card's
+privacy chips summarize the active contract: controls-only inspection, a
+user-initiated local visual check, and no automatic clicks.
+
 ## Journey
 
 1. Choose the exact Teams window.

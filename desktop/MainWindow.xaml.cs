@@ -101,8 +101,8 @@ public partial class MainWindow : Window
             {
                 Native.GetDpiForMonitor(monitor, 0, out var dpi, out _);
                 double scale = dpi > 0 ? dpi / 96d : 1;
-                int width = Math.Min(info.Work.Width, (int)Math.Round(480 * scale));
-                int height = Math.Min(info.Work.Height, (int)Math.Round(780 * scale));
+                int width = Math.Min(info.Work.Width, (int)Math.Round(620 * scale));
+                int height = Math.Min(info.Work.Height, (int)Math.Round(800 * scale));
                 int x = Math.Clamp(cursor.X + 18, info.Work.Left, info.Work.Right - width);
                 int y = Math.Clamp(cursor.Y + 18, info.Work.Top, info.Work.Bottom - height);
                 Native.SetWindowPos(Handle, 0, x, y, width, height, 0x14);

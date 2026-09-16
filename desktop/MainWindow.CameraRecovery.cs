@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace MSGuide.Desktop;
 
@@ -13,6 +14,8 @@ public partial class MainWindow
     private int cameraRecoveryGeneration;
     private bool cameraRecoveryBusy;
     private bool refreshingCameraWindows;
+    private bool cameraTargetPresentationAttempted;
+    private bool cameraTargetShown;
     private string? cameraRecoveryNotice;
 
     internal void UseCameraRecoverySensing(ICameraRecoverySensing sensing)
@@ -49,6 +52,8 @@ public partial class MainWindow
         CancelCameraOperation();
         cameraRecovery = new CameraRecoverySession();
         cameraRecovery.Start();
+        cameraTargetPresentationAttempted = false;
+        cameraTargetShown = false;
         if (CameraWindowPicker.SelectedItem is WindowChoice selected)
             cameraRecovery.ChooseTeamsWindow(selected.Id, selected.Title);
         cameraRecoveryNotice = fromPrompt
@@ -63,6 +68,8 @@ public partial class MainWindow
         CancelCameraOperation();
         if (cameraRecovery.State == CameraRecoveryState.Idle) return;
         cameraRecovery.Cancel("Stopped because another workflow or prompt replaced this camera recovery session.");
+        cameraTargetPresentationAttempted = false;
+        cameraTargetShown = false;
         cameraRecoveryNotice = null;
         UpdateCameraRecoveryUi();
     }
@@ -102,9 +109,15 @@ public partial class MainWindow
         CameraStateText.Text = CameraStateLabel(cameraRecovery.State);
         CameraSensingText.Text = cameraRecoverySensing.Mode switch
         {
-            CameraRecoverySensingMode.Fixture => $"SENSING · fixture · {CameraRecoveryPinnedTargets.FixturePreparation}",
-            CameraRecoverySensingMode.Connected => "SENSING · connected local provider · modality must be disclosed",
-            _ => "SENSING · unsupported fallback · no screenshot"
+            CameraRecoverySensingMode.Fixture => "Fixture mode",
+            CameraRecoverySensingMode.Connected => "Local sensing",
+            _ => "Sensing unavailable"
+        };
+        CameraSensingText.ToolTip = cameraRecoverySensing.Mode switch
+        {
+            CameraRecoverySensingMode.Fixture => CameraRecoveryPinnedTargets.FixturePreparation,
+            CameraRecoverySensingMode.Connected => "Connected local provider. Each observation method is disclosed before use.",
+            _ => "Unsupported fallback. No screenshot is taken."
         };
         CameraStepText.Text = cameraRecoveryNotice ?? cameraRecovery.Detail;
         CameraStartButton.Content = cameraRecovery.State == CameraRecoveryState.Idle
@@ -128,31 +141,112 @@ public partial class MainWindow
         bool canStop = cameraRecovery.State is not (CameraRecoveryState.Idle or CameraRecoveryState.Cancelled);
         CameraStopButton.IsEnabled = canStop;
         CameraTakeOverButton.IsEnabled = canStop;
+
+        bool showRestart = !cameraRecoveryBusy
+            && (cameraRecovery.State == CameraRecoveryState.Idle || cameraRecovery.IsTerminal);
+        CameraStartButton.Visibility = showRestart ? Visibility.Visible : Visibility.Collapsed;
+        CameraSelectionPanel.Visibility = cameraRecovery.State == CameraRecoveryState.Idle
+            ? Visibility.Collapsed : Visibility.Visible;
+        CameraChooseWindowButton.Visibility = !cameraRecoveryBusy
+                && cameraRecovery.State == CameraRecoveryState.NeedsTeamsObservation
+                && CameraWindowPicker.SelectedItem is null
+            ? Visibility.Visible : Visibility.Collapsed;
+        CameraInspectButton.Visibility = CameraInspectButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+        CameraOpenSettingsButton.Visibility = CameraOpenSettingsButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+        CameraPrivateCheckButton.Visibility = CameraPrivateCheckButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+        CameraShowButton.Content = cameraTargetPresentationAttempted ? "Try showing again" : "Show me";
+        CameraShowButton.Style = (Style)FindResource(cameraTargetPresentationAttempted
+            ? "QuietButtonStyle" : "PrimaryButtonStyle");
+        CameraShowButton.Visibility = CameraShowButton.IsEnabled && !cameraTargetShown
+            ? Visibility.Visible : Visibility.Collapsed;
+        CameraChangedCheckButton.Visibility = CameraChangedCheckButton.IsEnabled
+                && (cameraTargetShown || cameraTargetPresentationAttempted)
+            ? Visibility.Visible : Visibility.Collapsed;
+        CameraReturnButton.Visibility = CameraReturnButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+        CameraSessionActions.Visibility = canStop ? Visibility.Visible : Visibility.Collapsed;
+
+        int progress = CameraProgress(cameraRecovery.State);
+        CameraProgressBar.IsIndeterminate = cameraRecoveryBusy;
+        CameraProgressBar.Value = progress;
+        CameraProgressText.Text = cameraRecoveryBusy
+            ? "Checking…"
+            : cameraRecovery.State == CameraRecoveryState.Idle
+                ? "Ready when you are"
+                : cameraRecovery.State == CameraRecoveryState.Ready
+                    ? "Complete"
+                    : cameraRecovery.State == CameraRecoveryState.FixtureComplete
+                        ? "Fixture run complete"
+                    : cameraRecovery.IsTerminal
+                        ? "Needs attention"
+                        : $"{progress} of 7";
+        AutomationProperties.SetName(CameraProgressBar,
+            cameraRecoveryBusy ? "Camera recovery check in progress" : $"Camera recovery step {progress} of 7");
+        UpdateCameraStateAppearance(progress);
         focus?.Focus();
     }
 
     private static string CameraStateLabel(CameraRecoveryState state) => state switch
     {
-        CameraRecoveryState.Idle => "IDLE · no camera recovery active",
-        CameraRecoveryState.NeedsTeamsObservation => "STEP 1 · needs Teams observation",
-        CameraRecoveryState.Diagnosis => "STEP 2 · diagnosis available",
-        CameraRecoveryState.NeedsCameraSettings => "STEP 3 · ready to open Camera Settings",
-        CameraRecoveryState.NeedsSettingsObservation => "STEP 4 · verify Camera privacy page and observe Settings",
-        CameraRecoveryState.VerifiedTarget => "STEP 5 · verified target available",
-        CameraRecoveryState.PermissionObservedOn => "STEP 6 · permission observed on · not yet camera-ready",
-        CameraRecoveryState.NeedsLocalVerification => "STEP 7 · needs local Teams verification",
-        CameraRecoveryState.NeedsCameraReinitialization => "STEP 7 · reopen or reinitialize Teams camera, then verify again",
-        CameraRecoveryState.Ready => "VERIFIED · local camera readiness check passed",
-        CameraRecoveryState.FixtureComplete => "FIXTURE COMPLETE · simulated verifier passed · not camera-ready",
-        CameraRecoveryState.WrongSettingsPage => "STOPPED · Windows Settings did not verify as the Camera page",
-        CameraRecoveryState.ManagedOrDisabled => "STOPPED · camera access is managed or disabled",
-        CameraRecoveryState.AlreadyOnOrWrongCause => "STOPPED · permission is already on or not the cause",
-        CameraRecoveryState.StaleOrMoved => "STOPPED · observed screen is stale, moved, or closed",
-        CameraRecoveryState.UnresolvedAfterPermission => "UNRESOLVED · permission is on but Teams is not verified ready",
-        CameraRecoveryState.Unsupported => "UNSUPPORTED · required local sensing or screen state is unavailable",
-        CameraRecoveryState.Cancelled => "CANCELLED · manual control restored",
-        _ => "STOPPED · unknown camera recovery state"
+        CameraRecoveryState.Idle => "Ready to help",
+        CameraRecoveryState.NeedsTeamsObservation => "Choose and inspect Teams",
+        CameraRecoveryState.Diagnosis => "Camera permission may be blocked",
+        CameraRecoveryState.NeedsCameraSettings => "Open Camera settings",
+        CameraRecoveryState.NeedsSettingsObservation => "Check the Camera privacy page",
+        CameraRecoveryState.VerifiedTarget => "Teams permission found",
+        CameraRecoveryState.PermissionObservedOn => "Permission is on · verify Teams next",
+        CameraRecoveryState.NeedsLocalVerification => "Check the Teams camera",
+        CameraRecoveryState.NeedsCameraReinitialization => "Reinitialize the Teams camera",
+        CameraRecoveryState.Ready => "Camera ready",
+        CameraRecoveryState.FixtureComplete => "Fixture complete · not a real readiness claim",
+        CameraRecoveryState.WrongSettingsPage => "Camera settings page not found",
+        CameraRecoveryState.ManagedOrDisabled => "Camera access is managed or disabled",
+        CameraRecoveryState.AlreadyOnOrWrongCause => "Permission is not the cause",
+        CameraRecoveryState.StaleOrMoved => "Selected window changed",
+        CameraRecoveryState.UnresolvedAfterPermission => "Camera still needs attention",
+        CameraRecoveryState.Unsupported => "This screen cannot be checked safely",
+        CameraRecoveryState.Cancelled => "Recovery stopped",
+        _ => "Recovery stopped"
     };
+
+    private static int CameraProgress(CameraRecoveryState state) => state switch
+    {
+        CameraRecoveryState.Idle => 0,
+        CameraRecoveryState.NeedsTeamsObservation or CameraRecoveryState.StaleOrMoved
+            or CameraRecoveryState.Unsupported or CameraRecoveryState.Cancelled => 1,
+        CameraRecoveryState.Diagnosis or CameraRecoveryState.NeedsCameraSettings
+            or CameraRecoveryState.AlreadyOnOrWrongCause or CameraRecoveryState.ManagedOrDisabled => 2,
+        CameraRecoveryState.NeedsSettingsObservation or CameraRecoveryState.WrongSettingsPage => 3,
+        CameraRecoveryState.VerifiedTarget => 4,
+        CameraRecoveryState.PermissionObservedOn => 5,
+        CameraRecoveryState.NeedsLocalVerification or CameraRecoveryState.NeedsCameraReinitialization
+            or CameraRecoveryState.UnresolvedAfterPermission => 6,
+        CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete => 7,
+        _ => 0
+    };
+
+    private void UpdateCameraStateAppearance(int progress)
+    {
+        bool success = cameraRecovery.State == CameraRecoveryState.Ready;
+        bool fixture = cameraRecovery.State == CameraRecoveryState.FixtureComplete;
+        bool terminalProblem = cameraRecovery.IsTerminal
+            && cameraRecovery.State is not (CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete);
+        bool warning = cameraRecovery.State is CameraRecoveryState.PermissionObservedOn
+            or CameraRecoveryState.NeedsCameraReinitialization or CameraRecoveryState.FixtureComplete;
+
+        string background = success ? "SuccessSoftBrush"
+            : terminalProblem ? "DangerSoftBrush"
+            : warning ? "WarningSoftBrush"
+            : "SurfaceRaisedBrush";
+        string foreground = success ? "SuccessBrush"
+            : terminalProblem ? "DangerBrush"
+            : warning ? "WarningBrush"
+            : "AccentBrush";
+        CameraStatePanel.Background = (Brush)FindResource(background);
+        CameraStatePanel.BorderBrush = (Brush)FindResource(foreground);
+        CameraStateGlyph.Foreground = (Brush)FindResource(foreground);
+        CameraStateGlyph.Text = success ? "✓" : fixture ? "◇" : terminalProblem ? "!"
+            : progress == 0 ? "○" : progress.ToString();
+    }
 
     private async Task ObserveCameraSettings()
     {
@@ -165,6 +259,8 @@ public partial class MainWindow
             if (!CurrentCameraOperation(generation, token)) return;
             cameraRecoveryNotice = null;
             cameraRecovery.ApplySettingsObservation(observation);
+            cameraTargetPresentationAttempted = false;
+            cameraTargetShown = false;
             UpdateCameraRecoveryUi(CameraFocusForState());
         }
         catch (OperationCanceledException)
@@ -215,6 +311,8 @@ public partial class MainWindow
         if (!loaded || refreshingCameraWindows) return;
         CancelCameraOperation();
         cameraRecoveryNotice = null;
+        cameraTargetPresentationAttempted = false;
+        cameraTargetShown = false;
         if (CameraWindowPicker.SelectedItem is WindowChoice selected)
             cameraRecovery.ChooseTeamsWindow(selected.Id, selected.Title);
         else
@@ -288,6 +386,8 @@ public partial class MainWindow
     private async void CameraShow_Click(object sender, RoutedEventArgs e)
     {
         if (!cameraRecovery.CanShowTarget || cameraRecovery.Target is not { } target) return;
+        cameraTargetPresentationAttempted = true;
+        cameraTargetShown = false;
         var (token, generation) = BeginCameraOperation();
         cameraRecoveryNotice = "Showing only the current verified target…";
         UpdateCameraRecoveryUi();
@@ -297,6 +397,7 @@ public partial class MainWindow
             if (!CurrentCameraOperation(generation, token)) return;
             cameraRecoveryNotice = null;
             cameraRecovery.RecordTargetPresentation(presentation);
+            cameraTargetShown = presentation.Shown;
         }
         catch (OperationCanceledException)
         {
@@ -388,6 +489,8 @@ public partial class MainWindow
     {
         CancelCameraOperation();
         cameraRecovery.Cancel();
+        cameraTargetPresentationAttempted = false;
+        cameraTargetShown = false;
         cameraRecoveryNotice = null;
         StatusText.Text = "Camera recovery stopped · no further observation or guidance will run.";
         UpdateCameraRecoveryUi(CameraStartButton);
@@ -397,6 +500,8 @@ public partial class MainWindow
     {
         CancelCameraOperation();
         cameraRecovery.Cancel("Manual takeover. Continue in Teams or Settings yourself; MSGuide has no active camera guidance.");
+        cameraTargetPresentationAttempted = false;
+        cameraTargetShown = false;
         cameraRecoveryNotice = null;
         StatusText.Text = "Manual takeover · camera guidance stopped.";
         UpdateCameraRecoveryUi(CameraStartButton);
