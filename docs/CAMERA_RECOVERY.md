@@ -20,7 +20,7 @@ Managed/disabled, permission-already-on or wrong-cause, stale/moved, unsupported
 
 ## Privacy
 
-The camera journey does not call the existing full-window `CaptureService`. It requests controls-only sensing through `ICameraRecoverySensing` and does not fall back to a screenshot. The default implementation reports unsupported because controls-only sensing is not available on this branch.
+The camera journey does not call the existing full-window `CaptureService` and does not fall back to that raw screenshot workflow. Teams and Settings observations enter through `ICameraRecoverySensing`; the provider must disclose whether it is controls-only, private visual, fixture, or unsupported. The default implementation reports unsupported and captures nothing.
 
 `FixtureCameraRecoverySensing` provides a deterministic test-only journey. It is never selected by default and ends in the distinct `FixtureComplete` state, not `Ready`. `PendingCameraRecoverySensing` is the explicit runtime fallback and reports unsupported without trying `PrintWindow`.
 
@@ -36,6 +36,13 @@ Connect a sensing implementation before `MainWindow` loads by calling `UseCamera
 - a final local Teams verification result.
 
 Observations carry the selected Teams window ID so stale or mismatched results fail closed. The target presenter owns any richer evidence or controls-only geometry integration; camera recovery does not add fields to shared contracts.
+
+### Live probe constraints
+
+- New Teams can expose a top-level HWND owned by one process while useful WebView UIA descendants report another process ID. A Teams sensor must stay rooted to the selected HWND but must not discard descendants only because `AutomationElement.Current.ProcessId` differs from the selected top-level PID.
+- A live Teams probe exposed useful controls including `more-options-header`, the Settings > Devices tab, `AudioSettings`, `VideoSettings`, the Camera combo box and selected camera text, `open_camera_settings`, and video-setting toggle states. These are probe evidence, not permanent identifiers; sensing must still fail closed when they move or disappear.
+- On the probed Windows build, both the SystemSettings CoreWindow and ApplicationFrameWindow returned zero UIA descendants, and exact global searches found no Camera access toggles. Pure Settings UIA is therefore unproven. Supported Settings findings require a disclosed source and `ProbeValidated == true`; otherwise the session moves to `Unsupported`.
+- Current-machine tests also produced a blank owned-demo `PrintWindow` capture and a demo activation failure. Those failures are not treated as camera-sensing acceptance.
 
 ## Deterministic tests
 

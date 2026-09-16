@@ -35,9 +35,9 @@
             <WrapPanel>
               <Button x:Name="CameraChooseWindowButton" Content="Choose Teams window" Click="CameraChooseWindow_Click" AutomationProperties.Name="Refresh and choose the exact Teams window"/>
               <Button x:Name="CameraInspectButton" Content="Inspect controls only" Click="CameraInspect_Click" IsEnabled="False" AutomationProperties.Name="Inspect current controls without a screenshot"/>
-              <Button x:Name="CameraPrivateCheckButton" Content="Private visual check" Click="CameraPrivateCheck_Click" IsEnabled="False" AutomationProperties.Name="Run local Teams camera readiness verifier"/>
+              <Button x:Name="CameraPrivateCheckButton" Content="Private visual check" Click="CameraPrivateCheck_Click" IsEnabled="False" AutomationProperties.Name="Run a private Settings or Teams visual check"/>
             </WrapPanel>
-            <TextBlock Text="The camera path requests controls-only local sensing and never falls back to the full-screenshot workflow. That sensing integration is pending in this branch; when unavailable, MSGuide says unsupported rather than capturing a screenshot." FontSize="12" Foreground="#E8C98B"/>
+            <TextBlock Text="Teams inspection must stay rooted to the selected window while allowing cross-process WebView descendants. Camera Settings UIA is unproven on this Windows build, so Settings requires a separately disclosed private visual provider, fixture, or an honest unsupported result. This path never falls back to the raw full-screenshot workflow." FontSize="12" Foreground="#E8C98B"/>
 
             <WrapPanel Margin="0,8,0,0">
               <Button x:Name="CameraOpenSettingsButton" Content="Open Camera settings" Click="CameraOpenSettings_Click" IsEnabled="False" AutomationProperties.Name="Open Windows camera privacy settings"/>

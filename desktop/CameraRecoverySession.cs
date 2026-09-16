@@ -53,10 +53,20 @@ internal enum CameraRecoverySensingMode
     Connected
 }
 
+internal enum CameraSettingsObservationSource
+{
+    Unknown,
+    ControlsOnly,
+    PrivateVisual,
+    Fixture
+}
+
 internal sealed record TeamsCameraObservation(string WindowId, TeamsCameraFinding Finding, string Detail);
 internal sealed record CameraRecoveryTarget(string ObservationId, string Label);
 internal sealed record CameraSettingsObservation(
-    CameraSettingsFinding Finding, string Detail, CameraRecoveryTarget? Target = null);
+    CameraSettingsFinding Finding, string Detail, CameraRecoveryTarget? Target = null,
+    CameraSettingsObservationSource Source = CameraSettingsObservationSource.Unknown,
+    bool ProbeValidated = false);
 internal sealed record CameraVerificationResult(
     string WindowId, CameraVerificationFinding Finding, bool LocalVerifierPassed, string Detail, bool IsFixture = false);
 internal sealed record CameraTargetPresentation(bool Shown, string Detail);
@@ -64,7 +74,9 @@ internal sealed record CameraTargetPresentation(bool Shown, string Detail);
 internal interface ICameraRecoverySensing
 {
     CameraRecoverySensingMode Mode { get; }
+    // Stay rooted to window.Handle, but do not require WebView descendants to share its process ID.
     Task<TeamsCameraObservation> ObserveTeamsAsync(WindowChoice window, CancellationToken cancellationToken);
+    // Supported findings must identify a disclosed observation source that has passed a live probe.
     Task<CameraSettingsObservation> ObserveSettingsAsync(CancellationToken cancellationToken);
     Task<CameraVerificationResult> VerifyTeamsAsync(WindowChoice window, CancellationToken cancellationToken);
     Task<CameraTargetPresentation> ShowTargetAsync(CameraRecoveryTarget target, CancellationToken cancellationToken);
@@ -125,8 +137,10 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
         settingsObservations++;
         return Task.FromResult(settingsObservations == 1
             ? new CameraSettingsObservation(CameraSettingsFinding.PermissionOff,
-                "Fixture: permission off.", new CameraRecoveryTarget("fixture-settings-1", "Fixture camera permission"))
-            : new CameraSettingsObservation(CameraSettingsFinding.PermissionOn, "Fixture: permission on."));
+                "Fixture: permission off.", new CameraRecoveryTarget("fixture-settings-1", "Fixture camera permission"),
+                CameraSettingsObservationSource.Fixture, ProbeValidated: true)
+            : new CameraSettingsObservation(CameraSettingsFinding.PermissionOn, "Fixture: permission on.",
+                Source: CameraSettingsObservationSource.Fixture, ProbeValidated: true));
     }
 
     public Task<CameraVerificationResult> VerifyTeamsAsync(
@@ -249,7 +263,7 @@ internal sealed class CameraRecoverySession
     {
         Require(State == CameraRecoveryState.NeedsCameraSettings, "Camera Settings was not expected now.");
         MoveTo(CameraRecoveryState.NeedsSettingsObservation,
-            "Camera Settings opened. Leave it visible, then inspect controls only.");
+            "Camera Settings opened. Leave it visible, then use Private visual check. Pure UIA targeting remains unproven.");
     }
 
     public void ApplySettingsObservation(CameraSettingsObservation observation)
@@ -257,6 +271,14 @@ internal sealed class CameraRecoverySession
         Require(State is CameraRecoveryState.NeedsSettingsObservation or CameraRecoveryState.VerifiedTarget,
             "A Camera Settings observation is not expected now.");
         Target = null;
+        if (observation.Finding is CameraSettingsFinding.PermissionOff or CameraSettingsFinding.PermissionOn
+                or CameraSettingsFinding.ManagedOrDisabled
+            && (!observation.ProbeValidated || observation.Source == CameraSettingsObservationSource.Unknown))
+        {
+            MoveTo(CameraRecoveryState.Unsupported,
+                "Camera Settings sensing lacked a disclosed, successfully probed method. No target or permission claim was accepted.");
+            return;
+        }
         switch (observation.Finding)
         {
             case CameraSettingsFinding.PermissionOff when observation.Target is not null:

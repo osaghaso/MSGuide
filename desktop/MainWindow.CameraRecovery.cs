@@ -94,7 +94,7 @@ public partial class MainWindow
         CameraSensingText.Text = cameraRecoverySensing.Mode switch
         {
             CameraRecoverySensingMode.Fixture => "SENSING · deterministic fixture · no real Teams or Settings claim",
-            CameraRecoverySensingMode.Connected => "SENSING · connected controls-only provider",
+            CameraRecoverySensingMode.Connected => "SENSING · connected local provider · modality must be disclosed",
             _ => "SENSING · unsupported fallback · no screenshot"
         };
         CameraStepText.Text = cameraRecoveryNotice ?? cameraRecovery.Detail;
@@ -103,9 +103,12 @@ public partial class MainWindow
         CameraStartButton.IsEnabled = !cameraRecoveryBusy;
         CameraChooseWindowButton.IsEnabled = !cameraRecoveryBusy;
         CameraWindowPicker.IsEnabled = !cameraRecoveryBusy;
-        CameraInspectButton.IsEnabled = !cameraRecoveryBusy
-            && (cameraRecovery.CanInspectTeams || cameraRecovery.CanInspectSettings);
-        CameraPrivateCheckButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanVerifyTeams;
+        CameraInspectButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanInspectTeams;
+        CameraPrivateCheckButton.IsEnabled = !cameraRecoveryBusy
+            && (cameraRecovery.CanInspectSettings || cameraRecovery.CanVerifyTeams);
+        AutomationProperties.SetName(CameraPrivateCheckButton, cameraRecovery.CanInspectSettings
+            ? "Run a private Camera Settings visual check"
+            : "Run the local Teams camera readiness verifier");
         CameraOpenSettingsButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanOpenSettings;
         CameraShowButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanShowTarget;
         CameraChangedCheckButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanCheckChangedSetting;
@@ -122,7 +125,7 @@ public partial class MainWindow
         CameraRecoveryState.NeedsTeamsObservation => "STEP 1 · needs Teams observation",
         CameraRecoveryState.Diagnosis => "STEP 2 · diagnosis available",
         CameraRecoveryState.NeedsCameraSettings => "STEP 3 · ready to open Camera Settings",
-        CameraRecoveryState.NeedsSettingsObservation => "STEP 4 · needs Settings observation",
+        CameraRecoveryState.NeedsSettingsObservation => "STEP 4 · needs private Settings observation · UIA unproven",
         CameraRecoveryState.VerifiedTarget => "STEP 5 · verified target available",
         CameraRecoveryState.PermissionObservedOn => "STEP 6 · permission observed on · not yet camera-ready",
         CameraRecoveryState.NeedsLocalVerification => "STEP 7 · needs local Teams verification",
@@ -140,7 +143,7 @@ public partial class MainWindow
     private async Task ObserveCameraSettings()
     {
         var (token, generation) = BeginCameraOperation();
-        cameraRecoveryNotice = "Inspecting Camera Settings controls locally…";
+        cameraRecoveryNotice = "Running the connected private Camera Settings observation…";
         UpdateCameraRecoveryUi();
         try
         {
@@ -172,7 +175,7 @@ public partial class MainWindow
         CameraRecoveryState.NeedsTeamsObservation when CameraWindowPicker.SelectedItem is null => CameraWindowPicker,
         CameraRecoveryState.NeedsTeamsObservation => CameraInspectButton,
         CameraRecoveryState.Diagnosis or CameraRecoveryState.NeedsCameraSettings => CameraOpenSettingsButton,
-        CameraRecoveryState.NeedsSettingsObservation => CameraInspectButton,
+        CameraRecoveryState.NeedsSettingsObservation => CameraPrivateCheckButton,
         CameraRecoveryState.VerifiedTarget => CameraShowButton,
         CameraRecoveryState.PermissionObservedOn => CameraReturnButton,
         CameraRecoveryState.NeedsLocalVerification => CameraPrivateCheckButton,
@@ -207,11 +210,6 @@ public partial class MainWindow
 
     private async void CameraInspect_Click(object sender, RoutedEventArgs e)
     {
-        if (cameraRecovery.CanInspectSettings)
-        {
-            await ObserveCameraSettings();
-            return;
-        }
         if (!cameraRecovery.CanInspectTeams || CameraWindowPicker.SelectedItem is not WindowChoice selected)
             return;
         if (!selected.Matches())
@@ -263,7 +261,7 @@ public partial class MainWindow
             if (launched is null) throw new InvalidOperationException();
             cameraRecovery.MarkSettingsOpened();
             StatusText.Text = "Windows Camera privacy settings opened by your click · MSGuide changed nothing.";
-            UpdateCameraRecoveryUi(CameraInspectButton);
+            UpdateCameraRecoveryUi(CameraPrivateCheckButton);
         }
         catch
         {
@@ -328,6 +326,11 @@ public partial class MainWindow
 
     private async void CameraPrivateCheck_Click(object sender, RoutedEventArgs e)
     {
+        if (cameraRecovery.CanInspectSettings)
+        {
+            await ObserveCameraSettings();
+            return;
+        }
         if (!cameraRecovery.CanVerifyTeams || CameraWindowPicker.SelectedItem is not WindowChoice selected) return;
         if (selected.Id != cameraRecovery.TeamsWindowId || !selected.Matches())
         {
