@@ -36,6 +36,17 @@ internal static class AutomationEvidence
     internal static bool IsKnownAutomationId(string automationId) =>
         KnownAutomationIds.Contains(automationId);
 
+    internal static string VerifiedPage(IEnumerable<string> automationIds)
+    {
+        var ids = automationIds.ToHashSet(StringComparer.Ordinal);
+        return ids.Contains("SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch")
+            && ids.Contains("SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch")
+                ? "camera-privacy"
+                : ids.Contains("VideoSettings")
+                    ? "teams-devices"
+                    : "unknown";
+    }
+
     internal static string TargetId(WindowChoice window, string role, string label, double[] box,
         string automationId, string frameworkId, int providerProcessId, IReadOnlyList<int>? runtimeId)
     {
@@ -141,13 +152,7 @@ internal static class AutomationEvidence
         IReadOnlyDictionary<string, KnownControlDiagnostic> knownControls)
     {
         var controls = knownControls.Values.OrderBy(control => control.AutomationId).ToArray();
-        var ids = knownControls.Keys;
-        string page = ids.Contains("SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch")
-            && ids.Contains("SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch")
-                ? "camera-privacy"
-                : ids.Contains("VideoSettings") && ids.Contains("open_camera_settings")
-                    ? "teams-devices"
-                    : "unknown";
+        string page = VerifiedPage(knownControls.Keys);
         return new(rootMatched, visited, inBounds, enabled, disabled, crossProcess, toggles,
             truncated, outcome, page, roles, controls);
     }

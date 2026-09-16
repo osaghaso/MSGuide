@@ -100,10 +100,9 @@ internal static class SelfTests
         Check(Safety.PackagedTeamsCameraPermission(
             [teamsPermission with { IsEnabled = false, Targetable = false }]) is null);
         Check(Safety.VerifiedTeamsDevicesPage(
-            [new("group", "Video settings", [0.1, 0.1, 0.3, 0.1], AutomationId: "VideoSettings"),
-             new("button", "Open camera settings", [0.1, 0.3, 0.3, 0.1], AutomationId: "open_camera_settings")]));
-        Check(!Safety.VerifiedTeamsDevicesPage(
             [new("group", "Video settings", [0.1, 0.1, 0.3, 0.1], AutomationId: "VideoSettings")]));
+        Check(!Safety.VerifiedTeamsDevicesPage(
+            [new("group", "Audio settings", [0.1, 0.1, 0.3, 0.1], AutomationId: "AudioSettings")]));
         var windowBounds = new Native.RECT { Left = -100, Top = 20, Right = 700, Bottom = 620 };
         Check(Safety.AutomationBox(new System.Windows.Rect(800, 20, 10, 10), windowBounds) is null);
         Check(Safety.AutomationBox(System.Windows.Rect.Empty, windowBounds) is null);

@@ -61,12 +61,10 @@ public static class Safety
             && e.Box.Zip(target.Box).All(pair => Math.Abs(pair.First - pair.Second) < 0.000001));
 
     public static bool VerifiedCameraSettingsPage(ElementInfo[] elements) =>
-        elements.Any(e => e.AutomationId == "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch")
-        && elements.Any(e => e.AutomationId == "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch");
+        AutomationEvidence.VerifiedPage(elements.Select(e => e.AutomationId)) == "camera-privacy";
 
     public static bool VerifiedTeamsDevicesPage(ElementInfo[] elements) =>
-        elements.Any(e => e.AutomationId == "VideoSettings")
-        && elements.Any(e => e.AutomationId == "open_camera_settings");
+        AutomationEvidence.VerifiedPage(elements.Select(e => e.AutomationId)) == "teams-devices";
 
     public static ElementInfo? PackagedTeamsCameraPermission(ElementInfo[] elements) =>
         elements.FirstOrDefault(e => e.AutomationId == "MSTeams_8wekyb3d8bbwe_ToggleSwitch"

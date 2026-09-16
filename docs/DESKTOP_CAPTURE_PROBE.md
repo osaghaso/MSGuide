@@ -50,8 +50,7 @@ References:
   anchors the Raw View walk at the exact selected HWND and permits bounded
   cross-process descendants. Evidence includes AutomationId, FrameworkId,
   enabled/targetable state, and TogglePattern state. Observed Teams IDs included
-  `more-options-header`, `AudioSettings`, `VideoSettings`, and
-  `open_camera_settings`.
+  `more-options-header`, `AudioSettings`, and `VideoSettings`.
 - `ms-settings:privacy-webcam` opened Settings Home while an existing
   SystemSettings process was alive. After that specific process was closed and
   Settings was relaunched, the correct Camera page exposed rich cross-process
@@ -67,6 +66,12 @@ References:
 - Probe JSON reports `verifiedPage` as `camera-privacy`, `teams-devices`, or
   `unknown`, plus allowlisted marker states. An unknown page must route to an
   explicit fixture/unsupported fallback rather than assuming deep-link success.
+- A 20-run census found Teams `VideoSettings` and the Camera Settings packaged
+  Teams toggle in every read; reads completed in 119-232 ms and provider PIDs
+  consistently differed from top-level PIDs. `open_camera_settings` was not
+  realized in those reads and is not a page-verification requirement. Use the
+  fixed Camera Settings URI, then verify the Camera page markers before
+  presenting the user-performed toggle step.
 - The legacy owned-window CaptureTest produced a blank PrintWindow frame and
   IntegrationTest failed foreground activation earlier on this machine. Those
   results do not weaken WGC or page-verification requirements.
