@@ -39,14 +39,58 @@ Session creation returns `sessionId` and `expiresAt`. Guidance requires:
 | `observation.capturedAt` | Timestamp with explicit UTC offset; no older than 60 seconds or more than five seconds in the future. |
 | `observation.width`, `height` | Integers 1–16384; images have stricter limits below. |
 | `observation.ocrText` | Required text, at most 16000 characters; desktop supplies UIA names, not pixel OCR. |
-| `observation.elements` | Required list, at most 200 entries: `role`, `label`, `box`, `confidence`. |
+| `observation.elements` | Required list, at most 200 entries: `role`, `label`, `box`, `confidence`; optional strict evidence is described below. |
 | `observation.imageBase64` | Optional raw canonical base64 PNG, not a data-URL string. Omit unless pixel sharing was approved. |
+| `cameraRecovery` | Optional deterministic Teams camera-recovery request. Omit for legacy/demo guidance. |
 
 Boxes are normalized `[x, y, width, height]`, nonempty and entirely inside `[0,1]`. Labels are 1–256 characters, roles 1–64; element confidence is 0–1. PNGs must be single-frame, no more than 1600 pixels per side, match the declared dimensions, and fit within 2,000,000 bytes before and after sanitization (base64 cap 2,666,668 characters). Pillow verifies and re-encodes pixels without metadata. This is not pixel redaction.
 
+Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `isEnabled`, and `toggleState` (`off`, `on`, or `indeterminate`). Strings and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. These are evidence, not authority.
+
 Guidance returns `instruction`, `status` (`next_step`, `clarification`, `completed`), optional `target`, `citations`, `mode`, `correlationId`, and echoed `observationId`/`windowId`. A target is allowed only for `next_step`, must have confidence at least 0.8, and must match an observed label/box with sufficient confidence. The client checks freshness and correspondence again before displaying an outline.
 
+Camera targets additionally return an opaque `targetId` plus the observed automation/framework/enabled/toggle evidence. A supplied capture-local ID is echoed; otherwise the server generates one. In both cases the server binds it to the session, observation identity/time, element index, box, label, and state before returning it. A moved or mismatched target is invalid. Older non-camera providers may continue to return targets without these additive fields.
+
 The default provider uses only MSGuide Demo UIA evidence; valid images are accepted but ignored. Other applications or ambiguous targets produce clarification. The optional model selects a UIA index; it cannot invent target coordinates or return tools/citations. Its completion output is downgraded to clarification for user verification. Guidance times out after ten seconds; invalid/provider-failed results are not silently replaced with demo output.
+
+## Deterministic Teams camera recovery
+
+The desktop opts in on the existing `/v1/guidance` route:
+
+```json
+{
+  "cameraRecovery": {
+    "profile": "teams-camera-recovery-win11-24h2-en-US-fixture-v1"
+  }
+}
+```
+
+This path bypasses the configured guidance provider. The server derives and retains only bounded, volatile session progress from fresh observations. The fixture is evidence-supported only for its named Windows 11 24H2, en-US Teams pre-join/Windows Settings profile; it is not a general claim about other builds, locales, applications, or automation trees. Predicates rank exact automation IDs above exact fixture labels and also require the configured application, role, framework, and confidence.
+
+The optional response `cameraRecovery` contains `profile`, `fixtureSupported`, `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `camera_settings_open`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
+
+Permission-on is not completion. The server returns `completed` only for `camera_ready_verified`, after this session first observed the configured Teams block, then an enabled applicable permission off, then that permission on, then a matching Teams camera-on observation with this explicit verifier payload:
+
+```json
+{
+  "cameraRecovery": {
+    "profile": "teams-camera-recovery-win11-24h2-en-US-fixture-v1",
+    "verification": {
+      "kind": "localCameraReady",
+      "source": "desktopLocalCameraVerifier",
+      "evidenceId": "capture-local-verifier-id",
+      "sessionId": "same-session-id",
+      "observationId": "same-observation-id",
+      "windowId": "same-window-id",
+      "capturedAt": "same-capture-time-window",
+      "cameraActive": true,
+      "framesObserved": 2
+    }
+  }
+}
+```
+
+The verifier must be fresh, within five seconds of the observation, bound to the same session/observation/window, report an active local camera, and include 2–120 observed frames. The desktop owns this local verifier; the backend does not call Teams, camera, settings, or external APIs. Missing/conflicting verifier evidence stops at verification required. Disabled/managed controls, already-on or wrong-cause flows, ambiguous candidates, unsupported surfaces, reused/older observations, and target mismatches fail closed without actions or writes.
 
 ## Legacy samples and simulated actions
 

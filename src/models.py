@@ -45,6 +45,50 @@ Prompt = Annotated[str, Field(min_length=1, max_length=4000)]
 Text = Annotated[str, Field(max_length=16000)]
 Label = Annotated[str, Field(min_length=1, max_length=256)]
 Unit = Annotated[float, Field(strict=True, ge=0, le=1)]
+EvidenceId = Annotated[str, Field(strict=True, min_length=1, max_length=128,
+                                  pattern=r"^[A-Za-z0-9_.:-]+$")]
+EvidenceName = Annotated[str, Field(strict=True, min_length=1, max_length=256)]
+
+
+class ToggleState(str, Enum):
+    OFF = "off"
+    ON = "on"
+    INDETERMINATE = "indeterminate"
+
+
+class CameraRecoveryState(str, Enum):
+    START = "start"
+    TEAMS_PREJOIN_OBSERVED = "teams_prejoin_observed"
+    CAMERA_BLOCK_CONFIRMED = "camera_block_confirmed"
+    CAMERA_SETTINGS_OPEN = "camera_settings_open"
+    APPLICABLE_PERMISSION_OFF = "applicable_permission_off"
+    USER_ACTION_REQUIRED = "user_action_required"
+    APPLICABLE_PERMISSION_ON = "applicable_permission_on"
+    RETURN_TO_TEAMS = "return_to_teams"
+    CAMERA_READY_VERIFIED = "camera_ready_verified"
+    UNSUPPORTED = "unsupported"
+    ADMIN_MANAGED = "admin_managed"
+    AMBIGUOUS = "ambiguous"
+
+
+class CameraEvidenceKind(str, Enum):
+    TEAMS_PREJOIN_SURFACE = "teams_prejoin_surface"
+    CAMERA_TOGGLE_OFF = "camera_toggle_off"
+    CAMERA_TOGGLE_ON = "camera_toggle_on"
+    CAMERA_BLOCK_INDICATOR = "camera_block_indicator"
+    CAMERA_SETTINGS_SURFACE = "camera_settings_surface"
+    APPLICABLE_PERMISSION_OFF = "applicable_permission_off"
+    APPLICABLE_PERMISSION_ON = "applicable_permission_on"
+    PERMISSION_TOGGLE_ENABLED = "permission_toggle_enabled"
+    RETURNED_TO_TEAMS = "returned_to_teams"
+    LOCAL_CAMERA_VERIFIER = "local_camera_verifier"
+
+
+class CameraPermissionState(str, Enum):
+    UNKNOWN = "unknown"
+    OFF = "off"
+    ON = "on"
+    MANAGED = "managed"
 
 
 def utc_timestamp(value: datetime) -> datetime:
@@ -65,6 +109,11 @@ class UIElement(Contract):
     label: Label
     box: tuple[Unit, Unit, Unit, Unit]
     confidence: Unit
+    targetId: EvidenceId | None = None
+    automationId: EvidenceName | None = None
+    frameworkId: EvidenceName | None = None
+    isEnabled: StrictBool | None = None
+    toggleState: ToggleState | None = None
 
     _box = field_validator("box")(bounded_box)
 
@@ -83,10 +132,38 @@ class Observation(Contract):
     _utc = field_validator("capturedAt")(utc_timestamp)
 
     @model_validator(mode="after")
-    def validated_image_only(self):
+    def validate_observation(self):
+        target_ids = [element.targetId for element in self.elements if element.targetId is not None]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("Element target IDs must be unique within an observation")
         if self.imageBase64 is not None:
             self.imageBase64 = sanitize_png(self.imageBase64, self.width, self.height)
         return self
+
+
+class CameraReadyVerification(Contract):
+    kind: Literal["localCameraReady"]
+    source: Literal["desktopLocalCameraVerifier"]
+    evidenceId: EvidenceId
+    sessionId: Identifier
+    observationId: Identifier
+    windowId: Identifier
+    capturedAt: datetime
+    cameraActive: StrictBool
+    framesObserved: Annotated[int, Field(strict=True, ge=2, le=120)]
+
+    _utc = field_validator("capturedAt")(utc_timestamp)
+
+    @model_validator(mode="after")
+    def camera_must_be_active(self):
+        if not self.cameraActive:
+            raise ValueError("Camera readiness requires an active local camera signal")
+        return self
+
+
+class CameraRecoveryRequest(Contract):
+    profile: Literal["teams-camera-recovery-win11-24h2-en-US-fixture-v1"]
+    verification: CameraReadyVerification | None = None
 
 
 class GuidanceRequest(Contract):
@@ -94,6 +171,18 @@ class GuidanceRequest(Contract):
     prompt: Prompt
     consent: StrictBool
     observation: Observation
+    cameraRecovery: CameraRecoveryRequest | None = None
+
+    @model_validator(mode="after")
+    def bind_camera_verification(self):
+        if self.cameraRecovery is None or self.cameraRecovery.verification is None:
+            return self
+        verification = self.cameraRecovery.verification
+        if (verification.sessionId != self.sessionId
+                or verification.observationId != self.observation.id
+                or verification.windowId != self.observation.windowId):
+            raise ValueError("Camera verification must match the request session and observation")
+        return self
 
 
 class Citation(Contract):
@@ -105,6 +194,11 @@ class Target(Contract):
     label: Label
     box: tuple[Unit, Unit, Unit, Unit]
     confidence: Annotated[float, Field(strict=True, ge=0.8, le=1)]
+    targetId: EvidenceId | None = None
+    automationId: EvidenceName | None = None
+    frameworkId: EvidenceName | None = None
+    isEnabled: StrictBool | None = None
+    toggleState: ToggleState | None = None
 
     _box = field_validator("box")(bounded_box)
 
@@ -123,10 +217,29 @@ class GuidanceResult(Contract):
         return self
 
 
+class CameraRecoveryResponse(Contract):
+    profile: Literal["teams-camera-recovery-win11-24h2-en-US-fixture-v1"]
+    fixtureSupported: Literal[True] = True
+    state: CameraRecoveryState
+    evidence: Annotated[list[CameraEvidenceKind], Field(max_length=12)]
+    permissionState: CameraPermissionState = CameraPermissionState.UNKNOWN
+    verificationRequired: StrictBool
+
+
 class GuidanceResponse(GuidanceResult):
     correlationId: Identifier
     observationId: Identifier
     windowId: Identifier
+    cameraRecovery: CameraRecoveryResponse | None = None
+
+    @model_validator(mode="after")
+    def camera_completion_is_verifier_owned(self):
+        if self.cameraRecovery is None:
+            return self
+        ready = self.cameraRecovery.state == CameraRecoveryState.CAMERA_READY_VERIFIED
+        if ready != (self.status == "completed") or ready == self.cameraRecovery.verificationRequired:
+            raise ValueError("Camera completion requires accepted readiness evidence")
+        return self
 
 
 class ContextEnvelope(Contract):

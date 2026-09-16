@@ -22,6 +22,7 @@ from starlette.datastructures import Headers
 
 from src import guidance
 from src.actions import ActionRunner, ActionStatus
+from src.camera_recovery import CameraRecoveryEngine, CameraRecoveryError
 from src.model_provider import ModelConfig, OpenAICompatibleProvider
 from src.models import (
     ActionRiskLevel, AssistRequest, ExecuteRequest, GuidanceRequest, GuidanceResponse,
@@ -188,6 +189,7 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
         model_config.validate()
         if guidance_provider is None:
             provider = OpenAICompatibleProvider(model_config)
+    camera_recovery = CameraRecoveryEngine(secrets.token_bytes(32))
     runner = ActionRunner()
     sessions: dict[str, Session] = {}
     previews: dict[str, StoredPreview] = {}
@@ -203,12 +205,14 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
         previews.clear()
         grants.clear()
         audit.clear()
+        camera_recovery.clear()
 
     app = FastAPI(title="MSGuide local demo", version="0.2.0", lifespan=lifespan)
     app.add_middleware(LocalBoundary, config=config)
     app.state.sessions, app.state.previews, app.state.grants = sessions, previews, grants
     app.state.runner, app.state.audit = runner, audit
     app.state.guidance_provider = provider
+    app.state.camera_recovery = camera_recovery
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
@@ -234,6 +238,8 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                 del store[key]
                 if store is previews:
                     grants.pop(key, None)
+                elif store is sessions:
+                    camera_recovery.discard(key)
         if len(store) >= config.max_records:
             raise HTTPException(429, "Local state capacity reached; retry after expiry")
 
@@ -250,24 +256,58 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
         event(session_id, "session_created")
         return {"sessionId": session_id, "expiresAt": session.expires_at.isoformat()}
 
-    @app.post("/v1/guidance", response_model=GuidanceResponse)
+    @app.post("/v1/guidance", response_model=GuidanceResponse, response_model_exclude_unset=True)
     async def guide(body: GuidanceRequest, request: Request):
         owned(sessions, body.sessionId, request.state.owner)
         if not body.consent:
             raise HTTPException(403, "Explicit capture consent is required")
         fresh(body.observation.capturedAt)
         correlation = str(uuid4())
+        recovery = None
         try:
-            result = GuidanceResult.model_validate(await asyncio.wait_for(provider(body.prompt, body.observation), timeout=10))
-            if result.target is not None and not any(
-                element.label == result.target.label and element.box == result.target.box
-                and element.confidence >= result.target.confidence
-                for element in body.observation.elements
-            ):
-                raise ValueError("Unsupported target")
+            if body.cameraRecovery is not None:
+                verification = body.cameraRecovery.verification
+                if verification is not None:
+                    fresh(verification.capturedAt)
+                    if abs((verification.capturedAt - body.observation.capturedAt).total_seconds()) > 5:
+                        raise HTTPException(422, "Camera verification must be captured with the same observation")
+                decision = camera_recovery.guide(body.sessionId, body.observation, verification)
+                result, recovery = decision.guidance, decision.recovery
+                if result.target is not None and not camera_recovery.target_matches(
+                        body.sessionId, body.observation, result.target):
+                    raise CameraRecoveryError("Camera target no longer matches the observation")
+            else:
+                result = GuidanceResult.model_validate(
+                    await asyncio.wait_for(provider(body.prompt, body.observation), timeout=10)
+                )
+                if result.target is not None:
+                    matches = []
+                    for element in body.observation.elements:
+                        if result.target.targetId is not None and element.targetId != result.target.targetId:
+                            continue
+                        if (result.target.targetId is None
+                                and (element.label != result.target.label or element.box != result.target.box)):
+                            continue
+                        matches.append(
+                            element.label == result.target.label
+                            and element.box == result.target.box
+                            and element.confidence >= result.target.confidence
+                            and (result.target.automationId is None
+                                 or element.automationId == result.target.automationId)
+                            and (result.target.frameworkId is None
+                                 or element.frameworkId == result.target.frameworkId)
+                            and (result.target.isEnabled is None
+                                 or element.isEnabled == result.target.isEnabled)
+                            and (result.target.toggleState is None
+                                 or element.toggleState == result.target.toggleState)
+                        )
+                    if matches != [True]:
+                        raise ValueError("Unsupported target")
             fresh(body.observation.capturedAt)
         except asyncio.TimeoutError:
             raise HTTPException(504, "Guidance timed out") from None
+        except CameraRecoveryError as exc:
+            raise HTTPException(422, str(exc)) from None
         except (ValidationError, ValueError):
             raise HTTPException(502, "Invalid guidance result") from None
         except HTTPException:
@@ -277,7 +317,17 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
             raise HTTPException(502, "Guidance provider failed") from None
         owned(sessions, body.sessionId, request.state.owner)
         event(correlation, "guidance_" + result.status)
-        return GuidanceResponse(**result.model_dump(), correlationId=correlation,
+        payload = {
+            "instruction": result.instruction,
+            "status": result.status,
+            "target": (result.target.model_dump(exclude_unset=True)
+                       if result.target is not None else None),
+            "citations": result.citations,
+            "mode": result.mode,
+        }
+        if recovery is not None:
+            payload["cameraRecovery"] = recovery
+        return GuidanceResponse(**payload, correlationId=correlation,
                                 observationId=body.observation.id, windowId=body.observation.windowId)
 
     @app.post("/v1/assist")
