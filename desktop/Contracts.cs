@@ -4,7 +4,12 @@ using System.Windows;
 
 namespace MSGuide.Desktop;
 
-public sealed record ElementInfo(string Role, string Label, double[] Box, double Confidence = 0.95);
+public sealed record ElementInfo(string Role, string Label, double[] Box, double Confidence = 0.95,
+    string TargetId = "", string AutomationId = "", string FrameworkId = "",
+    bool IsEnabled = true, bool Targetable = true,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ToggleState = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? HelpText = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ItemStatus = null);
 public sealed record Observation(string Id, string WindowId, string Application, DateTimeOffset CapturedAt,
     int Width, int Height, string OcrText, ElementInfo[] Elements,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ImageBase64);
@@ -52,7 +57,7 @@ public static class Safety
     internal static bool ObservedTarget(TargetInfo target, ElementInfo[] elements) =>
         !string.IsNullOrWhiteSpace(target.Label) && double.IsFinite(target.Confidence)
         && target.Confidence is >= 0.8 and <= 1 && ValidBox(target.Box)
-        && elements.Any(e => e.Label == target.Label && ValidBox(e.Box)
+        && elements.Any(e => e.Targetable && e.IsEnabled && e.Label == target.Label && ValidBox(e.Box)
             && e.Box.Zip(target.Box).All(pair => Math.Abs(pair.First - pair.Second) < 0.000001));
 
     public static bool Fresh(DateTimeOffset captured, DateTimeOffset now) =>

@@ -108,7 +108,9 @@ internal static class CaptureTests
                 var lines = evidence.Text.Split('\n');
                 Require(headings.Where((heading, index) => lines.Contains(heading) != (index == state)).Count() == 0);
                 Require(labels.Where((label, index) => lines.Contains(label) != (index == state)).Count() == 0);
-                Require(evidence.Elements.Length <= 200 && evidence.Elements.All(e => e.Label.Length <= 256 && Safety.ValidBox(e.Box)));
+                Require(evidence.Elements.Length <= 200 && evidence.Elements.All(e => e.Label.Length <= 256
+                    && e.TargetId.StartsWith("uia-") && e.TargetId.Length == 28 && e.Targetable == e.IsEnabled
+                    && e.AutomationId.Length <= 128 && e.FrameworkId.Length <= 64 && Safety.ValidBox(e.Box)));
                 foreach (var label in labels)
                     Require(evidence.Elements.Count(e => e.Role == "button" && e.Label == label)
                         == (state < 3 && label == labels[state] ? 1 : 0));

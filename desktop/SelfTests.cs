@@ -65,10 +65,23 @@ internal static class SelfTests
         var element = new ElementInfo("button", "View logs", [0.1, 0.2, 0.3, 0.1]);
         var targetInfo = new TargetInfo(element.Label, element.Box, 0.95);
         Check(Safety.ObservedTarget(targetInfo, [element]));
+        Check(!Safety.ObservedTarget(targetInfo, [element with { IsEnabled = false, Targetable = false }]));
         Check(!Safety.ObservedTarget(targetInfo with { Label = "Unobserved" }, [element]));
         Check(!Safety.ObservedTarget(targetInfo with { Box = [0.2, 0.2, 0.3, 0.1] }, [element]));
         Check(!Safety.ObservedTarget(targetInfo with { Confidence = 0.79 }, [element]));
         Check(!Safety.Matches(good with { Status = "completed", Target = targetInfo }, "observation", "window"));
+        var identity = new WindowChoice(new nint(0x1234), 42, "Original title", "Chrome_WidgetWin_1");
+        Check(identity.SameIdentity(42, "Chrome_WidgetWin_1"));
+        Check(!identity.SameIdentity(43, "Chrome_WidgetWin_1"));
+        Check(!identity.SameIdentity(42, "ApplicationFrameWindow"));
+        string stableTarget = AutomationEvidence.TargetId(identity, "button", "Camera",
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", [1, 2, 3]);
+        Check(stableTarget == AutomationEvidence.TargetId(identity, "button", "Camera",
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", [1, 2, 3]));
+        Check(stableTarget != AutomationEvidence.TargetId(identity, "button", "Camera",
+            [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", [1, 2, 4]));
+        Check(stableTarget.StartsWith("uia-") && stableTarget.Length == 28
+            && !stableTarget.Contains("camera", StringComparison.OrdinalIgnoreCase));
         var windowBounds = new Native.RECT { Left = -100, Top = 20, Right = 700, Bottom = 620 };
         Check(Safety.AutomationBox(new System.Windows.Rect(800, 20, 10, 10), windowBounds) is null);
         Check(Safety.AutomationBox(System.Windows.Rect.Empty, windowBounds) is null);
@@ -92,8 +105,11 @@ internal static class SelfTests
             try { disposed.Observation(false); } catch (ObjectDisposedException) { rejected = true; }
             Check(rejected);
         }
+        var observationElement = new ElementInfo("button", "View logs", [0.1, 0.2, 0.3, 0.1],
+            TargetId: stableTarget, AutomationId: "DemoStep0", FrameworkId: "WPF",
+            IsEnabled: false, Targetable: false, ToggleState: "off", HelpText: "Synthetic help");
         var observation = new Observation(Guid.NewGuid().ToString(), "42:ABCD", "MSGuide Demo", now,
-            800, 600, "View logs", [new("button", "View logs", [0.1, 0.2, 0.3, 0.1])], null);
+            800, 600, "View logs", [observationElement], null);
         var options = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
         string payload = System.Text.Json.JsonSerializer.Serialize(new GuidanceRequest("session", "Help", true, observation), options);
         using var json = System.Text.Json.JsonDocument.Parse(payload);
@@ -105,6 +121,22 @@ internal static class SelfTests
         Check(wireObservation.GetProperty("application").GetString() == "MSGuide Demo");
         Check(wireObservation.GetProperty("elements")[0].GetProperty("role").GetString() == "button");
         Check(wireObservation.GetProperty("elements")[0].GetProperty("confidence").GetDouble() == 0.95);
+        Check(wireObservation.GetProperty("elements")[0].GetProperty("targetId").GetString() == stableTarget);
+        Check(wireObservation.GetProperty("elements")[0].GetProperty("automationId").GetString() == "DemoStep0");
+        Check(wireObservation.GetProperty("elements")[0].GetProperty("frameworkId").GetString() == "WPF");
+        Check(!wireObservation.GetProperty("elements")[0].GetProperty("isEnabled").GetBoolean());
+        Check(!wireObservation.GetProperty("elements")[0].GetProperty("targetable").GetBoolean());
+        Check(wireObservation.GetProperty("elements")[0].GetProperty("toggleState").GetString() == "off");
+        Check(wireObservation.GetProperty("elements")[0].GetProperty("helpText").GetString() == "Synthetic help");
+        Check(!wireObservation.GetProperty("elements")[0].TryGetProperty("itemStatus", out _));
         Check(System.Text.Json.JsonSerializer.Serialize(observation with { ImageBase64 = "AQ==" }, options).Contains("\"imageBase64\":\"AQ==\""));
+        var probe = new CaptureProbeReport(1, now, "42:ABCD", 42, "SyntheticClass", 800, 600,
+            [new("PrintWindow(0)", 0, true, true, "accepted", 10, 240, 12)],
+            new(true, 10, 8, 6, 2, 4, 1, false, "completed",
+                new Dictionary<string, int> { ["button"] = 2 }));
+        string probeJson = System.Text.Json.JsonSerializer.Serialize(probe, options);
+        Check(probeJson.Contains("\"outcome\":\"accepted\"") && !probeJson.Contains("image", StringComparison.OrdinalIgnoreCase)
+            && !probeJson.Contains("base64", StringComparison.OrdinalIgnoreCase)
+            && !probeJson.Contains("pixel", StringComparison.OrdinalIgnoreCase));
     }
 }
