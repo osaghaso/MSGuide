@@ -56,6 +56,14 @@ class ToggleState(str, Enum):
     INDETERMINATE = "indeterminate"
 
 
+class TeamsCameraSessionState(str, Enum):
+    NOT_INITIALIZED = "notInitialized"
+    ACTIVE = "active"
+    REINITIALIZING = "reinitializing"
+    REINITIALIZED = "reinitialized"
+    UNKNOWN = "unknown"
+
+
 class CameraRecoveryState(str, Enum):
     START = "start"
     TEAMS_PREJOIN_OBSERVED = "teams_prejoin_observed"
@@ -68,6 +76,7 @@ class CameraRecoveryState(str, Enum):
     APPLICABLE_PERMISSION_OFF = "applicable_permission_off"
     USER_ACTION_REQUIRED = "user_action_required"
     APPLICABLE_PERMISSION_ON = "applicable_permission_on"
+    CAMERA_REINITIALIZATION_REQUIRED = "camera_reinitialization_required"
     RETURN_TO_TEAMS = "return_to_teams"
     CAMERA_READY_VERIFIED = "camera_ready_verified"
     UNSUPPORTED = "unsupported"
@@ -100,6 +109,8 @@ class CameraEvidenceKind(str, Enum):
     SYSTEM_CAMERA_GLOBAL_ON = "system_camera_global_on"
     USER_CAMERA_GLOBAL_ON = "user_camera_global_on"
     TEAMS_CAMERA_PERMISSION = "teams_camera_permission"
+    PERMISSION_PREPARED_BEFORE_CAMERA = "permission_prepared_before_camera"
+    CAMERA_REINITIALIZED = "camera_reinitialized"
 
 
 class CameraPermissionState(str, Enum):
@@ -148,6 +159,7 @@ class Observation(Contract):
     windowId: Identifier
     application: Label
     rootProcessId: Annotated[int, Field(strict=True, ge=1, le=4_294_967_295)] | None = None
+    teamsCameraSessionState: TeamsCameraSessionState | None = None
     capturedAt: datetime
     width: Annotated[int, Field(strict=True, ge=1, le=16384)]
     height: Annotated[int, Field(strict=True, ge=1, le=16384)]
@@ -177,6 +189,11 @@ class CameraReadyVerification(Contract):
     capturedAt: datetime
     cameraActive: StrictBool
     framesObserved: Annotated[int, Field(strict=True, ge=2, le=120)]
+    reinitializationMethod: Literal[
+        "prejoinReopened",
+        "teamsRelaunched",
+        "cameraDeviceReinitialized",
+    ] | None = None
 
     _utc = field_validator("capturedAt")(utc_timestamp)
 

@@ -19,6 +19,7 @@ from src.models import (
     GuidanceResult,
     Observation,
     Target,
+    TeamsCameraSessionState,
     ToggleState,
     UIElement,
 )
@@ -476,6 +477,26 @@ class CameraRecoveryEngine:
                 "Camera readiness was supplied before the pinned permission restoration was observed"
             )
         if record.permission_on_observed:
+            reinitialized = (
+                observation.teamsCameraSessionState == TeamsCameraSessionState.REINITIALIZED
+            )
+            if verification is not None and verification.reinitializationMethod is None:
+                raise CameraRecoveryError(
+                    "Pinned camera readiness requires an explicit Teams camera reinitialization method"
+                )
+            if not reinitialized:
+                if verification is not None:
+                    raise CameraRecoveryError(
+                        "Camera readiness requires explicit reinitialized session evidence"
+                    )
+                return self._clarification(
+                    CameraRecoveryState.CAMERA_REINITIALIZATION_REQUIRED,
+                    "Reopen pre-join, relaunch Teams, or explicitly reinitialize the camera before readiness verification.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=profile_name,
+                )
+            evidence.append(CameraEvidenceKind.CAMERA_REINITIALIZED)
             if not _has_match(observation, LIVE_DEVICES_MARKER):
                 if verification is not None:
                     raise CameraRecoveryError(
@@ -719,9 +740,23 @@ class CameraRecoveryEngine:
                 profile=PINNED_PROFILE,
             )
         if teams.toggleState == ToggleState.OFF:
+            if observation.teamsCameraSessionState != TeamsCameraSessionState.NOT_INITIALIZED:
+                state = (CameraRecoveryState.UNSUPPORTED
+                         if observation.teamsCameraSessionState == TeamsCameraSessionState.ACTIVE
+                         else CameraRecoveryState.AMBIGUOUS)
+                return self._clarification(
+                    state,
+                    "Prepare the packaged permission off before Teams initializes a camera session; changing an active session is not recovery evidence.",
+                    evidence,
+                    CameraPermissionState.OFF,
+                    profile=PINNED_PROFILE,
+                )
             record.permission_on_observed = False
             record.permission_off_observed = True
-            evidence.append(CameraEvidenceKind.APPLICABLE_PERMISSION_OFF)
+            evidence.extend([
+                CameraEvidenceKind.PERMISSION_PREPARED_BEFORE_CAMERA,
+                CameraEvidenceKind.APPLICABLE_PERMISSION_OFF,
+            ])
             return self._next_step(
                 session_id,
                 observation,
@@ -738,6 +773,14 @@ class CameraRecoveryEngine:
                 return self._clarification(
                     CameraRecoveryState.UNSUPPORTED,
                     "The packaged Teams permission is already on without a prior off observation in this pinned session.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=PINNED_PROFILE,
+                )
+            if observation.teamsCameraSessionState != TeamsCameraSessionState.NOT_INITIALIZED:
+                return self._clarification(
+                    CameraRecoveryState.UNSUPPORTED,
+                    "Teams initialized its camera before the prepared permission was restored; restart the pinned sequence.",
                     evidence,
                     CameraPermissionState.ON,
                     profile=PINNED_PROFILE,

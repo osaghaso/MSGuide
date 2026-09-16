@@ -304,7 +304,8 @@ def test_live_profile_cannot_claim_permission_or_completion(client):
 
 
 def pinned_settings(obs_id, teams_toggle, *, global_toggle="on", teams_enabled=True,
-                    teams_offscreen=False, offset_ms=0):
+                    teams_offscreen=False, teams_session_state="notInitialized",
+                    offset_ms=0):
     observed = observation(
         obs_id,
         "Settings",
@@ -337,6 +338,7 @@ def pinned_settings(obs_id, teams_toggle, *, global_toggle="on", teams_enabled=T
         offset_ms,
     )
     observed["rootProcessId"] = 7000
+    observed["teamsCameraSessionState"] = teams_session_state
     return observed
 
 
@@ -368,8 +370,8 @@ def test_pinned_settings_page_is_verified_before_targeting_golden_toggle(client)
     assert on["cameraRecovery"]["state"] == "applicable_permission_on"
     assert on["cameraRecovery"]["permissionState"] == "on"
 
-    teams_devices = observation(
-        "pinned-teams-devices",
+    active_devices = observation(
+        "pinned-active-devices",
         "Microsoft Teams",
         [
             element("group", "Video settings", "VideoSettings", "WebView2",
@@ -380,7 +382,28 @@ def test_pinned_settings_page_is_verified_before_targeting_golden_toggle(client)
         ],
         offset_ms=2,
     )
+    active_devices["rootProcessId"] = 4444
+    active_devices["teamsCameraSessionState"] = "active"
+    reinitialize = post(
+        client, sid, active_devices, profile=PINNED_PROFILE
+    ).json()
+    assert reinitialize["cameraRecovery"]["state"] == "camera_reinitialization_required"
+    assert reinitialize["status"] == "clarification"
+
+    teams_devices = observation(
+        "pinned-teams-devices",
+        "Microsoft Teams",
+        [
+            element("group", "Video settings", "VideoSettings", "WebView2",
+                    target_id="pinned.video2", process_id=16836),
+            element("combobox", "Camera", "camera-selector", "WebView2",
+                    target_id="pinned.camera2", process_id=16836,
+                    is_offscreen=False),
+        ],
+        offset_ms=3,
+    )
     teams_devices["rootProcessId"] = 4444
+    teams_devices["teamsCameraSessionState"] = "reinitialized"
     pending = post(client, sid, teams_devices, profile=PINNED_PROFILE).json()
     assert pending["status"] == "clarification"
     assert pending["cameraRecovery"]["state"] == "return_to_teams"
@@ -394,13 +417,20 @@ def test_pinned_settings_page_is_verified_before_targeting_golden_toggle(client)
         "capturedAt": teams_devices["capturedAt"],
         "cameraActive": True,
         "framesObserved": 3,
+        "reinitializationMethod": "prejoinReopened",
     }
+    missing_method = dict(verification)
+    del missing_method["reinitializationMethod"]
+    assert post(
+        client, sid, teams_devices, missing_method, PINNED_PROFILE
+    ).status_code == 422
     completed = post(
         client, sid, teams_devices, verification, PINNED_PROFILE
     ).json()
     assert completed["status"] == "completed"
     assert completed["cameraRecovery"]["state"] == "camera_ready_verified"
     assert completed["cameraRecovery"]["rawPixelEvidenceUsed"] is False
+    assert "camera_reinitialized" in completed["cameraRecovery"]["evidence"]
 
 
 def test_pinned_deep_link_landing_must_be_verified_from_exact_page_ids(client):
@@ -472,6 +502,17 @@ def test_pinned_wrong_cause_managed_and_visibility_states_fail_closed(client):
     named = post(client, sid, wrong_name, profile=PINNED_PROFILE).json()
     assert named["cameraRecovery"]["state"] == "system_camera_settings_unverified"
     assert named["target"] is None
+
+    sid = start(client)
+    active = post(
+        client,
+        sid,
+        pinned_settings("active-session-off", "off", teams_session_state="active"),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert active["cameraRecovery"]["state"] == "unsupported"
+    assert active["cameraRecovery"]["permissionState"] == "off"
+    assert active["target"] is None
 
 
 def test_profile_switch_cannot_reuse_fixture_permission_progress(client):
@@ -673,6 +714,7 @@ def test_wrong_automation_id_does_not_fall_back_to_english_label(client):
         lambda body: body["observation"]["elements"][0].update(toggleState="invalid"),
         lambda body: body["observation"]["elements"][0].update(processId="16836"),
         lambda body: body["observation"]["elements"][0].update(isOffscreen="false"),
+        lambda body: body["observation"].update(teamsCameraSessionState="invalid"),
         lambda body: body["observation"].update(rootProcessId="4444"),
         lambda body: body["observation"]["elements"][0].update(unbounded="value"),
         lambda body: body["observation"]["elements"].append(
