@@ -144,6 +144,12 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
 
     public CameraRecoverySensingMode Mode => CameraRecoverySensingMode.Fixture;
 
+    internal void Reset()
+    {
+        settingsObservations = 0;
+        verificationAttempts = 0;
+    }
+
     public Task<TeamsCameraObservation> ObserveTeamsAsync(
         WindowChoice window, CancellationToken cancellationToken)
     {

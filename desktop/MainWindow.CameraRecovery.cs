@@ -59,6 +59,8 @@ public partial class MainWindow
     private void StartCameraRecovery(bool fromPrompt)
     {
         CancelCameraOperation();
+        if (cameraRecoverySensing is FixtureCameraRecoverySensing fixture)
+            fixture.Reset();
         cameraRecovery = new CameraRecoverySession();
         cameraRecovery.Start();
         cameraTargetPresentationAttempted = false;

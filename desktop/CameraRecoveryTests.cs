@@ -180,6 +180,9 @@ internal static class CameraRecoveryTests
             && fixtureSession.State == CameraRecoveryState.FixtureComplete
             && fixtureSession.Detail.Contains("not claimed", StringComparison.OrdinalIgnoreCase),
             "deterministic fixture path");
+        fixture.Reset();
+        Check(fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult().Finding
+            == CameraSettingsFinding.PermissionOff, "fixture restarts from permission off");
     }
 
     private static CameraRecoverySession StartedSession()
