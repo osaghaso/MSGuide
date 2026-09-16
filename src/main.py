@@ -305,6 +305,8 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                                  or element.frameworkId == result.target.frameworkId)
                             and (result.target.isEnabled is None
                                  or element.isEnabled == result.target.isEnabled)
+                            and (result.target.isOffscreen is None
+                                 or element.isOffscreen == result.target.isOffscreen)
                             and (result.target.toggleState is None
                                  or element.toggleState == result.target.toggleState)
                         )

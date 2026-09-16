@@ -63,6 +63,7 @@ class CameraRecoveryState(str, Enum):
     TEAMS_SETTINGS_MENU_OPEN = "teams_settings_menu_open"
     TEAMS_DEVICES_OPEN = "teams_devices_open"
     CAMERA_SETTINGS_OPEN = "camera_settings_open"
+    SYSTEM_CAMERA_SETTINGS_UNVERIFIED = "system_camera_settings_unverified"
     SYSTEM_CAMERA_SETTINGS_UNINSPECTABLE = "system_camera_settings_uninspectable"
     APPLICABLE_PERMISSION_OFF = "applicable_permission_off"
     USER_ACTION_REQUIRED = "user_action_required"
@@ -81,6 +82,7 @@ class CameraEvidenceKind(str, Enum):
     TEAMS_SETTINGS_ITEM = "teams_settings_item"
     TEAMS_DEVICES_TAB = "teams_devices_tab"
     TEAMS_DEVICES_SURFACE = "teams_devices_surface"
+    TEAMS_CAMERA_SELECTOR = "teams_camera_selector"
     OPEN_SYSTEM_CAMERA_SETTINGS = "open_system_camera_settings"
     CAMERA_TOGGLE_OFF = "camera_toggle_off"
     CAMERA_TOGGLE_ON = "camera_toggle_on"
@@ -93,6 +95,10 @@ class CameraEvidenceKind(str, Enum):
     LOCAL_CAMERA_VERIFIER = "local_camera_verifier"
     SYSTEM_CAMERA_SETTINGS_SURFACE = "system_camera_settings_surface"
     UIA_NO_DESCENDANTS = "uia_no_descendants"
+    CAMERA_SETTINGS_PAGE_VERIFIED = "camera_settings_page_verified"
+    SYSTEM_CAMERA_GLOBAL_ON = "system_camera_global_on"
+    USER_CAMERA_GLOBAL_ON = "user_camera_global_on"
+    TEAMS_CAMERA_PERMISSION = "teams_camera_permission"
 
 
 class CameraPermissionState(str, Enum):
@@ -130,6 +136,7 @@ class UIElement(Contract):
     automationId: EvidenceName | None = None
     frameworkId: EvidenceName | None = None
     isEnabled: StrictBool | None = None
+    isOffscreen: StrictBool | None = None
     toggleState: ToggleState | None = None
 
     _box = field_validator("box")(bounded_box)
@@ -183,6 +190,7 @@ class CameraRecoveryRequest(Contract):
     profile: Literal[
         "teams-camera-recovery-win11-24h2-en-US-fixture-v1",
         "teams-camera-recovery-new-teams-uia-probe-20260916-v1",
+        "teams-camera-recovery-pinned-20260916-v2",
     ]
     verification: CameraReadyVerification | None = None
 
@@ -220,6 +228,7 @@ class Target(Contract):
     automationId: EvidenceName | None = None
     frameworkId: EvidenceName | None = None
     isEnabled: StrictBool | None = None
+    isOffscreen: StrictBool | None = None
     toggleState: ToggleState | None = None
 
     _box = field_validator("box")(bounded_box)
@@ -243,10 +252,12 @@ class CameraRecoveryResponse(Contract):
     profile: Literal[
         "teams-camera-recovery-win11-24h2-en-US-fixture-v1",
         "teams-camera-recovery-new-teams-uia-probe-20260916-v1",
+        "teams-camera-recovery-pinned-20260916-v2",
     ]
     evidenceBasis: CameraEvidenceBasis
     fixtureSupported: StrictBool
-    settingsUiaProven: Literal[False] = False
+    settingsUiaProven: StrictBool
+    rawPixelEvidenceUsed: Literal[False] = False
     state: CameraRecoveryState
     evidence: Annotated[list[CameraEvidenceKind], Field(max_length=12)]
     permissionState: CameraPermissionState = CameraPermissionState.UNKNOWN
@@ -256,7 +267,8 @@ class CameraRecoveryResponse(Contract):
     def evidence_basis_matches_profile(self):
         fixture = self.profile.endswith("-fixture-v1")
         if (fixture != self.fixtureSupported
-                or fixture != (self.evidenceBasis == CameraEvidenceBasis.FIXTURE)):
+                or fixture != (self.evidenceBasis == CameraEvidenceBasis.FIXTURE)
+                or self.settingsUiaProven != self.profile.endswith("-pinned-20260916-v2")):
             raise ValueError("Camera evidence basis must match the selected profile")
         return self
 
@@ -274,7 +286,8 @@ class GuidanceResponse(GuidanceResult):
         ready = self.cameraRecovery.state == CameraRecoveryState.CAMERA_READY_VERIFIED
         if (ready != (self.status == "completed")
                 or ready == self.cameraRecovery.verificationRequired
-                or (ready and self.cameraRecovery.evidenceBasis != CameraEvidenceBasis.FIXTURE)):
+                or (ready and self.cameraRecovery.profile
+                    == "teams-camera-recovery-new-teams-uia-probe-20260916-v1")):
             raise ValueError("Camera completion requires accepted readiness evidence")
         return self
 

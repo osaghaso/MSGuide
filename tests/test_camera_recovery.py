@@ -13,6 +13,7 @@ from tests.local_client import TestClient
 
 PROFILE = "teams-camera-recovery-win11-24h2-en-US-fixture-v1"
 LIVE_PROFILE = "teams-camera-recovery-new-teams-uia-probe-20260916-v1"
+PINNED_PROFILE = "teams-camera-recovery-pinned-20260916-v2"
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def client():
 
 def element(
     role, label, automation_id, framework, toggle=None, enabled=True, box=None,
-    target_id=None, process_id=None,
+    target_id=None, process_id=None, is_offscreen=None,
 ):
     value = {
         "role": role,
@@ -45,6 +46,8 @@ def element(
         value["targetId"] = target_id
     if process_id is not None:
         value["processId"] = process_id
+    if is_offscreen is not None:
+        value["isOffscreen"] = is_offscreen
     return value
 
 
@@ -137,6 +140,7 @@ def test_strict_sequence_requires_local_readiness_verifier(client):
         "evidenceBasis": "fixture",
         "fixtureSupported": True,
         "settingsUiaProven": False,
+        "rawPixelEvidenceUsed": False,
         "state": "camera_block_confirmed",
         "evidence": ["teams_prejoin_surface", "camera_toggle_off", "camera_block_indicator"],
         "permissionState": "unknown",
@@ -299,6 +303,196 @@ def test_live_profile_cannot_claim_permission_or_completion(client):
     assert post(client, sid, observed, verification, LIVE_PROFILE).status_code == 422
 
 
+def pinned_settings(obs_id, teams_toggle, *, global_toggle="on", teams_enabled=True,
+                    teams_offscreen=False, offset_ms=0):
+    observed = observation(
+        obs_id,
+        "Settings",
+        [
+            element(
+                "switch", "Camera access",
+                "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch",
+                "XAML", global_toggle, target_id=f"{obs_id}.system",
+                process_id=9120, is_offscreen=False,
+            ),
+            element(
+                "switch", "Let apps access your camera",
+                "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch",
+                "XAML", global_toggle, target_id=f"{obs_id}.user",
+                process_id=9120, is_offscreen=False,
+            ),
+            element(
+                "switch", "Microsoft Teams Currently in use",
+                "MSTeams_8wekyb3d8bbwe_ToggleSwitch",
+                "XAML", teams_toggle, teams_enabled, target_id=f"{obs_id}.teams",
+                process_id=9120, is_offscreen=teams_offscreen,
+            ),
+            element(
+                "switch", "Let desktop apps access your camera",
+                "SystemSettings_CapabilityAccess_Camera_ClassicGlobal_ToggleSwitch",
+                "XAML", "on", target_id=f"{obs_id}.desktop",
+                process_id=9120, is_offscreen=True,
+            ),
+        ],
+        offset_ms,
+    )
+    observed["rootProcessId"] = 7000
+    return observed
+
+
+def test_pinned_settings_page_is_verified_before_targeting_golden_toggle(client):
+    sid = start(client)
+    off = post(
+        client,
+        sid,
+        pinned_settings("pinned-off", "off"),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert off["status"] == "next_step"
+    assert off["cameraRecovery"]["state"] == "user_action_required"
+    assert off["cameraRecovery"]["settingsUiaProven"] is True
+    assert off["cameraRecovery"]["rawPixelEvidenceUsed"] is False
+    assert off["cameraRecovery"]["evidence"][:4] == [
+        "system_camera_settings_surface",
+        "camera_settings_page_verified",
+        "system_camera_global_on",
+        "user_camera_global_on",
+    ]
+    assert off["target"]["automationId"] == "MSTeams_8wekyb3d8bbwe_ToggleSwitch"
+    assert off["target"]["processId"] == 9120
+    assert off["target"]["isOffscreen"] is False
+
+    on_observation = pinned_settings("pinned-on", "on", offset_ms=1)
+    on = post(client, sid, on_observation, profile=PINNED_PROFILE).json()
+    assert on["status"] == "clarification"
+    assert on["cameraRecovery"]["state"] == "applicable_permission_on"
+    assert on["cameraRecovery"]["permissionState"] == "on"
+
+    teams_devices = observation(
+        "pinned-teams-devices",
+        "Microsoft Teams",
+        [
+            element("group", "Video settings", "VideoSettings", "WebView2",
+                    target_id="pinned.video", process_id=16836),
+            element("combobox", "Camera", "camera-selector", "WebView2",
+                    target_id="pinned.camera", process_id=16836,
+                    is_offscreen=False),
+        ],
+        offset_ms=2,
+    )
+    teams_devices["rootProcessId"] = 4444
+    pending = post(client, sid, teams_devices, profile=PINNED_PROFILE).json()
+    assert pending["status"] == "clarification"
+    assert pending["cameraRecovery"]["state"] == "return_to_teams"
+    verification = {
+        "kind": "localCameraReady",
+        "source": "desktopLocalCameraVerifier",
+        "evidenceId": "pinned-preview-verified",
+        "sessionId": sid,
+        "observationId": teams_devices["id"],
+        "windowId": teams_devices["windowId"],
+        "capturedAt": teams_devices["capturedAt"],
+        "cameraActive": True,
+        "framesObserved": 3,
+    }
+    completed = post(
+        client, sid, teams_devices, verification, PINNED_PROFILE
+    ).json()
+    assert completed["status"] == "completed"
+    assert completed["cameraRecovery"]["state"] == "camera_ready_verified"
+    assert completed["cameraRecovery"]["rawPixelEvidenceUsed"] is False
+
+
+def test_pinned_deep_link_landing_must_be_verified_from_exact_page_ids(client):
+    sid = start(client)
+    settings_home = observation(
+        "settings-home",
+        "Settings",
+        [element("button", "System", "SettingsPageSystem", "XAML")],
+    )
+    data = post(client, sid, settings_home, profile=PINNED_PROFILE).json()
+    assert data["status"] == "clarification"
+    assert data["target"] is None
+    assert data["cameraRecovery"]["state"] == "system_camera_settings_unverified"
+
+    empty = post(
+        client,
+        sid,
+        observation("settings-empty-pinned", "Settings", [], offset_ms=1),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert empty["cameraRecovery"]["state"] == "system_camera_settings_uninspectable"
+
+
+def test_pinned_exact_toggle_ids_do_not_depend_on_unprobed_framework_value(client):
+    sid = start(client)
+    observed = pinned_settings("no-framework", "off")
+    for item in observed["elements"][:3]:
+        del item["frameworkId"]
+    data = post(client, sid, observed, profile=PINNED_PROFILE).json()
+    assert data["status"] == "next_step"
+    assert data["target"]["automationId"] == "MSTeams_8wekyb3d8bbwe_ToggleSwitch"
+
+
+def test_pinned_wrong_cause_managed_and_visibility_states_fail_closed(client):
+    sid = start(client)
+    already_on = post(
+        client, sid, pinned_settings("already-on-pinned", "on"),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert already_on["cameraRecovery"]["state"] == "unsupported"
+    assert already_on["target"] is None
+
+    sid = start(client)
+    global_off = post(
+        client, sid, pinned_settings("global-off", "off", global_toggle="off"),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert global_off["cameraRecovery"]["state"] == "unsupported"
+
+    sid = start(client)
+    managed = post(
+        client, sid, pinned_settings("managed-pinned", "off", teams_enabled=False),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert managed["cameraRecovery"]["state"] == "admin_managed"
+    assert managed["target"] is None
+
+    sid = start(client)
+    offscreen = post(
+        client, sid, pinned_settings("offscreen-pinned", "off", teams_offscreen=True),
+        profile=PINNED_PROFILE,
+    ).json()
+    assert offscreen["cameraRecovery"]["state"] == "ambiguous"
+    assert offscreen["target"] is None
+
+    sid = start(client)
+    wrong_name = pinned_settings("wrong-name", "off")
+    wrong_name["elements"][2]["label"] = "Another app"
+    named = post(client, sid, wrong_name, profile=PINNED_PROFILE).json()
+    assert named["cameraRecovery"]["state"] == "system_camera_settings_unverified"
+    assert named["target"] is None
+
+
+def test_profile_switch_cannot_reuse_fixture_permission_progress(client):
+    sid = start(client)
+    advance_permission(client, sid)
+    devices = observation(
+        "switched-profile",
+        "Microsoft Teams",
+        [
+            element("group", "Video settings", "VideoSettings", "WebView2"),
+            element("combobox", "Camera", "camera-selector", "WebView2",
+                    is_offscreen=False),
+            element("button", "Open camera settings", "open_camera_settings", "WebView2"),
+        ],
+        offset_ms=3,
+    )
+    data = post(client, sid, devices, profile=PINNED_PROFILE).json()
+    assert data["status"] == "next_step"
+    assert data["cameraRecovery"]["state"] == "teams_devices_open"
+
+
 def test_unknown_camera_profile_is_rejected(client):
     sid = start(client)
     body = request(sid, teams("unknown-profile"))
@@ -447,6 +641,7 @@ def test_wrong_automation_id_does_not_fall_back_to_english_label(client):
         lambda body: body["observation"]["elements"][0].update(isEnabled="true"),
         lambda body: body["observation"]["elements"][0].update(toggleState="invalid"),
         lambda body: body["observation"]["elements"][0].update(processId="16836"),
+        lambda body: body["observation"]["elements"][0].update(isOffscreen="false"),
         lambda body: body["observation"].update(rootProcessId="4444"),
         lambda body: body["observation"]["elements"][0].update(unbounded="value"),
         lambda body: body["observation"]["elements"].append(

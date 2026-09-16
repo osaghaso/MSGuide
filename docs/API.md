@@ -45,11 +45,11 @@ Session creation returns `sessionId` and `expiresAt`. Guidance requires:
 
 Boxes are normalized `[x, y, width, height]`, nonempty and entirely inside `[0,1]`. Labels are 1–256 characters, roles 1–64; element confidence is 0–1. PNGs must be single-frame, no more than 1600 pixels per side, match the declared dimensions, and fit within 2,000,000 bytes before and after sanitization (base64 cap 2,666,668 characters). Pillow verifies and re-encodes pixels without metadata. This is not pixel redaction.
 
-Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `processId`, `isEnabled`, and `toggleState` (`off`, `on`, or `indeterminate`); the observation may provide `rootProcessId`. Strings, integers, and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. A tree remains rooted to the selected `windowId`, but descendant `processId` is evidence only and is not required to equal `rootProcessId`: New Teams WebView descendants can belong to a different process than the selected top-level HWND. These fields are never authority.
+Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `processId`, `isEnabled`, `isOffscreen`, and `toggleState` (`off`, `on`, or `indeterminate`); the observation may provide `rootProcessId`. Strings, integers, and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. A tree remains rooted to the selected `windowId`, but descendant `processId` is evidence only and is not required to equal `rootProcessId`: New Teams WebView and Settings provider elements can belong to a different process than their top-level HWND. These fields are never authority.
 
 Guidance returns `instruction`, `status` (`next_step`, `clarification`, `completed`), optional `target`, `citations`, `mode`, `correlationId`, and echoed `observationId`/`windowId`. A target is allowed only for `next_step`, must have confidence at least 0.8, and must match an observed label/box with sufficient confidence. The client checks freshness and correspondence again before displaying an outline.
 
-Camera targets additionally return an opaque `targetId` plus the observed automation/framework/enabled/toggle evidence. A supplied capture-local ID is echoed; otherwise the server generates one. In both cases the server binds it to the session, observation identity/time, element index, box, label, and state before returning it. A moved or mismatched target is invalid. Older non-camera providers may continue to return targets without these additive fields.
+Camera targets additionally return an opaque `targetId` plus the observed process, automation, framework, enabled, offscreen, and toggle evidence. A supplied capture-local ID is echoed; otherwise the server generates one. In both cases the server binds it to the session, observation identity/time, element index, box, label, and state before returning it. A moved or mismatched target is invalid. Older non-camera providers may continue to return targets without these additive fields.
 
 The default provider uses only MSGuide Demo UIA evidence; valid images are accepted but ignored. Other applications or ambiguous targets produce clarification. The optional model selects a UIA index; it cannot invent target coordinates or return tools/citations. Its completion output is downgraded to clarification for user verification. Guidance times out after ten seconds; invalid/provider-failed results are not silently replaced with demo output.
 
@@ -67,7 +67,7 @@ The desktop opts in on the existing `/v1/guidance` route and must select an expl
 
 This path bypasses the configured guidance provider. The server derives and retains only bounded, volatile session progress from fresh observations. `teams-camera-recovery-win11-24h2-en-US-fixture-v1` is a synthetic fixture fallback, not a live Windows Settings UIA support claim. Its predicates rank exact automation IDs above exact fixture labels and also require the configured application, role, framework, and confidence.
 
-The optional response `cameraRecovery` contains `profile`, `evidenceBasis` (`fixture` or `liveProbe`), `fixtureSupported`, `settingsUiaProven` (currently always `false`), `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `teams_settings_menu_open`, `teams_devices_open`, `camera_settings_open`, `system_camera_settings_uninspectable`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
+The optional response `cameraRecovery` contains `profile`, `evidenceBasis` (`fixture` or `liveProbe`), `fixtureSupported`, `settingsUiaProven`, `rawPixelEvidenceUsed` (always `false`), `state`, bounded `evidence`, `permissionState`, and `verificationRequired`. States are `start`, `teams_prejoin_observed`, `camera_block_confirmed`, `teams_settings_menu_open`, `teams_devices_open`, `camera_settings_open`, `system_camera_settings_unverified`, `system_camera_settings_uninspectable`, `applicable_permission_off`, `user_action_required`, `applicable_permission_on`, `return_to_teams`, `camera_ready_verified`, `unsupported`, `admin_managed`, and `ambiguous`.
 
 The live-probe profile is:
 
@@ -81,9 +81,31 @@ The live-probe profile is:
 
 It recognizes only probe-backed New Teams navigation evidence: `more-options-header`, the Settings item, the Devices `TabItem`, Devices-page markers `AudioSettings`/`VideoSettings`, and `open_camera_settings`. The September 16 target-machine probe selected Teams PID 4444 while accessible WebView descendants reported PID 16836, so the backend deliberately does not impose same-process filtering after the desktop has rooted capture to the selected HWND.
 
-The same probe found zero UIA descendants from both the SystemSettings `CoreWindow` and `ApplicationFrameWindow`, and exact global UIA searches found no Camera access toggles. Therefore the live profile returns `system_camera_settings_uninspectable`, never a Windows Settings target, permission-on claim, or completion. `imageBase64` remains ignored by this engine and does not become visual proof. A future private local visual verifier must be separately and strictly modeled; until then only the explicitly named synthetic fixture can exercise the permission-toggle sequence. The probe's existing `CaptureTest` was blank and `IntegrationTest` failed demo activation, so these findings do not constitute end-to-end desktop validation.
+That v1 profile preserves the first probe's fail-closed result: zero UIA descendants from the then-active Settings windows. It never targets Windows Settings or accepts completion.
 
-Permission-on is not completion. In the synthetic fixture profile, the server returns `completed` only for `camera_ready_verified`, after this session first observed the configured Teams block, then an enabled applicable permission off, then that permission on, then a matching Teams camera-on observation with this explicit verifier payload:
+The current pinned-machine profile is:
+
+```json
+{
+  "cameraRecovery": {
+    "profile": "teams-camera-recovery-pinned-20260916-v2"
+  }
+}
+```
+
+After closing the specific existing `SystemSettings` process and relaunching `ms-settings:privacy-webcam`, UIA exposed the correct Camera page. The URI alone is not evidence: with the old Settings instance alive it landed on Settings Home. The backend verifies the page from all three exact IDs before targeting anything:
+
+- `SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch`;
+- `SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch`;
+- `MSTeams_8wekyb3d8bbwe_ToggleSwitch`.
+
+Both global toggles must be explicitly on. The packaged Teams toggle must be enabled, onscreen, and uniquely matched. The pinned golden path is that individual toggle observed off, highlighted for the user to change, then observed on in a newer capture. Already-on, wrong-page, global-off, disabled, offscreen, ambiguous, stale, or changed evidence fails closed. `SystemSettings_CapabilityAccess_Camera_ClassicGlobal_ToggleSwitch` may be present offscreen but is not the selected packaged-app target.
+
+The pinned profile then requires the probe-backed Teams Devices surface and Camera `ComboBox`, followed by the existing fresh bound `localCameraReady` verifier. Permission-on alone remains incomplete. Settings and Teams provider PIDs may differ from their top-level processes; selected-HWND rooting, not PID equality, is the capture boundary.
+
+On this machine, `PrintWindow` flag 0 returned black while flag 2 returned rendered New Teams and Camera Settings content, including the live preview. Flag 2 is undocumented and remains a desktop-measured, pinned-machine fallback, never a backend invariant. Raw `imageBase64` is sanitized in memory, ignored by the deterministic engine, never used to advance state, and never persisted by this service. Preview pixels may be personal; the desktop must avoid saving them. The earlier blank `CaptureTest` and demo-activation `IntegrationTest` failure are not treated as successful end-to-end validation.
+
+Permission-on is not completion. In the synthetic fixture and pinned-machine profiles, the server returns `completed` only for `camera_ready_verified`, after the profile-specific off-to-on permission sequence and matching Teams evidence with this explicit verifier payload:
 
 ```json
 {

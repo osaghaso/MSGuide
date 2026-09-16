@@ -26,6 +26,7 @@ from src.models import (
 
 FIXTURE_PROFILE = "teams-camera-recovery-win11-24h2-en-US-fixture-v1"
 LIVE_PROFILE = "teams-camera-recovery-new-teams-uia-probe-20260916-v1"
+PINNED_PROFILE = "teams-camera-recovery-pinned-20260916-v2"
 
 
 class CameraRecoveryError(ValueError):
@@ -39,6 +40,7 @@ class ElementPredicate:
     roles: tuple[str, ...]
     frameworks: tuple[str, ...]
     label_fallback_with_automation: bool = False
+    id_without_framework: bool = False
 
 
 @dataclass(frozen=True)
@@ -114,10 +116,39 @@ LIVE_OPEN_CAMERA_SETTINGS = ElementPredicate(
     roles=("button", "hyperlink", "link"),
     frameworks=("chrome", "webview2"),
 )
+LIVE_CAMERA_SELECTOR = ElementPredicate(
+    automation_ids=("camera", "camera-selector"),
+    labels=("Camera",),
+    roles=("combobox",),
+    frameworks=("chrome", "webview2"),
+    label_fallback_with_automation=True,
+)
+PINNED_SYSTEM_GLOBAL = ElementPredicate(
+    automation_ids=("systemsettings_capabilityaccess_camera_systemglobal_toggleswitch",),
+    labels=(),
+    roles=("checkbox", "switch", "togglebutton"),
+    frameworks=("xaml",),
+    id_without_framework=True,
+)
+PINNED_USER_GLOBAL = ElementPredicate(
+    automation_ids=("systemsettings_capabilityaccess_camera_userglobal_toggleswitch",),
+    labels=(),
+    roles=("checkbox", "switch", "togglebutton"),
+    frameworks=("xaml",),
+    id_without_framework=True,
+)
+PINNED_TEAMS_PERMISSION = ElementPredicate(
+    automation_ids=("msteams_8wekyb3d8bbwe_toggleswitch",),
+    labels=("Microsoft Teams Currently in use",),
+    roles=("checkbox", "switch", "togglebutton"),
+    frameworks=("xaml",),
+    id_without_framework=True,
+)
 
 
 @dataclass
 class RecoveryRecord:
+    profile_name: str | None = None
     block_confirmed: bool = False
     permission_off_observed: bool = False
     permission_on_observed: bool = False
@@ -141,15 +172,18 @@ def _normalized(value: str | None) -> str:
 
 def _rank(element: UIElement, predicate: ElementPredicate) -> int:
     if (element.confidence < 0.8
-            or _normalized(element.role) not in predicate.roles
-            or _normalized(element.frameworkId) not in predicate.frameworks):
+            or _normalized(element.role) not in predicate.roles):
         return 0
     if element.automationId is not None:
         if _normalized(element.automationId) in predicate.automation_ids:
-            return 100
+            if (predicate.id_without_framework
+                    or _normalized(element.frameworkId) in predicate.frameworks):
+                return 100
+            return 0
         if not predicate.label_fallback_with_automation:
             return 0
-    if element.label in predicate.labels:
+    if (element.label in predicate.labels
+            and _normalized(element.frameworkId) in predicate.frameworks):
         return 50
     return 0
 
@@ -245,6 +279,7 @@ class CameraRecoveryEngine:
             automationId=element.automationId,
             frameworkId=element.frameworkId,
             isEnabled=element.isEnabled,
+            isOffscreen=element.isOffscreen,
             toggleState=element.toggleState,
         )
 
@@ -268,6 +303,7 @@ class CameraRecoveryEngine:
                 and element.automationId == target.automationId
                 and element.frameworkId == target.frameworkId
                 and element.isEnabled == target.isEnabled
+                and element.isOffscreen == target.isOffscreen
                 and element.toggleState == target.toggleState
             )
         return matches == [True]
@@ -286,7 +322,8 @@ class CameraRecoveryEngine:
             evidenceBasis=(CameraEvidenceBasis.FIXTURE
                            if profile == FIXTURE_PROFILE else CameraEvidenceBasis.LIVE_PROBE),
             fixtureSupported=profile == FIXTURE_PROFILE,
-            settingsUiaProven=False,
+            settingsUiaProven=profile == PINNED_PROFILE,
+            rawPixelEvidenceUsed=False,
             state=state,
             evidence=evidence,
             permissionState=permission,
@@ -336,11 +373,16 @@ class CameraRecoveryEngine:
         profile_name: str = FIXTURE_PROFILE,
     ) -> CameraDecision:
         record = self._record(session_id)
+        if record.profile_name != profile_name:
+            record = RecoveryRecord(profile_name=profile_name)
+            self._records[session_id] = record
         self._accept_observation(record, observation)
         record.last_target_id = None
         record.last_target_digest = None
-        if profile_name == LIVE_PROFILE:
-            decision = self._guide_live(session_id, observation, verification)
+        if profile_name in {LIVE_PROFILE, PINNED_PROFILE}:
+            decision = self._guide_live(
+                session_id, record, observation, verification, profile_name
+            )
         elif profile_name != FIXTURE_PROFILE:
             raise CameraRecoveryError("Unsupported camera recovery profile")
         elif observation.application in SUPPORTED_PROFILE.teams_applications:
@@ -361,16 +403,26 @@ class CameraRecoveryEngine:
     def _guide_live(
         self,
         session_id: str,
+        record: RecoveryRecord,
         observation: Observation,
         verification: CameraReadyVerification | None,
+        profile_name: str,
     ) -> CameraDecision:
-        if verification is not None:
+        if profile_name == LIVE_PROFILE and verification is not None:
             raise CameraRecoveryError(
                 "The live-probe profile cannot verify permission restoration or camera readiness"
             )
         if observation.application in SUPPORTED_PROFILE.teams_applications:
-            return self._guide_live_teams(session_id, observation)
+            return self._guide_live_teams(
+                session_id, record, observation, verification, profile_name
+            )
         if observation.application in SUPPORTED_PROFILE.settings_applications:
+            if verification is not None:
+                raise CameraRecoveryError(
+                    "Camera readiness verification is accepted only with matching Teams evidence"
+                )
+            if profile_name == PINNED_PROFILE:
+                return self._guide_pinned_settings(session_id, record, observation)
             evidence = [CameraEvidenceKind.SYSTEM_CAMERA_SETTINGS_SURFACE]
             if not observation.elements:
                 evidence.append(CameraEvidenceKind.UIA_NO_DESCENDANTS)
@@ -378,17 +430,99 @@ class CameraRecoveryEngine:
                 CameraRecoveryState.SYSTEM_CAMERA_SETTINGS_UNINSPECTABLE,
                 "Windows Camera Settings UIA targeting is not probe-backed on this build; use an explicitly approved private visual verifier or a fixture, not a UIA target.",
                 evidence,
-                profile=LIVE_PROFILE,
+                profile=profile_name,
             )
         return self._clarification(
             CameraRecoveryState.UNSUPPORTED,
             "The live-probe profile supports only the selected Teams HWND tree and fail-closed Windows Settings detection.",
             [],
-            profile=LIVE_PROFILE,
+            profile=profile_name,
         )
 
-    def _guide_live_teams(self, session_id: str, observation: Observation) -> CameraDecision:
+    def _guide_live_teams(
+        self,
+        session_id: str,
+        record: RecoveryRecord,
+        observation: Observation,
+        verification: CameraReadyVerification | None,
+        profile_name: str,
+    ) -> CameraDecision:
         evidence = [CameraEvidenceKind.TEAMS_SELECTED_WINDOW]
+        if verification is not None and not record.permission_on_observed:
+            raise CameraRecoveryError(
+                "Camera readiness was supplied before the pinned permission restoration was observed"
+            )
+        if record.permission_on_observed:
+            if not _has_match(observation, LIVE_DEVICES_MARKER):
+                if verification is not None:
+                    raise CameraRecoveryError(
+                        "Camera readiness requires the probe-backed Teams Devices surface"
+                    )
+                return self._clarification(
+                    CameraRecoveryState.RETURN_TO_TEAMS,
+                    "Return to the probe-backed Teams Devices page for local camera verification.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=profile_name,
+                )
+            evidence.append(CameraEvidenceKind.TEAMS_DEVICES_SURFACE)
+            status, index = _candidate(observation, LIVE_CAMERA_SELECTOR)
+            if status == "ambiguous":
+                return self._clarification(
+                    CameraRecoveryState.AMBIGUOUS,
+                    "More than one equally ranked Teams camera selector was observed.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=profile_name,
+                )
+            if status != "matched":
+                if verification is not None:
+                    raise CameraRecoveryError(
+                        "Camera readiness requires the probe-backed Teams camera selector"
+                    )
+                return self._clarification(
+                    CameraRecoveryState.RETURN_TO_TEAMS,
+                    "The Teams Devices page is visible, but its camera selector is not reliably identified.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=profile_name,
+                )
+            selector = observation.elements[index]
+            if selector.isEnabled is not True or selector.isOffscreen is True:
+                if verification is not None:
+                    raise CameraRecoveryError(
+                        "Camera readiness conflicts with disabled or offscreen selector evidence"
+                    )
+                return self._clarification(
+                    CameraRecoveryState.AMBIGUOUS,
+                    "The Teams camera selector is not explicitly enabled and onscreen.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=profile_name,
+                )
+            evidence.append(CameraEvidenceKind.TEAMS_CAMERA_SELECTOR)
+            if verification is None:
+                return self._clarification(
+                    CameraRecoveryState.RETURN_TO_TEAMS,
+                    "Permission is restored and the Teams camera selector is visible, but fresh local preview verification is still required.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=profile_name,
+                )
+            evidence.append(CameraEvidenceKind.LOCAL_CAMERA_VERIFIER)
+            return CameraDecision(
+                GuidanceResult(
+                    status="completed",
+                    instruction="Camera readiness is verified by pinned permission evidence, Teams Devices UIA, and the bound local preview verifier.",
+                ),
+                self._recovery(
+                    CameraRecoveryState.CAMERA_READY_VERIFIED,
+                    evidence,
+                    CameraPermissionState.ON,
+                    verified=True,
+                    profile=profile_name,
+                ),
+            )
         if _has_match(observation, LIVE_DEVICES_MARKER):
             evidence.append(CameraEvidenceKind.TEAMS_DEVICES_SURFACE)
             status, index = _candidate(observation, LIVE_OPEN_CAMERA_SETTINGS)
@@ -397,24 +531,29 @@ class CameraRecoveryEngine:
                     CameraRecoveryState.AMBIGUOUS,
                     "More than one equally ranked open-camera-settings control was observed.",
                     evidence,
-                    profile=LIVE_PROFILE,
+                    profile=profile_name,
                 )
             if status == "matched" and observation.elements[index].isEnabled is True:
                 evidence.append(CameraEvidenceKind.OPEN_SYSTEM_CAMERA_SETTINGS)
+                instruction = (
+                    "Open Windows camera settings yourself, then verify the exact pinned Camera page IDs."
+                    if profile_name == PINNED_PROFILE
+                    else "Open Windows camera settings yourself. The backend will not assume its UIA tree is inspectable."
+                )
                 return self._next_step(
                     session_id,
                     observation,
                     index,
                     CameraRecoveryState.TEAMS_DEVICES_OPEN,
-                    "Open Windows camera settings yourself. The backend will not assume its UIA tree is inspectable.",
+                    instruction,
                     evidence,
-                    profile=LIVE_PROFILE,
+                    profile=profile_name,
                 )
             return self._clarification(
                 CameraRecoveryState.TEAMS_DEVICES_OPEN,
                 "The probe-backed Teams Devices surface is visible, but no unique enabled open-camera-settings control is safe to target.",
                 evidence,
-                profile=LIVE_PROFILE,
+                profile=profile_name,
             )
         for predicate, kind, state, instruction in (
             (
@@ -442,7 +581,7 @@ class CameraRecoveryEngine:
                     CameraRecoveryState.AMBIGUOUS,
                     "More than one equally ranked probe-backed Teams navigation control was observed.",
                     evidence,
-                    profile=LIVE_PROFILE,
+                    profile=profile_name,
                 )
             if status == "matched":
                 evidence.append(kind)
@@ -454,19 +593,136 @@ class CameraRecoveryEngine:
                         state,
                         instruction,
                         evidence,
-                        profile=LIVE_PROFILE,
+                        profile=profile_name,
                     )
                 return self._clarification(
                     state,
                     "The probe-backed Teams navigation control is not explicitly enabled.",
                     evidence,
-                    profile=LIVE_PROFILE,
+                    profile=profile_name,
                 )
         return self._clarification(
             CameraRecoveryState.TEAMS_PREJOIN_OBSERVED,
             "The selected Teams HWND tree was observed, but no unique probe-backed camera-settings navigation control is visible.",
             evidence,
-            profile=LIVE_PROFILE,
+            profile=profile_name,
+        )
+
+    def _guide_pinned_settings(
+        self,
+        session_id: str,
+        record: RecoveryRecord,
+        observation: Observation,
+    ) -> CameraDecision:
+        evidence = [CameraEvidenceKind.SYSTEM_CAMERA_SETTINGS_SURFACE]
+        candidates = [
+            _candidate(observation, PINNED_SYSTEM_GLOBAL),
+            _candidate(observation, PINNED_USER_GLOBAL),
+            _candidate(observation, PINNED_TEAMS_PERMISSION),
+        ]
+        if any(status == "ambiguous" for status, _ in candidates):
+            return self._clarification(
+                CameraRecoveryState.AMBIGUOUS,
+                "The pinned Camera Settings page contains ambiguous required toggle evidence.",
+                evidence,
+                profile=PINNED_PROFILE,
+            )
+        if any(status != "matched" for status, _ in candidates):
+            state = (CameraRecoveryState.SYSTEM_CAMERA_SETTINGS_UNINSPECTABLE
+                     if not observation.elements
+                     else CameraRecoveryState.SYSTEM_CAMERA_SETTINGS_UNVERIFIED)
+            if not observation.elements:
+                evidence.append(CameraEvidenceKind.UIA_NO_DESCENDANTS)
+            return self._clarification(
+                state,
+                "Verify the Camera Settings page from its exact pinned toggle IDs; the deep link landing is not trusted.",
+                evidence,
+                profile=PINNED_PROFILE,
+            )
+        system = observation.elements[candidates[0][1]]
+        user = observation.elements[candidates[1][1]]
+        teams_index = candidates[2][1]
+        teams = observation.elements[teams_index]
+        if teams.label != "Microsoft Teams Currently in use":
+            return self._clarification(
+                CameraRecoveryState.SYSTEM_CAMERA_SETTINGS_UNVERIFIED,
+                "The pinned packaged Teams toggle ID is present without its exact observed Microsoft Teams name.",
+                evidence,
+                profile=PINNED_PROFILE,
+            )
+        evidence.append(CameraEvidenceKind.CAMERA_SETTINGS_PAGE_VERIFIED)
+        if system.isEnabled is False or user.isEnabled is False:
+            return self._clarification(
+                CameraRecoveryState.ADMIN_MANAGED,
+                "A required global camera permission is disabled or managed; do not target the Teams toggle.",
+                evidence,
+                CameraPermissionState.MANAGED,
+                profile=PINNED_PROFILE,
+            )
+        if system.toggleState != ToggleState.ON or user.toggleState != ToggleState.ON:
+            return self._clarification(
+                CameraRecoveryState.UNSUPPORTED,
+                "The pinned global camera permissions are not both on; the individual Teams toggle is not the applicable fix.",
+                evidence,
+                profile=PINNED_PROFILE,
+            )
+        evidence.extend([
+            CameraEvidenceKind.SYSTEM_CAMERA_GLOBAL_ON,
+            CameraEvidenceKind.USER_CAMERA_GLOBAL_ON,
+            CameraEvidenceKind.TEAMS_CAMERA_PERMISSION,
+        ])
+        if teams.isEnabled is False:
+            return self._clarification(
+                CameraRecoveryState.ADMIN_MANAGED,
+                "The packaged Teams camera permission is disabled or managed; MSGuide will not target it.",
+                evidence,
+                CameraPermissionState.MANAGED,
+                profile=PINNED_PROFILE,
+            )
+        if teams.isEnabled is not True or teams.isOffscreen is not False:
+            return self._clarification(
+                CameraRecoveryState.AMBIGUOUS,
+                "The packaged Teams permission lacks explicit enabled and visible evidence.",
+                evidence,
+                profile=PINNED_PROFILE,
+            )
+        if teams.toggleState == ToggleState.OFF:
+            record.permission_on_observed = False
+            record.permission_off_observed = True
+            evidence.append(CameraEvidenceKind.APPLICABLE_PERMISSION_OFF)
+            return self._next_step(
+                session_id,
+                observation,
+                teams_index,
+                CameraRecoveryState.USER_ACTION_REQUIRED,
+                "Turn on the highlighted packaged Microsoft Teams camera permission yourself, then capture the verified page again.",
+                evidence,
+                CameraPermissionState.OFF,
+                profile=PINNED_PROFILE,
+            )
+        if teams.toggleState == ToggleState.ON:
+            evidence.append(CameraEvidenceKind.APPLICABLE_PERMISSION_ON)
+            if not record.permission_off_observed:
+                return self._clarification(
+                    CameraRecoveryState.UNSUPPORTED,
+                    "The packaged Teams permission is already on without a prior off observation in this pinned session.",
+                    evidence,
+                    CameraPermissionState.ON,
+                    profile=PINNED_PROFILE,
+                )
+            record.permission_on_observed = True
+            return self._clarification(
+                CameraRecoveryState.APPLICABLE_PERMISSION_ON,
+                "The packaged Teams permission changed from off to on. Return to Teams Devices for local preview verification.",
+                evidence,
+                CameraPermissionState.ON,
+                profile=PINNED_PROFILE,
+            )
+        return self._clarification(
+            CameraRecoveryState.AMBIGUOUS,
+            "The packaged Teams permission lacks an explicit on/off state.",
+            evidence,
+            profile=PINNED_PROFILE,
         )
 
     def _guide_teams(
