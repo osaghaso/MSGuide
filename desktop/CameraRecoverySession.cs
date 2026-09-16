@@ -69,6 +69,12 @@ internal enum CameraSettingsPage
     Other
 }
 
+internal static class CameraRecoveryPinnedTargets
+{
+    public const string TeamsVideoSettings = "VideoSettings";
+    public const string PackagedTeamsCameraToggle = "MSTeams_8wekyb3d8bbwe_ToggleSwitch";
+}
+
 internal sealed record TeamsCameraObservation(string WindowId, TeamsCameraFinding Finding, string Detail);
 internal sealed record CameraRecoveryTarget(string ObservationId, string Label, string? AutomationId = null);
 internal sealed record CameraSettingsObservation(
@@ -147,7 +153,7 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
             ? new CameraSettingsObservation(CameraSettingsFinding.PermissionOff,
                 "Fixture: packaged Teams permission off.",
                 new CameraRecoveryTarget("fixture-settings-1", "Microsoft Teams Currently in use",
-                    "MSTeams_8wekyb3d8bbwe_ToggleSwitch"),
+                    CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle),
                 CameraSettingsObservationSource.Fixture, ProbeValidated: true,
                 Page: CameraSettingsPage.CameraPrivacy)
             : new CameraSettingsObservation(CameraSettingsFinding.PermissionOn, "Fixture: permission on.",
@@ -282,6 +288,7 @@ internal sealed class CameraRecoverySession
     {
         Require(State is CameraRecoveryState.NeedsSettingsObservation or CameraRecoveryState.VerifiedTarget,
             "A Camera Settings observation is not expected now.");
+        bool initialSettingsObservation = State == CameraRecoveryState.NeedsSettingsObservation;
         Target = null;
         if (observation.Finding is CameraSettingsFinding.PermissionOff or CameraSettingsFinding.PermissionOn
                 or CameraSettingsFinding.ManagedOrDisabled
@@ -311,8 +318,12 @@ internal sealed class CameraRecoverySession
                     "Camera permission appears off, but no current verified target was supplied. No highlight or click was attempted.");
                 break;
             case CameraSettingsFinding.PermissionOn:
-                MoveTo(CameraRecoveryState.PermissionObservedOn,
-                    "Camera permission is observed on. This alone does not prove the Teams camera is ready.");
+                MoveTo(initialSettingsObservation
+                        ? CameraRecoveryState.AlreadyOnOrWrongCause
+                        : CameraRecoveryState.PermissionObservedOn,
+                    initialSettingsObservation
+                        ? "Camera permission was already on before any guided change. Do not force the permission path."
+                        : "Camera permission is observed on after the user's change. This alone does not prove the Teams camera is ready.");
                 break;
             case CameraSettingsFinding.ManagedOrDisabled:
                 MoveTo(CameraRecoveryState.ManagedOrDisabled,

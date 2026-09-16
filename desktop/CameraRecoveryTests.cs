@@ -33,12 +33,13 @@ internal static class CameraRecoveryTests
         Check(session.State == CameraRecoveryState.NeedsSettingsObservation && session.CanInspectSettings, "settings opened");
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
             new CameraRecoveryTarget("settings-observation-1", "Microsoft Teams Currently in use",
-                "MSTeams_8wekyb3d8bbwe_ToggleSwitch"),
+                CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle),
             CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
             Page: CameraSettingsPage.CameraPrivacy));
         Check(session.State == CameraRecoveryState.VerifiedTarget && session.CanShowTarget
             && session.CanCheckChangedSetting
-            && session.Target?.AutomationId == "MSTeams_8wekyb3d8bbwe_ToggleSwitch", "verified target");
+            && session.Target?.AutomationId == CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle,
+            "verified target");
         session.RecordTargetPresentation(new(true, ""));
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
             Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
@@ -104,6 +105,13 @@ internal static class CameraRecoveryTests
         Check(wrongSettingsPage.State == CameraRecoveryState.WrongSettingsPage
             && !wrongSettingsPage.LocalVerifierPassed, "Settings URI landing verified");
 
+        var alreadyOnInSettings = SettingsSession();
+        alreadyOnInSettings.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
+            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
+        Check(alreadyOnInSettings.State == CameraRecoveryState.AlreadyOnOrWrongCause
+            && !alreadyOnInSettings.CanReturnToTeams, "initial Settings permission already on");
+
         var cancelled = StartedSession();
         cancelled.Cancel();
         Check(cancelled.State == CameraRecoveryState.Cancelled && !cancelled.LocalVerifierPassed, "cancelled");
@@ -148,6 +156,11 @@ internal static class CameraRecoveryTests
     private static CameraRecoverySession PermissionOnSession()
     {
         var session = SettingsSession();
+        session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
+            new CameraRecoveryTarget("settings-observation-2", "Microsoft Teams Currently in use",
+                CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle),
+            CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
             Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
             Page: CameraSettingsPage.CameraPrivacy));
