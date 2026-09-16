@@ -9,6 +9,18 @@ namespace MSGuide.Desktop;
 
 internal static class AutomationEvidence
 {
+    private static readonly HashSet<string> KnownAutomationIds =
+    [
+        "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch",
+        "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch",
+        "MSTeams_8wekyb3d8bbwe_ToggleSwitch",
+        "SystemSettings_CapabilityAccess_Camera_ClassicGlobal_ToggleSwitch",
+        "more-options-header",
+        "AudioSettings",
+        "VideoSettings",
+        "open_camera_settings"
+    ];
+
     internal static string Bounded(string? value, int maximum)
     {
         value = value?.Trim() ?? "";
@@ -20,6 +32,9 @@ internal static class AutomationEvidence
         var bounded = Bounded(value, maximum);
         return bounded.Length == 0 ? null : bounded;
     }
+
+    internal static bool IsKnownAutomationId(string automationId) =>
+        KnownAutomationIds.Contains(automationId);
 
     internal static string TargetId(WindowChoice window, string role, string label, double[] box,
         string automationId, string frameworkId, int providerProcessId, IReadOnlyList<int>? runtimeId)
@@ -56,12 +71,14 @@ internal static class AutomationEvidence
         int visited = 0, inBounds = 0, enabled = 0, disabled = 0, crossProcess = 0, toggles = 0;
         bool truncated = false;
         var roles = new Dictionary<string, int>(StringComparer.Ordinal);
+        var knownControls = new Dictionary<string, KnownControlDiagnostic>(StringComparer.Ordinal);
         var clock = Stopwatch.StartNew();
         try
         {
             var root = AutomationElement.FromHandle(window.Handle);
             if (root.Current.ProcessId != (int)window.ProcessId)
-                return new(false, 0, 0, 0, 0, 0, 0, false, "root-identity-changed", roles);
+                return Diagnostic(false, 0, 0, 0, 0, 0, 0, false,
+                    "root-identity-changed", roles, knownControls);
             var walker = TreeWalker.RawViewWalker;
             void Walk(AutomationElement node, int depth)
             {
@@ -73,7 +90,17 @@ internal static class AutomationEvidence
                 }
                 visited++;
                 var value = node.Current;
-                if (value.IsPassword || value.IsOffscreen) return;
+                if (value.IsPassword) return;
+                string automationId = Bounded(value.AutomationId, 128);
+                if (IsKnownAutomationId(automationId))
+                {
+                    string? toggleState = null;
+                    try { toggleState = ToggleState(node); }
+                    catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
+                    knownControls[automationId] = new(automationId, value.IsEnabled,
+                        value.IsOffscreen, toggleState);
+                }
+                if (value.IsOffscreen) return;
                 if (Safety.AutomationBox(value.BoundingRectangle, rect) is not null)
                 {
                     inBounds++;
@@ -96,19 +123,40 @@ internal static class AutomationEvidence
                 }
             }
             Walk(root, 0);
-            return new(true, visited, inBounds, enabled, disabled, crossProcess, toggles,
-                truncated, "completed", roles);
+            return Diagnostic(true, visited, inBounds, enabled, disabled, crossProcess, toggles,
+                truncated, "completed", roles, knownControls);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException
             or COMException or UnauthorizedAccessException)
         {
-            return new(true, visited, inBounds, enabled, disabled, crossProcess, toggles,
-                truncated, "provider-error", roles);
+            return Diagnostic(true, visited, inBounds, enabled, disabled, crossProcess, toggles,
+                truncated, "provider-error", roles, knownControls);
         }
+    }
+
+    private static AutomationProbeDiagnostic Diagnostic(bool rootMatched, int visited, int inBounds,
+        int enabled, int disabled, int crossProcess, int toggles, bool truncated, string outcome,
+        IReadOnlyDictionary<string, int> roles,
+        IReadOnlyDictionary<string, KnownControlDiagnostic> knownControls)
+    {
+        var controls = knownControls.Values.OrderBy(control => control.AutomationId).ToArray();
+        var ids = knownControls.Keys;
+        string page = ids.Contains("SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch")
+            && ids.Contains("SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch")
+                ? "camera-privacy"
+                : ids.Contains("VideoSettings") && ids.Contains("open_camera_settings")
+                    ? "teams-devices"
+                    : "unknown";
+        return new(rootMatched, visited, inBounds, enabled, disabled, crossProcess, toggles,
+            truncated, outcome, page, roles, controls);
     }
 }
 
 public sealed record AutomationProbeDiagnostic(bool RootMatched, int NodesVisited, int InBoundsElements,
     int EnabledElements, int DisabledElements, int CrossProcessElements, int TogglePatterns,
-    bool Truncated, string Outcome, IReadOnlyDictionary<string, int> Roles);
+    bool Truncated, string Outcome, string VerifiedPage, IReadOnlyDictionary<string, int> Roles,
+    KnownControlDiagnostic[] KnownControls);
+
+public sealed record KnownControlDiagnostic(string AutomationId, bool IsEnabled, bool IsOffscreen,
+    string? ToggleState);

@@ -5,7 +5,8 @@ The probe compares Windows.Graphics.Capture with `PrintWindow` flags `0` and
 desktop capture and writes only JSON
 diagnostics (dimensions, timings, success/blank classification, PID, class,
 opaque window ID, and bounded aggregate UIA counts by control type). It does
-not write screenshot pixels, UIA names/IDs/help text, or window titles.
+not write screenshot pixels, arbitrary UIA names/help text, or window titles.
+Only allowlisted page-verification AutomationIds and their state are persisted.
 
 ```powershell
 dotnet run --project desktop\CaptureProbe\MSGuide.CaptureProbe.csproj -- `
@@ -38,6 +39,12 @@ References:
 
 ## Live target findings (2026-09-16)
 
+- On the pinned target machine, PrintWindow flag `0` returned black for both New
+  Teams and Camera Settings. Flag `2` returned rendered content for both,
+  including the live Teams preview. Flag `2` remains diagnostic-only because it
+  is undocumented; results must be measured and blank/protected failures remain
+  fail-closed. Delete probe artifacts after review and never persist preview
+  pixels.
 - New Teams exposed a rich WebView UIA subtree whose provider process differed
   from the selected top-level window process. Production traversal therefore
   anchors the Raw View walk at the exact selected HWND and permits bounded
@@ -45,11 +52,21 @@ References:
   enabled/targetable state, and TogglePattern state. Observed Teams IDs included
   `more-options-header`, `AudioSettings`, `VideoSettings`, and
   `open_camera_settings`.
-- Windows Camera Settings exposed zero UIA descendants from both its CoreWindow
-  and ApplicationFrameWindow on the probed Windows build; exact searches also
-  found no camera-access toggles. Settings UIA targeting is unproven. Share WGC
-  visual evidence only with explicit image consent; otherwise keep fixture or
-  unsupported fallback explicit.
-- On the same machine, the legacy owned-window CaptureTest produced a blank
-  PrintWindow frame and IntegrationTest failed foreground activation. Neither
-  result is treated as evidence that PrintWindow or Settings UIA is supported.
+- `ms-settings:privacy-webcam` opened Settings Home while an existing
+  SystemSettings process was alive. After that specific process was closed and
+  Settings was relaunched, the correct Camera page exposed rich cross-process
+  UIA. Never infer page identity from the URI: require both
+  `SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch` and
+  `SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch`.
+- The preferred pinned-machine fixture is
+  `MSTeams_8wekyb3d8bbwe_ToggleSwitch`, observed enabled and visible with an
+  `off`/`on` TogglePattern state. MSGuide may identify and highlight this
+  control, but the user performs the change. The desktop-wide
+  `SystemSettings_CapabilityAccess_Camera_ClassicGlobal_ToggleSwitch` may be
+  offscreen and is not the golden-path target.
+- Probe JSON reports `verifiedPage` as `camera-privacy`, `teams-devices`, or
+  `unknown`, plus allowlisted marker states. An unknown page must route to an
+  explicit fixture/unsupported fallback rather than assuming deep-link success.
+- The legacy owned-window CaptureTest produced a blank PrintWindow frame and
+  IntegrationTest failed foreground activation earlier on this machine. Those
+  results do not weaken WGC or page-verification requirements.

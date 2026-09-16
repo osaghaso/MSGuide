@@ -162,7 +162,8 @@ public static class CaptureService
             void Walk(AutomationElement node, int depth)
             {
                 ct.ThrowIfCancellationRequested();
-                if (++visited > 800 || depth > 18 || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds > 3000) return;
+                if (++visited > 800 || depth > 18 || elements.Count >= 200
+                    || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds > 3000) return;
                 var value = node.Current;
                 // Do not read Name, Value, TextPattern or descendants of password controls.
                 // Cross-process descendants are permitted only through this exact HWND-rooted Raw View tree.
@@ -171,10 +172,13 @@ public static class CaptureService
                 if (box is not null)
                 {
                     var name = AutomationEvidence.Bounded(value.Name, 256);
-                    if (name.Length > 0 && chars + name.Length + 1 <= 12000)
+                    string automationId = AutomationEvidence.Bounded(value.AutomationId, 128);
+                    bool knownMarker = AutomationEvidence.IsKnownAutomationId(automationId);
+                    if ((name.Length > 0 || knownMarker)
+                        && (name.Length == 0 || chars + name.Length + 1 <= 12000))
                     {
+                        string label = name.Length > 0 ? name : automationId;
                         string role = value.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
-                        string automationId = AutomationEvidence.Bounded(value.AutomationId, 128);
                         string frameworkId = AutomationEvidence.Bounded(value.FrameworkId, 64);
                         int[]? runtimeId = null;
                         string? toggleState = null;
@@ -183,28 +187,36 @@ public static class CaptureService
                         try { toggleState = AutomationEvidence.ToggleState(node); }
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
                         bool enabled = value.IsEnabled;
-                        elements.Add(new(role, name, box, TargetId: AutomationEvidence.TargetId(window,
-                            role, name, box, automationId, frameworkId, value.ProcessId, runtimeId),
+                        elements.Add(new(role, label, box, TargetId: AutomationEvidence.TargetId(window,
+                            role, label, box, automationId, frameworkId, value.ProcessId, runtimeId),
                             AutomationId: automationId, FrameworkId: frameworkId,
                             IsEnabled: enabled, Targetable: enabled, ToggleState: toggleState,
-                            HelpText: AutomationEvidence.Optional(value.HelpText, 256),
-                            ItemStatus: AutomationEvidence.Optional(value.ItemStatus, 128)));
-                        text.Add(name); chars += name.Length + 1;
+                            HelpText: name.Length > 0 ? AutomationEvidence.Optional(value.HelpText, 256) : null,
+                            ItemStatus: name.Length > 0 ? AutomationEvidence.Optional(value.ItemStatus, 128) : null));
+                        if (name.Length > 0)
+                        {
+                            text.Add(name);
+                            chars += name.Length + 1;
+                        }
                     }
                 }
                 ct.ThrowIfCancellationRequested();
-                if (depth >= 18 || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds > 3000) return;
+                if (depth >= 18 || elements.Count >= 200 || text.Count >= 200
+                    || chars >= 12000 || clock.ElapsedMilliseconds > 3000) return;
                 var child = walker.GetFirstChild(node);
-                while (child is not null && visited < 800 && text.Count < 200 && chars < 12000 && clock.ElapsedMilliseconds < 3000)
+                while (child is not null && visited < 800 && elements.Count < 200
+                    && text.Count < 200 && chars < 12000 && clock.ElapsedMilliseconds < 3000)
                 {
                     Walk(child, depth + 1);
                     ct.ThrowIfCancellationRequested();
-                    if (visited >= 800 || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) break;
+                    if (visited >= 800 || elements.Count >= 200 || text.Count >= 200
+                        || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) break;
                     child = walker.GetNextSibling(child);
                 }
             }
             Walk(root, 0);
-            if (visited >= 800 || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) note += " Metadata was bounded/truncated.";
+            if (visited >= 800 || elements.Count >= 200 || text.Count >= 200
+                || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) note += " Metadata was bounded/truncated.";
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException or UnauthorizedAccessException)

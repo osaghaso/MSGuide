@@ -86,6 +86,24 @@ internal static class SelfTests
             [0.1, 0.2, 0.3, 0.1], "camera-toggle", "Chrome", 4444, [1, 2, 3]));
         Check(stableTarget.StartsWith("uia-") && stableTarget.Length == 28
             && !stableTarget.Contains("camera", StringComparison.OrdinalIgnoreCase));
+        var cameraGlobal = new ElementInfo("button", "Camera access", [0.1, 0.1, 0.3, 0.1],
+            AutomationId: "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch",
+            ToggleState: "on");
+        var appGlobal = new ElementInfo("button", "Let apps access your camera", [0.1, 0.3, 0.3, 0.1],
+            AutomationId: "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch",
+            ToggleState: "on");
+        var teamsPermission = new ElementInfo("button", "Microsoft Teams", [0.1, 0.5, 0.3, 0.1],
+            AutomationId: "MSTeams_8wekyb3d8bbwe_ToggleSwitch", ToggleState: "off");
+        Check(Safety.VerifiedCameraSettingsPage([cameraGlobal, appGlobal, teamsPermission]));
+        Check(!Safety.VerifiedCameraSettingsPage([cameraGlobal, teamsPermission]));
+        Check(Safety.PackagedTeamsCameraPermission([cameraGlobal, teamsPermission]) == teamsPermission);
+        Check(Safety.PackagedTeamsCameraPermission(
+            [teamsPermission with { IsEnabled = false, Targetable = false }]) is null);
+        Check(Safety.VerifiedTeamsDevicesPage(
+            [new("group", "Video settings", [0.1, 0.1, 0.3, 0.1], AutomationId: "VideoSettings"),
+             new("button", "Open camera settings", [0.1, 0.3, 0.3, 0.1], AutomationId: "open_camera_settings")]));
+        Check(!Safety.VerifiedTeamsDevicesPage(
+            [new("group", "Video settings", [0.1, 0.1, 0.3, 0.1], AutomationId: "VideoSettings")]));
         var windowBounds = new Native.RECT { Left = -100, Top = 20, Right = 700, Bottom = 620 };
         Check(Safety.AutomationBox(new System.Windows.Rect(800, 20, 10, 10), windowBounds) is null);
         Check(Safety.AutomationBox(System.Windows.Rect.Empty, windowBounds) is null);
@@ -136,11 +154,15 @@ internal static class SelfTests
         Check(System.Text.Json.JsonSerializer.Serialize(observation with { ImageBase64 = "AQ==" }, options).Contains("\"imageBase64\":\"AQ==\""));
         var probe = new CaptureProbeReport(1, now, "42:ABCD", 42, "SyntheticClass", 800, 600,
             [new("PrintWindow(0)", 0, true, true, "accepted", 10, 240, 12)],
-            new(true, 10, 8, 6, 2, 4, 1, false, "completed",
-                new Dictionary<string, int> { ["button"] = 2 }));
+            new(true, 10, 8, 6, 2, 4, 1, false, "completed", "camera-privacy",
+                new Dictionary<string, int> { ["button"] = 2 },
+                [new("SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch",
+                    true, false, "on")]));
         string probeJson = System.Text.Json.JsonSerializer.Serialize(probe, options);
         Check(probeJson.Contains("\"outcome\":\"accepted\"") && !probeJson.Contains("image", StringComparison.OrdinalIgnoreCase)
             && !probeJson.Contains("base64", StringComparison.OrdinalIgnoreCase)
             && !probeJson.Contains("pixel", StringComparison.OrdinalIgnoreCase));
+        Check(probeJson.Contains("\"verifiedPage\":\"camera-privacy\"")
+            && probeJson.Contains("SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch"));
     }
 }

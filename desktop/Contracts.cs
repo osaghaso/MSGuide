@@ -60,6 +60,18 @@ public static class Safety
         && elements.Any(e => e.Targetable && e.IsEnabled && e.Label == target.Label && ValidBox(e.Box)
             && e.Box.Zip(target.Box).All(pair => Math.Abs(pair.First - pair.Second) < 0.000001));
 
+    public static bool VerifiedCameraSettingsPage(ElementInfo[] elements) =>
+        elements.Any(e => e.AutomationId == "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch")
+        && elements.Any(e => e.AutomationId == "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch");
+
+    public static bool VerifiedTeamsDevicesPage(ElementInfo[] elements) =>
+        elements.Any(e => e.AutomationId == "VideoSettings")
+        && elements.Any(e => e.AutomationId == "open_camera_settings");
+
+    public static ElementInfo? PackagedTeamsCameraPermission(ElementInfo[] elements) =>
+        elements.FirstOrDefault(e => e.AutomationId == "MSTeams_8wekyb3d8bbwe_ToggleSwitch"
+            && e.IsEnabled && e.Targetable && ValidBox(e.Box));
+
     public static bool Fresh(DateTimeOffset captured, DateTimeOffset now) =>
         now >= captured && now - captured < TimeSpan.FromSeconds(60);
 
