@@ -17,6 +17,10 @@ public partial class MainWindow
     private bool cameraTargetPresentationAttempted;
     private bool cameraTargetShown;
     private string? cameraRecoveryNotice;
+    private CameraRecoveryInteractionMode SelectedCameraMode =>
+        CameraControlMode?.IsChecked == true
+            ? CameraRecoveryInteractionMode.Control
+            : CameraRecoveryInteractionMode.Guide;
 
     internal void UseCameraRecoverySensing(ICameraRecoverySensing sensing)
     {
@@ -59,9 +63,8 @@ public partial class MainWindow
     private void StartCameraRecovery(bool fromPrompt)
     {
         CancelCameraOperation();
-        if (cameraRecoverySensing is FixtureCameraRecoverySensing fixture)
-            fixture.Reset();
-        cameraRecovery = new CameraRecoverySession();
+        cameraRecoverySensing.Reset();
+        cameraRecovery = new CameraRecoverySession(SelectedCameraMode);
         cameraRecovery.Start();
         cameraTargetPresentationAttempted = false;
         cameraTargetShown = false;
@@ -118,6 +121,29 @@ public partial class MainWindow
     private void UpdateCameraRecoveryUi(FrameworkElement? focus = null)
     {
         if (CameraStateText is null) return;
+        bool inactive = cameraRecovery.State == CameraRecoveryState.Idle || cameraRecovery.IsTerminal;
+        bool controlAvailable = cameraRecoverySensing is ICameraRecoveryControl;
+        var mode = inactive ? SelectedCameraMode : cameraRecovery.Mode;
+        if (!controlAvailable && mode == CameraRecoveryInteractionMode.Control)
+        {
+            CameraGuideMode.IsChecked = true;
+            mode = CameraRecoveryInteractionMode.Guide;
+        }
+        bool controlMode = mode == CameraRecoveryInteractionMode.Control;
+        CameraGuideMode.IsEnabled = !cameraRecoveryBusy && inactive;
+        CameraControlMode.IsEnabled = !cameraRecoveryBusy && inactive && controlAvailable;
+        CameraModePillText.Text = controlMode ? "FIX IT FOR ME" : "GUIDE ONLY";
+        CameraModePill.SetResourceReference(Border.BackgroundProperty,
+            controlMode ? "WarningSoftBrush" : "AccentSoftBrush");
+        CameraModePillText.SetResourceReference(TextBlock.ForegroundProperty,
+            controlMode ? "WarningBrush" : "AccentBrush");
+        CameraModeSubtitle.Text = controlMode
+            ? "MSGuide can act only on a freshly verified camera control after approval."
+            : "You make every click. MSGuide verifies each next step.";
+        CameraActionPolicyText.Text = controlMode ? "Approved actions only" : "No automatic clicks";
+        CameraModeHint.Text = controlMode
+            ? "The camera action asks once; closing and relaunching Teams asks separately."
+            : "You make each change; MSGuide verifies the result.";
         CameraStateText.Text = CameraStateLabel(cameraRecovery.State);
         CameraSensingText.Text = cameraRecoverySensing.Mode switch
         {
@@ -148,7 +174,8 @@ public partial class MainWindow
             && cameraRecovery.CanInspectTeams
             && selectedWindowValid;
         CameraPrivateCheckButton.IsEnabled = !cameraRecoveryBusy
-            && (cameraRecovery.CanInspectSettings || cameraRecovery.CanVerifyTeams);
+            && (cameraRecovery.CanInspectSettings
+                || cameraRecovery.CanVerifyTeams && selectedWindowValid);
         CameraPrivateCheckButton.Content = cameraRecovery.CanInspectSettings
             ? "Inspect Camera Settings"
             : "Private visual check";
@@ -158,7 +185,30 @@ public partial class MainWindow
         CameraOpenSettingsButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanOpenSettings;
         CameraShowButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanShowTarget;
         CameraChangedCheckButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanCheckChangedSetting;
+        CameraChangedCheckButton.Content =
+            cameraRecovery.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+                ? "I turned it on · check"
+                : "I changed it · check again";
+        AutomationProperties.SetName(CameraChangedCheckButton,
+            cameraRecovery.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+                ? "Check the Teams camera control after my change"
+                : "Check Camera Settings after my change");
+        CameraControlTargetButton.IsEnabled = !cameraRecoveryBusy
+            && cameraRecovery.CanControlTarget
+            && cameraRecoverySensing is ICameraRecoveryControl;
+        CameraControlTargetButton.Content =
+            cameraRecovery.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+                ? "Approve & turn camera on"
+                : "Approve & allow Teams camera";
+        AutomationProperties.SetName(CameraControlTargetButton,
+            cameraRecovery.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+                ? "Approve one invocation of the verified Teams camera-on control"
+                : "Approve one toggle of the verified Microsoft Teams camera permission");
         CameraReturnButton.IsEnabled = !cameraRecoveryBusy && cameraRecovery.CanReturnToTeams;
+        CameraRestartTeamsButton.IsEnabled = !cameraRecoveryBusy
+            && cameraRecovery.CanRestartTeams
+            && selectedWindowValid
+            && cameraRecoverySensing is ICameraRecoveryControl;
         bool canStop = !cameraRecovery.IsTerminal
             && cameraRecovery.State is not (CameraRecoveryState.Idle or CameraRecoveryState.Cancelled);
         CameraStopButton.IsEnabled = canStop;
@@ -171,12 +221,15 @@ public partial class MainWindow
                 || cameraRecovery.IsTerminal
             ? Visibility.Collapsed : Visibility.Visible;
         CameraChooseWindowButton.Visibility = !cameraRecoveryBusy
-                && cameraRecovery.State == CameraRecoveryState.NeedsTeamsObservation
+                && cameraRecovery.State is (
+                    CameraRecoveryState.NeedsTeamsObservation
+                    or CameraRecoveryState.NeedsCameraReinitialization)
                 && !selectedWindowValid
             ? Visibility.Visible : Visibility.Collapsed;
         CameraInspectButton.Visibility = CameraInspectButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
         CameraOpenSettingsButton.Visibility = CameraOpenSettingsButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
-        CameraPrivateCheckButton.Visibility = CameraPrivateCheckButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+        CameraPrivateCheckButton.Visibility = CameraPrivateCheckButton.IsEnabled
+            ? Visibility.Visible : Visibility.Collapsed;
         CameraShowButton.Content = cameraTargetPresentationAttempted ? "Try showing again" : "Show me";
         CameraShowButton.Style = (Style)FindResource(cameraTargetPresentationAttempted
             ? "QuietButtonStyle" : "PrimaryButtonStyle");
@@ -185,7 +238,12 @@ public partial class MainWindow
         CameraChangedCheckButton.Visibility = CameraChangedCheckButton.IsEnabled
                 && (cameraTargetShown || cameraTargetPresentationAttempted)
             ? Visibility.Visible : Visibility.Collapsed;
-        CameraReturnButton.Visibility = CameraReturnButton.IsEnabled ? Visibility.Visible : Visibility.Collapsed;
+        CameraControlTargetButton.Visibility = CameraControlTargetButton.IsEnabled
+            ? Visibility.Visible : Visibility.Collapsed;
+        CameraReturnButton.Visibility = CameraReturnButton.IsEnabled && !controlMode
+            ? Visibility.Visible : Visibility.Collapsed;
+        CameraRestartTeamsButton.Visibility = CameraRestartTeamsButton.IsEnabled
+            ? Visibility.Visible : Visibility.Collapsed;
         CameraSessionActions.Visibility = canStop ? Visibility.Visible : Visibility.Collapsed;
 
         int progress = CameraProgress(cameraRecovery.State);
@@ -215,7 +273,7 @@ public partial class MainWindow
         CameraRecoveryState.Diagnosis => "Camera permission may be blocked",
         CameraRecoveryState.NeedsCameraSettings => "Open Camera settings",
         CameraRecoveryState.NeedsSettingsObservation => "Check the Camera privacy page",
-        CameraRecoveryState.VerifiedTarget => "Teams permission found",
+        CameraRecoveryState.VerifiedTarget => "Camera control found",
         CameraRecoveryState.PermissionObservedOn => "Permission is on · verify Teams next",
         CameraRecoveryState.NeedsLocalVerification => "Check the Teams camera",
         CameraRecoveryState.NeedsCameraReinitialization => "Reinitialize the Teams camera",
@@ -309,12 +367,28 @@ public partial class MainWindow
         CameraRecoveryState.NeedsTeamsObservation => CameraInspectButton,
         CameraRecoveryState.Diagnosis or CameraRecoveryState.NeedsCameraSettings => CameraOpenSettingsButton,
         CameraRecoveryState.NeedsSettingsObservation => CameraPrivateCheckButton,
+        CameraRecoveryState.VerifiedTarget when cameraRecovery.CanControlTarget
+            => CameraControlTargetButton,
         CameraRecoveryState.VerifiedTarget => CameraShowButton,
         CameraRecoveryState.PermissionObservedOn => CameraReturnButton,
+        CameraRecoveryState.NeedsCameraReinitialization
+            when CameraWindowPicker.SelectedItem is not WindowChoice rebound
+                || !rebound.Matches()
+            => CameraChooseWindowButton,
+        CameraRecoveryState.NeedsCameraReinitialization when cameraRecovery.CanRestartTeams
+            => CameraRestartTeamsButton,
         CameraRecoveryState.NeedsLocalVerification or CameraRecoveryState.NeedsCameraReinitialization
             => CameraPrivateCheckButton,
         _ => CameraStartButton
     };
+
+    private void CameraMode_Changed(object sender, RoutedEventArgs e)
+    {
+        if (CameraModeHint is null || loaded && !cameraRecovery.IsTerminal
+                && cameraRecovery.State != CameraRecoveryState.Idle)
+            return;
+        UpdateCameraRecoveryUi();
+    }
 
     private void CameraStart_Click(object sender, RoutedEventArgs e)
     {
@@ -351,9 +425,15 @@ public partial class MainWindow
         UpdateCameraRecoveryUi(CameraInspectButton);
     }
 
-    private async void CameraInspect_Click(object sender, RoutedEventArgs e)
+    private async void CameraInspect_Click(object sender, RoutedEventArgs e) =>
+        await ObserveSelectedTeamsAsync();
+
+    private async Task ObserveSelectedTeamsAsync()
     {
-        if (!cameraRecovery.CanInspectTeams || CameraWindowPicker.SelectedItem is not WindowChoice selected)
+        bool checkingChangedCamera = cameraRecovery.CanCheckChangedSetting
+            && cameraRecovery.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton;
+        if ((!cameraRecovery.CanInspectTeams && !checkingChangedCamera)
+            || CameraWindowPicker.SelectedItem is not WindowChoice selected)
             return;
         if (!selected.Matches())
         {
@@ -446,16 +526,26 @@ public partial class MainWindow
         }
     }
 
-    private async void CameraChangedCheck_Click(object sender, RoutedEventArgs e) => await ObserveCameraSettings();
-
-    private void CameraReturn_Click(object sender, RoutedEventArgs e)
+    private async void CameraChangedCheck_Click(object sender, RoutedEventArgs e)
     {
-        if (!cameraRecovery.CanReturnToTeams || CameraWindowPicker.SelectedItem is not WindowChoice selected) return;
+        if (cameraRecovery.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton)
+            await ObserveSelectedTeamsAsync();
+        else
+            await ObserveCameraSettings();
+    }
+
+    private void CameraReturn_Click(object sender, RoutedEventArgs e) =>
+        ReturnToSelectedTeams("Return to Teams requested by your click · no Teams control was clicked.");
+
+    private bool ReturnToSelectedTeams(string status)
+    {
+        if (!cameraRecovery.CanReturnToTeams || CameraWindowPicker.SelectedItem is not WindowChoice selected)
+            return false;
         if (selected.Id != cameraRecovery.TeamsWindowId || !selected.Matches())
         {
             cameraRecovery.MarkStale("The selected Teams window moved, closed, or changed. Choose it again.");
             UpdateCameraRecoveryUi(CameraStartButton);
-            return;
+            return false;
         }
         cameraRecoveryNotice = null;
         cameraRecovery.MarkReturnedToTeams();
@@ -465,8 +555,9 @@ public partial class MainWindow
             cameraRecoveryNotice =
                 "Use the taskbar to return to the selected Teams window, then come back and run Private visual check.";
         }
-        StatusText.Text = "Return to Teams requested by your click · no Teams control was clicked.";
+        StatusText.Text = status;
         UpdateCameraRecoveryUi(CameraPrivateCheckButton);
+        return true;
     }
 
     private async void CameraPrivateCheck_Click(object sender, RoutedEventArgs e)
@@ -476,6 +567,11 @@ public partial class MainWindow
             await ObserveCameraSettings();
             return;
         }
+        await VerifySelectedTeamsAsync();
+    }
+
+    private async Task VerifySelectedTeamsAsync()
+    {
         if (!cameraRecovery.CanVerifyTeams || CameraWindowPicker.SelectedItem is not WindowChoice selected) return;
         if (selected.Id != cameraRecovery.TeamsWindowId || !selected.Matches())
         {
@@ -513,6 +609,177 @@ public partial class MainWindow
             FinishCameraOperation(generation);
             UpdateCameraRecoveryUi(CameraFocusForState());
         }
+    }
+
+    private async void CameraControlTarget_Click(object sender, RoutedEventArgs e)
+    {
+        if (!cameraRecovery.CanControlTarget
+            || cameraRecovery.Target is not { } approvedTarget
+            || cameraRecoverySensing is not ICameraRecoveryControl controller)
+            return;
+        if (approvedTarget.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+            && CameraWindowPicker.SelectedItem is not WindowChoice)
+            return;
+
+        bool verifyAfter = false;
+        bool returnBeforeVerify = false;
+        var (token, generation) = BeginCameraOperation();
+        cameraRecoveryNotice = approvedTarget.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+            ? "Applying the one approved Teams camera-on action…"
+            : "Applying the one approved Teams permission action…";
+        StatusText.Text = "One exact camera action approved · no retries are authorized.";
+        UpdateCameraRecoveryUi();
+        try
+        {
+            var control = await controller.ActivateTargetAsync(approvedTarget, token);
+            if (!CurrentCameraOperation(generation, token)) return;
+            cameraRecoveryNotice = null;
+            if (!control.OutcomeKnown)
+            {
+                cameraRecovery.RecordControlFailure(control.Detail);
+            }
+            else if (!control.Invoked)
+            {
+                cameraRecovery.MarkStale(control.Detail);
+            }
+            else
+            {
+                await Task.Delay(300, token);
+                if (approvedTarget.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+                    && CameraWindowPicker.SelectedItem is WindowChoice selected)
+                {
+                    TeamsCameraObservation observation = await cameraRecoverySensing
+                        .ObserveTeamsAsync(selected, token);
+                    for (int attempt = 0;
+                        attempt < 5 && observation.Finding == TeamsCameraFinding.CameraOff;
+                        attempt++)
+                    {
+                        await Task.Delay(250, token);
+                        observation = await cameraRecoverySensing
+                            .ObserveTeamsAsync(selected, token);
+                    }
+                    if (!CurrentCameraOperation(generation, token)) return;
+                    cameraRecovery.ApplyTeamsObservation(observation);
+                    if (cameraRecovery.State == CameraRecoveryState.VerifiedTarget)
+                        cameraRecovery.RecordControlFailure(
+                            "The Teams camera control still appears off after the approved action. No retry occurred.");
+                    verifyAfter = cameraRecovery.State == CameraRecoveryState.NeedsLocalVerification;
+                }
+                else
+                {
+                    CameraSettingsObservation observation = await cameraRecoverySensing
+                        .ObserveSettingsAsync(token);
+                    for (int attempt = 0;
+                        attempt < 5 && observation.Finding == CameraSettingsFinding.PermissionOff;
+                        attempt++)
+                    {
+                        await Task.Delay(250, token);
+                        observation = await cameraRecoverySensing.ObserveSettingsAsync(token);
+                    }
+                    if (!CurrentCameraOperation(generation, token)) return;
+                    cameraRecovery.ApplySettingsObservation(observation);
+                    if (cameraRecovery.State == CameraRecoveryState.VerifiedTarget)
+                        cameraRecovery.RecordControlFailure(
+                            "The Teams permission still appears off after the approved action. No retry occurred.");
+                    returnBeforeVerify =
+                        cameraRecovery.State == CameraRecoveryState.PermissionObservedOn;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (generation == cameraRecoveryGeneration)
+                cameraRecoveryNotice = "The approved camera action was cancelled. No retry occurred.";
+        }
+        catch (Exception)
+        {
+            if (generation == cameraRecoveryGeneration)
+            {
+                cameraRecoveryNotice = null;
+                cameraRecovery.RecordControlFailure(
+                    "The approved camera action failed safely. No retry occurred.");
+            }
+        }
+        finally
+        {
+            FinishCameraOperation(generation);
+            UpdateCameraRecoveryUi(CameraFocusForState());
+        }
+
+        if (returnBeforeVerify
+            && ReturnToSelectedTeams(
+                "Approved Teams permission action verified · returned to Teams for local verification."))
+            await VerifySelectedTeamsAsync();
+        else if (verifyAfter)
+            await VerifySelectedTeamsAsync();
+    }
+
+    private async void CameraRestartTeams_Click(object sender, RoutedEventArgs e)
+    {
+        if (!cameraRecovery.CanRestartTeams
+            || CameraWindowPicker.SelectedItem is not WindowChoice selected
+            || cameraRecoverySensing is not ICameraRecoveryControl controller)
+            return;
+
+        bool verifyAfter = false;
+        var (token, generation) = BeginCameraOperation();
+        cameraRecoveryNotice =
+            "Restarting Teams after separate approval. This can end an active meeting…";
+        StatusText.Text = "Teams restart separately approved.";
+        UpdateCameraRecoveryUi();
+        try
+        {
+            var result = await controller.RestartTeamsAsync(selected, token);
+            if (!CurrentCameraOperation(generation, token)) return;
+            cameraRecoveryNotice = null;
+            cameraRecovery.RecordTeamsRestart(result);
+            if (result.Finding == TeamsRestartFinding.Restarted)
+            {
+                RefreshWindows();
+                if (result.ReopenedWindow is { } reopened)
+                {
+                    refreshingCameraWindows = true;
+                    CameraWindowPicker.SelectedItem =
+                        CameraWindowPicker.Items.Cast<WindowChoice>()
+                            .FirstOrDefault(candidate => candidate.Id == reopened.Id)
+                        ?? CameraWindowPicker.SelectedItem;
+                    refreshingCameraWindows = false;
+                }
+                if (CameraWindowPicker.SelectedItem is WindowChoice rebound
+                    && rebound.Matches())
+                {
+                    cameraRecovery.ChooseTeamsWindow(rebound.Id, rebound.Title);
+                    verifyAfter = true;
+                }
+                else
+                {
+                    CameraWindowPicker.SelectedItem = null;
+                    cameraRecovery.ChooseTeamsWindow("", "");
+                }
+                cameraRecoveryNotice = null;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (generation == cameraRecoveryGeneration)
+                cameraRecoveryNotice = "The approved Teams restart was cancelled.";
+        }
+        catch (Exception)
+        {
+            if (generation == cameraRecoveryGeneration)
+            {
+                cameraRecoveryNotice = null;
+                cameraRecovery.RecordControlFailure("Teams could not be restarted safely.");
+            }
+        }
+        finally
+        {
+            FinishCameraOperation(generation);
+            UpdateCameraRecoveryUi(CameraFocusForState());
+        }
+
+        if (verifyAfter)
+            await VerifySelectedTeamsAsync();
     }
 
     private void CameraStop_Click(object sender, RoutedEventArgs e)

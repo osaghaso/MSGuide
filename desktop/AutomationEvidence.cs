@@ -77,6 +77,28 @@ internal static class AutomationEvidence
         };
     }
 
+    internal static bool MatchesTargetId(
+        WindowChoice window, Native.RECT rect, AutomationElement element, string expected)
+    {
+        var value = element.Current;
+        if (value.IsPassword || value.IsOffscreen) return false;
+        var box = Safety.AutomationBox(value.BoundingRectangle, rect);
+        if (box is null) return false;
+        string name = Bounded(value.Name, 256);
+        string automationId = Bounded(value.AutomationId, 128);
+        if (name.Length == 0 && !IsKnownAutomationId(automationId)) return false;
+        int[]? runtimeId = null;
+        try { runtimeId = element.GetRuntimeId(); }
+        catch (Exception ex) when (
+            ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
+        string role = value.ControlType.ProgrammaticName
+            .Replace("ControlType.", "").ToLowerInvariant();
+        string label = name.Length > 0 ? name : automationId;
+        return string.Equals(TargetId(
+            window, role, label, box, automationId, Bounded(value.FrameworkId, 64),
+            value.ProcessId, runtimeId), expected, StringComparison.Ordinal);
+    }
+
     internal static AutomationProbeDiagnostic Probe(WindowChoice window, Native.RECT rect, CancellationToken ct)
     {
         int visited = 0, inBounds = 0, enabled = 0, disabled = 0, crossProcess = 0, toggles = 0;

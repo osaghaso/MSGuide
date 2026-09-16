@@ -21,6 +21,32 @@ internal static class CameraRecoveryTests
             && pendingResult.Detail.Contains("did not take a screenshot", StringComparison.Ordinal),
             "explicit unsupported fallback");
 
+        var cameraControlSession =
+            new CameraRecoverySession(CameraRecoveryInteractionMode.Control);
+        cameraControlSession.Start();
+        cameraControlSession.ChooseTeamsWindow("teams-camera", "Meeting | Microsoft Teams");
+        cameraControlSession.ApplyTeamsObservation(new(
+            "teams-camera", TeamsCameraFinding.CameraOff, "",
+            new CameraRecoveryTarget(
+                "teams-camera-target", CameraRecoveryPinnedTargets.TeamsTurnCameraOn,
+                "camera-button", CameraRecoveryTargetKind.TeamsCameraButton)));
+        Check(cameraControlSession.State == CameraRecoveryState.VerifiedTarget
+            && cameraControlSession.CanControlTarget
+            && !cameraControlSession.CanCheckChangedSetting,
+            "control mode gates exact Teams camera action");
+        cameraControlSession.ApplyTeamsObservation(new(
+            "teams-camera", TeamsCameraFinding.CameraOn, ""));
+        Check(cameraControlSession.State == CameraRecoveryState.NeedsLocalVerification,
+            "camera-on observation requires readiness verification");
+        cameraControlSession.ApplyVerification(new(
+            "teams-camera", CameraVerificationFinding.NeedsReinitialization, false, ""));
+        Check(cameraControlSession.CanRestartTeams, "restart requires separate approval state");
+        cameraControlSession.RecordTeamsRestart(new(
+            TeamsRestartFinding.Restarted, "", new WindowChoice(0, 0, "Microsoft Teams")));
+        Check(!cameraControlSession.CanRestartTeams
+            && cameraControlSession.TeamsRestartAttempted,
+            "restart approval is single-use");
+
         var session = new CameraRecoverySession();
         Check(session.State == CameraRecoveryState.Idle && !session.LocalVerifierPassed, "idle");
         session.Start();
@@ -33,11 +59,13 @@ internal static class CameraRecoveryTests
         Check(session.State == CameraRecoveryState.NeedsSettingsObservation && session.CanInspectSettings, "settings opened");
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
             new CameraRecoveryTarget("settings-observation-1", "Microsoft Teams Currently in use",
-                CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle),
+                CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle,
+                CameraRecoveryTargetKind.PackagedTeamsPermission),
             CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
             Page: CameraSettingsPage.CameraPrivacy));
         Check(session.State == CameraRecoveryState.VerifiedTarget && session.CanShowTarget
             && session.CanCheckChangedSetting
+            && !session.CanControlTarget
             && session.Target?.AutomationId == CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle,
             "verified target");
         session.RecordTargetPresentation(new(true, ""));
@@ -156,33 +184,49 @@ internal static class CameraRecoveryTests
 
         var fixture = new FixtureCameraRecoverySensing();
         var fixtureWindow = new WindowChoice(0, 0, "Synthetic Teams fixture");
-        var fixtureSession = new CameraRecoverySession();
+        var fixtureSession =
+            new CameraRecoverySession(CameraRecoveryInteractionMode.Control);
         fixtureSession.Start();
         fixtureSession.ChooseTeamsWindow(fixtureWindow.Id, fixtureWindow.Title);
         fixtureSession.ApplyTeamsObservation(
             fixture.ObserveTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
-        fixtureSession.PrepareToOpenSettings();
-        fixtureSession.MarkSettingsOpened();
-        fixtureSession.ApplySettingsObservation(
-            fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
-        fixtureSession.RecordTargetPresentation(
-            fixture.ShowTargetAsync(fixtureSession.Target!, CancellationToken.None).GetAwaiter().GetResult());
-        fixtureSession.ApplySettingsObservation(
-            fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
-        fixtureSession.MarkReturnedToTeams();
-        fixtureSession.ApplyVerification(
-            fixture.VerifyTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
-        Check(fixtureSession.State == CameraRecoveryState.NeedsCameraReinitialization
-            && fixtureSession.CanVerifyTeams, "fixture requires camera reinitialization");
+        Check(fixtureSession.CanControlTarget
+            && fixtureSession.Target?.Kind == CameraRecoveryTargetKind.TeamsCameraButton,
+            "fixture starts with Teams camera off");
+        Check(fixture.ActivateTargetAsync(
+                fixtureSession.Target!, CancellationToken.None).GetAwaiter().GetResult().Invoked,
+            "fixture control action");
+        fixtureSession.ApplyTeamsObservation(
+            fixture.ObserveTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
         fixtureSession.ApplyVerification(
             fixture.VerifyTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
         Check(fixture.Mode == CameraRecoverySensingMode.Fixture
             && fixtureSession.State == CameraRecoveryState.FixtureComplete
             && fixtureSession.Detail.Contains("not claimed", StringComparison.OrdinalIgnoreCase),
-            "deterministic fixture path");
+            "deterministic camera-button fixture path");
+
         fixture.Reset();
-        Check(fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult().Finding
-            == CameraSettingsFinding.PermissionOff, "fixture restarts from permission off");
+        var permissionFixtureSession = new CameraRecoverySession();
+        permissionFixtureSession.Start();
+        permissionFixtureSession.ChooseTeamsWindow(fixtureWindow.Id, fixtureWindow.Title);
+        permissionFixtureSession.ApplyTeamsObservation(new(
+            fixtureWindow.Id, TeamsCameraFinding.PermissionMayBeOff, ""));
+        permissionFixtureSession.PrepareToOpenSettings();
+        permissionFixtureSession.MarkSettingsOpened();
+        permissionFixtureSession.ApplySettingsObservation(
+            fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
+        permissionFixtureSession.ApplySettingsObservation(
+            fixture.ObserveSettingsAsync(CancellationToken.None).GetAwaiter().GetResult());
+        permissionFixtureSession.MarkReturnedToTeams();
+        permissionFixtureSession.ApplyVerification(
+            fixture.VerifyTeamsAsync(fixtureWindow, CancellationToken.None).GetAwaiter().GetResult());
+        Check(permissionFixtureSession.State == CameraRecoveryState.NeedsCameraReinitialization,
+            "permission fixture still requires camera reinitialization");
+
+        fixture.Reset();
+        Check(fixture.ObserveTeamsAsync(
+                fixtureWindow, CancellationToken.None).GetAwaiter().GetResult().Finding
+            == TeamsCameraFinding.CameraOff, "fixture restarts from Teams camera off");
     }
 
     private static CameraRecoverySession StartedSession()
@@ -198,7 +242,8 @@ internal static class CameraRecoveryTests
         var session = SettingsSession();
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
             new CameraRecoveryTarget("settings-observation-2", "Microsoft Teams Currently in use",
-                CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle),
+                CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle,
+                CameraRecoveryTargetKind.PackagedTeamsPermission),
             CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
             Page: CameraSettingsPage.CameraPrivacy));
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",

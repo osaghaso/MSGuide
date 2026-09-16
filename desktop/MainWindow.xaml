@@ -28,8 +28,14 @@
                      Style="{StaticResource CaptionStyle}" Margin="0,2,0,0"/>
         </StackPanel>
         <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Top">
-          <Border Style="{StaticResource PillStyle}" Background="{StaticResource AccentSoftBrush}">
-            <TextBlock Text="GUIDE ONLY" Foreground="{StaticResource AccentBrush}" FontSize="11" FontWeight="SemiBold"/>
+          <Border x:Name="CameraModePill"
+                  Style="{StaticResource PillStyle}"
+                  Background="{StaticResource AccentSoftBrush}">
+            <TextBlock x:Name="CameraModePillText"
+                       Text="GUIDE ONLY"
+                       Foreground="{StaticResource AccentBrush}"
+                       FontSize="11"
+                       FontWeight="SemiBold"/>
           </Border>
           <Border x:Name="ScreenSharePill"
                   Style="{StaticResource PillStyle}"
@@ -120,7 +126,8 @@
               </Grid.ColumnDefinitions>
               <StackPanel>
                 <TextBlock Text="Teams camera recovery" FontSize="20" FontWeight="SemiBold"/>
-                <TextBlock Text="You make every click. MSGuide verifies each next step."
+                <TextBlock x:Name="CameraModeSubtitle"
+                           Text="You make every click. MSGuide verifies each next step."
                            Style="{StaticResource CaptionStyle}" Margin="0,3,12,0"/>
               </StackPanel>
               <Border Grid.Column="1" Style="{StaticResource PillStyle}" Background="{StaticResource AccentSoftBrush}">
@@ -140,9 +147,38 @@
                 <TextBlock Text="Local visual check" FontSize="11" Foreground="{StaticResource MutedTextBrush}"/>
               </Border>
               <Border Style="{StaticResource PillStyle}">
-                <TextBlock Text="No automatic clicks" FontSize="11" Foreground="{StaticResource MutedTextBrush}"/>
+                <TextBlock x:Name="CameraActionPolicyText"
+                           Text="No automatic clicks"
+                           FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}"/>
               </Border>
             </WrapPanel>
+
+            <Grid Margin="0,4,0,10">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock Text="Mode" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0"/>
+              <StackPanel Grid.Column="1">
+                <WrapPanel>
+                  <RadioButton x:Name="CameraGuideMode"
+                               Content="Guide me"
+                               GroupName="CameraInteraction"
+                               IsChecked="True"
+                               Checked="CameraMode_Changed"/>
+                  <RadioButton x:Name="CameraControlMode"
+                               Content="Fix it for me"
+                               GroupName="CameraInteraction"
+                               Checked="CameraMode_Changed"/>
+                </WrapPanel>
+                <TextBlock x:Name="CameraModeHint"
+                           Text="You make each change; MSGuide verifies the result."
+                           Style="{StaticResource CaptionStyle}"
+                           Margin="0,2,0,0"
+                           AutomationProperties.LiveSetting="Polite"/>
+              </StackPanel>
+            </Grid>
 
             <Grid Margin="0,2,0,10">
               <Grid.ColumnDefinitions>
@@ -256,6 +292,13 @@
                       IsEnabled="False"
                       Visibility="Collapsed"
                       AutomationProperties.Name="Check Camera Settings after my change"/>
+              <Button x:Name="CameraControlTargetButton"
+                      Content="Approve camera fix"
+                      Click="CameraControlTarget_Click"
+                      Style="{StaticResource PrimaryButtonStyle}"
+                      IsEnabled="False"
+                      Visibility="Collapsed"
+                      AutomationProperties.Name="Approve one exact verified camera action"/>
               <Button x:Name="CameraReturnButton"
                       Content="Return to Teams"
                       Click="CameraReturn_Click"
@@ -263,6 +306,13 @@
                       IsEnabled="False"
                       Visibility="Collapsed"
                       AutomationProperties.Name="Return focus to the selected Teams window"/>
+              <Button x:Name="CameraRestartTeamsButton"
+                      Content="Approve Teams restart"
+                      Click="CameraRestartTeams_Click"
+                      Style="{StaticResource QuietButtonStyle}"
+                      IsEnabled="False"
+                      Visibility="Collapsed"
+                      AutomationProperties.Name="Approve closing and relaunching Microsoft Teams"/>
             </WrapPanel>
 
             <WrapPanel x:Name="CameraSessionActions" Margin="0,2,0,0" Visibility="Collapsed">
@@ -273,7 +323,7 @@
                       IsEnabled="False"
                       AutomationProperties.Name="Stop camera recovery"/>
               <Button x:Name="CameraTakeOverButton"
-                      Content="Take over manually"
+                      Content="Stop and take over"
                       Click="CameraTakeOver_Click"
                       Style="{StaticResource QuietButtonStyle}"
                       IsEnabled="False"

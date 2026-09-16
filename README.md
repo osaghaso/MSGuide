@@ -32,7 +32,8 @@ No virtual-environment activation is required. The launcher expects the environm
   snapshot-guidance workflow. The Teams camera journey keeps its deterministic
   local state and verification.
 - `-CameraFixture`: run the camera recovery card against its clearly labelled
-  deterministic fixture. This does not claim real Teams camera recovery.
+  deterministic Teams-camera-off fixture. Choose **Guide me** or
+  **Fix it for me**; fixture completion never claims real camera recovery.
 - `-Shareable`: explicitly allow MSGuide and its guidance overlay to appear in
   full-screen sharing. They are excluded from capture by default. Share the
   **Screen**, not an individual Teams window.
