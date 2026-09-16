@@ -38,3 +38,91 @@ After **Capture / review → consent → Send**, the remote provider receives th
 Screenshot pixels are sent **only if separately opted in for that snapshot**. [src/images.py](../src/images.py) validates size/type/dimensions with Pillow and re-encodes pixel-only PNGs, dropping metadata. It does not redact pixels or perform OCR. Inspect both image and text; discard any sensitive content. Already sent content cannot be recalled, and provider retention is outside this application's control.
 
 To return to local-only guidance, stop the desktop/launcher, set `MSGUIDE_GUIDANCE_PROVIDER=demo` (or remove it), remove the remote-approval and model credential variables from the current process, and restart. Verify the **DEMO** label. See [validation](VALIDATION.md) for the distinction between mocked provider tests and unverified live behavior.
+
+## GitHub Copilot SDK provider (integration seam)
+
+`src/copilot_provider.py` provides an optional `CopilotProvider` with the same
+`async provider(prompt, Observation) -> GuidanceResult` callable seam. It is
+not selected by the launcher yet, so deterministic demo guidance remains
+unchanged. `OpenAICompatibleProvider` remains available.
+
+Clean-machine setup requires Python 3.11+, a GitHub Copilot entitlement (unless
+the SDK is configured separately for BYOK), and:
+
+```powershell
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m copilot download-runtime
+```
+
+The pinned `github-copilot-sdk==1.0.13` wheel requires `pydantic>=2`,
+`httpx>=0.24`, and `python-dateutil>=2.9.0.post0`; the existing pinned Pydantic
+and HTTPX versions satisfy those bounds. Runtime download is also performed
+automatically on first managed use, but pre-provisioning avoids first-step
+latency.
+
+To reuse an already installed and authenticated Copilot CLI without touching
+the SDK runtime download cache, pass its absolute executable path:
+
+```python
+from pathlib import Path
+
+config = CopilotProviderConfig(
+    model="gpt-5",
+    base_directory=Path(r"C:\ProgramData\MSGuide\copilot"),
+    cli_path=Path(r"C:\path\to\copilot.exe"),
+)
+```
+
+Alternatively, set `COPILOT_CLI_PATH` in the launching process. An explicit
+`cli_path` takes precedence. The path must be absolute and identify an existing
+file; resolve it on PowerShell with `(Get-Command copilot).Source`. The provider
+passes it through `RuntimeConnection.for_stdio(path=...)`, which bypasses the
+bundled runtime download/install path and avoids concurrent cache extraction.
+Do not point it at `agency copilot`; Agency integration is the separately
+bounded MCP server described below.
+
+An integrator must:
+
+1. Build a `CopilotProviderConfig` with an explicit model and an absolute,
+   application-owned SDK base directory.
+2. Supply a context resolver that reads only deterministic scenario state and
+   returns `ApprovedGuidanceContext`: the current observation ID, server-owned
+   step ID, approved UIA element indexes/target IDs, and pre-approved citation
+   IDs. Do not derive scenario state or completion from model output.
+3. Create one provider at application startup and `await provider.start()`.
+4. Inject that provider through the existing callable seam.
+5. `await provider.close()` during application shutdown.
+6. Catch `CopilotProviderFailure` and invoke the caller-owned deterministic
+   fallback explicitly. The provider never falls back silently.
+
+Each call creates one bounded, isolated SDK session while reusing the persistent
+`CopilotClient` runtime process. Empty mode, an explicit tool allowlist,
+disabled session store/memory/infinite sessions, and a deny-by-default
+permission handler prevent shell, filesystem, edit, and built-in tool access.
+Only the locally handled terminal `submit_guidance` tool can produce guidance.
+It accepts exactly `observationId`, `stepId`, allowlisted `targetId`,
+`instruction`, and allowlisted `citationIds`; output cannot set coordinates,
+URLs, scenario state, or completion. Partial model prose is never returned.
+
+Screenshot bytes are attached only when the already-approved
+`Observation.imageBase64` field is present. They are revalidated and sent as an
+in-memory PNG blob; this provider never creates a screenshot file.
+
+### Optional Agency Microsoft Learn MCP
+
+Set `AgencyMicrosoftLearnConfig(enabled=True)` only on machines where `agency`
+is installed and its Microsoft integration is approved. The SDK session starts
+the local stdio server as:
+
+```text
+agency mcp msft-learn
+```
+
+The provider defaults to the exact read-only
+`microsoft_docs_search` tool. The additionally recognized read-only tools are
+`microsoft_code_sample_search` and `microsoft_docs_fetch`; opt into a subset
+explicitly. These names and their read-only annotations were verified through
+MCP `tools/list` on Agency 2026.9.15.5. MCP is disabled by default, startup is
+bounded, and failures surface as `CopilotProviderFailure`. For the demo,
+pre-bundle approved Microsoft Learn citations in `ApprovedGuidanceContext`
+instead of depending on MCP startup, authentication, or network availability.
