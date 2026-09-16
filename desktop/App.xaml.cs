@@ -9,6 +9,7 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ApplyAccessibilityTheme();
         bool integration = e.Args.Contains("--integration-test"), self = e.Args.Contains("--self-test");
         bool capture = e.Args.Contains("--capture-test");
         bool control = e.Args.Contains("--control-test");
@@ -75,5 +76,30 @@ public partial class App : Application
         }
         MainWindow = new MainWindow();
         MainWindow.Show();
+    }
+
+    private void ApplyAccessibilityTheme()
+    {
+        if (!SystemParameters.HighContrast) return;
+        Resources["CanvasBrush"] = SystemColors.WindowBrush;
+        Resources["SurfaceBrush"] = SystemColors.ControlBrush;
+        Resources["SurfaceRaisedBrush"] = SystemColors.ControlBrush;
+        Resources["SurfaceHoverBrush"] = SystemColors.HighlightBrush;
+        Resources["InputBrush"] = SystemColors.WindowBrush;
+        Resources["BorderBrush"] = SystemColors.ActiveBorderBrush;
+        Resources["BorderStrongBrush"] = SystemColors.HighlightBrush;
+        Resources["TextBrush"] = SystemColors.WindowTextBrush;
+        Resources["MutedTextBrush"] = SystemColors.WindowTextBrush;
+        Resources["AccentBrush"] = SystemColors.HighlightBrush;
+        Resources["AccentStrongBrush"] = SystemColors.HighlightBrush;
+        Resources["AccentHoverBrush"] = SystemColors.HighlightBrush;
+        Resources["AccentSoftBrush"] = SystemColors.ControlBrush;
+        Resources["AccentTextBrush"] = SystemColors.HighlightTextBrush;
+        Resources["SuccessBrush"] = SystemColors.WindowTextBrush;
+        Resources["SuccessSoftBrush"] = SystemColors.WindowBrush;
+        Resources["WarningBrush"] = SystemColors.WindowTextBrush;
+        Resources["WarningSoftBrush"] = SystemColors.WindowBrush;
+        Resources["DangerBrush"] = SystemColors.WindowTextBrush;
+        Resources["DangerSoftBrush"] = SystemColors.WindowBrush;
     }
 }

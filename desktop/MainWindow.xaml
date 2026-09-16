@@ -4,8 +4,11 @@
         Title="MSGuide · Desktop companion"
         Width="680" Height="820" MinWidth="460" MinHeight="440"
         WindowStartupLocation="CenterScreen"
+        Background="{StaticResource CanvasBrush}"
+        Opacity="1"
+        AllowsTransparency="False"
         KeyboardNavigation.TabNavigation="Continue">
-  <Grid Margin="24,20,24,16">
+  <Grid Background="{StaticResource CanvasBrush}" Margin="24,20,24,16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -191,7 +194,13 @@
               <TextBlock Text="Teams window" FontWeight="SemiBold" Margin="0,0,0,6"/>
               <ComboBox x:Name="CameraWindowPicker"
                         AutomationProperties.Name="Exact Teams window for camera recovery"
+                        IsTextSearchEnabled="False"
                         SelectionChanged="CameraWindow_Changed"/>
+              <TextBlock x:Name="CameraWindowHint"
+                         Text="Open Teams, then choose its Settings > Devices window."
+                         Style="{StaticResource CaptionStyle}"
+                         Margin="0,6,0,0"
+                         AutomationProperties.LiveSetting="Polite"/>
             </StackPanel>
 
             <WrapPanel x:Name="CameraPrimaryActions" Margin="0,10,0,0">
@@ -267,25 +276,13 @@
           </StackPanel>
         </Border>
 
-        <Expander Margin="0,12,0,0"
+        <Expander Header="Advanced"
+                  Margin="0,12,0,0"
                   IsExpanded="False"
                   AutomationProperties.Name="Advanced and developer workflows">
-          <Expander.Header>
-            <Grid Margin="0,5">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-              </Grid.ColumnDefinitions>
-              <StackPanel>
-                <TextBlock Text="Advanced" FontWeight="SemiBold"/>
-                <TextBlock Text="Build Center, Notepad, diagnostics, raw capture, and technical details"
-                           Style="{StaticResource CaptionStyle}"/>
-              </StackPanel>
-              <TextBlock Grid.Column="1" Text="Developer tools" Style="{StaticResource CaptionStyle}"
-                         VerticalAlignment="Center" Margin="16,0,0,0"/>
-            </Grid>
-          </Expander.Header>
           <StackPanel Margin="0,10,0,0">
+            <TextBlock Text="Build Center, Notepad, diagnostics, raw capture, and technical details"
+                       Style="{StaticResource CaptionStyle}" Margin="0,0,0,8"/>
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
               <StackPanel>
                 <TextBlock Text="Demo and service" Style="{StaticResource SectionTitleStyle}"/>

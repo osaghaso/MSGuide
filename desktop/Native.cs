@@ -87,6 +87,8 @@ public sealed record WindowChoice(nint Handle, uint ProcessId, string Title, str
         : this(handle, processId, title, Native.WindowClass(handle)) { }
 
     public string Id => $"{ProcessId}:{Handle.ToInt64():X}";
+    public bool IsMicrosoftTeamsWindow =>
+        Title.Contains("Microsoft Teams", StringComparison.OrdinalIgnoreCase);
     public override string ToString() => Title;
     internal bool SameIdentity(uint processId, string className) =>
         processId == ProcessId && ClassName.Length > 0

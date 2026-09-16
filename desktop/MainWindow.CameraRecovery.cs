@@ -41,10 +41,19 @@ public partial class MainWindow
     private void RefreshCameraWindows(IReadOnlyList<WindowChoice> windows)
     {
         var selected = CameraWindowPicker.SelectedItem as WindowChoice;
+        var teamsWindows = windows.Where(window => window.IsMicrosoftTeamsWindow).ToArray();
         refreshingCameraWindows = true;
-        CameraWindowPicker.ItemsSource = windows;
-        CameraWindowPicker.SelectedItem = windows.FirstOrDefault(window => window.Id == selected?.Id);
+        CameraWindowPicker.ItemsSource = teamsWindows;
+        CameraWindowPicker.SelectedItem =
+            teamsWindows.FirstOrDefault(window => window.Id == selected?.Id)
+            ?? (teamsWindows.Length == 1 ? teamsWindows[0] : null);
         refreshingCameraWindows = false;
+        CameraWindowHint.Text = teamsWindows.Length switch
+        {
+            0 => "No Teams window found. Open Teams, then refresh.",
+            1 => "1 Teams window found and selected.",
+            _ => $"{teamsWindows.Length} Teams windows found. Choose the one showing Settings > Devices."
+        };
     }
 
     private void StartCameraRecovery(bool fromPrompt)
@@ -124,8 +133,13 @@ public partial class MainWindow
         CameraStartButton.Content = cameraRecovery.State == CameraRecoveryState.Idle
             ? "Start camera recovery" : "Start over";
         CameraStartButton.IsEnabled = !cameraRecoveryBusy;
+        CameraChooseWindowButton.Content = CameraWindowPicker.HasItems
+            ? "Choose Teams window" : "Refresh Teams windows";
+        AutomationProperties.SetName(CameraChooseWindowButton, CameraWindowPicker.HasItems
+            ? "Choose the exact Microsoft Teams window"
+            : "Refresh the list of visible Microsoft Teams windows");
         CameraChooseWindowButton.IsEnabled = !cameraRecoveryBusy;
-        CameraWindowPicker.IsEnabled = !cameraRecoveryBusy;
+        CameraWindowPicker.IsEnabled = !cameraRecoveryBusy && CameraWindowPicker.HasItems;
         bool selectedWindowValid = CameraWindowPicker.SelectedItem is WindowChoice selectedWindow
             && selectedWindow.Matches();
         CameraInspectButton.IsEnabled = !cameraRecoveryBusy
@@ -309,6 +323,13 @@ public partial class MainWindow
     private void CameraChooseWindow_Click(object sender, RoutedEventArgs e)
     {
         RefreshWindows();
+        if (!CameraWindowPicker.HasItems)
+        {
+            cameraRecoveryNotice = "No Microsoft Teams window is visible yet. Open Teams, then refresh.";
+            StatusText.Text = "Waiting for a visible Microsoft Teams window.";
+            UpdateCameraRecoveryUi(CameraChooseWindowButton);
+            return;
+        }
         CameraWindowPicker.Focus();
         CameraWindowPicker.IsDropDownOpen = true;
     }

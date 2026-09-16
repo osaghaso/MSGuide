@@ -218,8 +218,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay) : ICamera
     }
 
     private static bool IsTeams(WindowChoice window) =>
-        window.Matches()
-        && window.Title.Contains("Microsoft Teams", StringComparison.OrdinalIgnoreCase);
+        window.Matches() && window.IsMicrosoftTeamsWindow;
 
     private static ControlRead ReadControls(WindowChoice window, CancellationToken cancellationToken)
     {
