@@ -125,12 +125,13 @@ public partial class MainWindow
         CameraRecoveryState.NeedsTeamsObservation => "STEP 1 · needs Teams observation",
         CameraRecoveryState.Diagnosis => "STEP 2 · diagnosis available",
         CameraRecoveryState.NeedsCameraSettings => "STEP 3 · ready to open Camera Settings",
-        CameraRecoveryState.NeedsSettingsObservation => "STEP 4 · needs private Settings observation · UIA unproven",
+        CameraRecoveryState.NeedsSettingsObservation => "STEP 4 · verify Camera privacy page and observe Settings",
         CameraRecoveryState.VerifiedTarget => "STEP 5 · verified target available",
         CameraRecoveryState.PermissionObservedOn => "STEP 6 · permission observed on · not yet camera-ready",
         CameraRecoveryState.NeedsLocalVerification => "STEP 7 · needs local Teams verification",
         CameraRecoveryState.Ready => "VERIFIED · local camera readiness check passed",
         CameraRecoveryState.FixtureComplete => "FIXTURE COMPLETE · simulated verifier passed · not camera-ready",
+        CameraRecoveryState.WrongSettingsPage => "STOPPED · Windows Settings did not verify as the Camera page",
         CameraRecoveryState.ManagedOrDisabled => "STOPPED · camera access is managed or disabled",
         CameraRecoveryState.AlreadyOnOrWrongCause => "STOPPED · permission is already on or not the cause",
         CameraRecoveryState.StaleOrMoved => "STOPPED · observed screen is stale, moved, or closed",
@@ -143,7 +144,7 @@ public partial class MainWindow
     private async Task ObserveCameraSettings()
     {
         var (token, generation) = BeginCameraOperation();
-        cameraRecoveryNotice = "Running the connected private Camera Settings observation…";
+        cameraRecoveryNotice = "Verifying the Camera privacy page and observing its controls locally…";
         UpdateCameraRecoveryUi();
         try
         {
@@ -260,7 +261,7 @@ public partial class MainWindow
             });
             if (launched is null) throw new InvalidOperationException();
             cameraRecovery.MarkSettingsOpened();
-            StatusText.Text = "Windows Camera privacy settings opened by your click · MSGuide changed nothing.";
+            StatusText.Text = "Windows Settings launch requested by your click · Camera page not yet verified · MSGuide changed nothing.";
             UpdateCameraRecoveryUi(CameraPrivateCheckButton);
         }
         catch

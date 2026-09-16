@@ -37,7 +37,7 @@
               <Button x:Name="CameraInspectButton" Content="Inspect controls only" Click="CameraInspect_Click" IsEnabled="False" AutomationProperties.Name="Inspect current controls without a screenshot"/>
               <Button x:Name="CameraPrivateCheckButton" Content="Private visual check" Click="CameraPrivateCheck_Click" IsEnabled="False" AutomationProperties.Name="Run a private Settings or Teams visual check"/>
             </WrapPanel>
-            <TextBlock Text="Teams inspection must stay rooted to the selected window while allowing cross-process WebView descendants. Camera Settings UIA is unproven on this Windows build, so Settings requires a separately disclosed private visual provider, fixture, or an honest unsupported result. This path never falls back to the raw full-screenshot workflow." FontSize="12" Foreground="#E8C98B"/>
+            <TextBlock Text="Teams and Settings UIA must stay rooted to the verified window while allowing cross-process provider descendants. The Camera URI may land on Settings Home, so the page is verified before any toggle is trusted. Any image-backed fallback must be measured, disclosed, fail closed, and memory-only because previews may contain personal pixels." FontSize="12" Foreground="#E8C98B"/>
 
             <WrapPanel Margin="0,8,0,0">
               <Button x:Name="CameraOpenSettingsButton" Content="Open Camera settings" Click="CameraOpenSettings_Click" IsEnabled="False" AutomationProperties.Name="Open Windows camera privacy settings"/>

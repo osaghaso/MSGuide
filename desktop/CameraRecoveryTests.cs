@@ -32,13 +32,17 @@ internal static class CameraRecoveryTests
         session.MarkSettingsOpened();
         Check(session.State == CameraRecoveryState.NeedsSettingsObservation && session.CanInspectSettings, "settings opened");
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOff, "",
-            new CameraRecoveryTarget("settings-observation-1", "Let desktop apps access your camera"),
-            CameraSettingsObservationSource.PrivateVisual, ProbeValidated: true));
+            new CameraRecoveryTarget("settings-observation-1", "Microsoft Teams Currently in use",
+                "MSTeams_8wekyb3d8bbwe_ToggleSwitch"),
+            CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
         Check(session.State == CameraRecoveryState.VerifiedTarget && session.CanShowTarget
-            && session.CanCheckChangedSetting, "verified target");
+            && session.CanCheckChangedSetting
+            && session.Target?.AutomationId == "MSTeams_8wekyb3d8bbwe_ToggleSwitch", "verified target");
         session.RecordTargetPresentation(new(true, ""));
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
-            Source: CameraSettingsObservationSource.PrivateVisual, ProbeValidated: true));
+            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
         Check(session.State == CameraRecoveryState.PermissionObservedOn && !session.LocalVerifierPassed
             && session.CanReturnToTeams, "permission alone not ready");
         session.MarkReturnedToTeams();
@@ -77,7 +81,8 @@ internal static class CameraRecoveryTests
 
         var settingsManaged = SettingsSession();
         settingsManaged.ApplySettingsObservation(new(CameraSettingsFinding.ManagedOrDisabled, "",
-            Source: CameraSettingsObservationSource.PrivateVisual, ProbeValidated: true));
+            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
         Check(settingsManaged.State == CameraRecoveryState.ManagedOrDisabled, "settings managed");
 
         var settingsStale = SettingsSession();
@@ -86,10 +91,18 @@ internal static class CameraRecoveryTests
 
         var unprovenSettings = SettingsSession();
         unprovenSettings.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
-            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: false));
+            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: false,
+            Page: CameraSettingsPage.CameraPrivacy));
         Check(unprovenSettings.State == CameraRecoveryState.Unsupported
             && unprovenSettings.Detail.Contains("successfully probed method", StringComparison.Ordinal),
             "unproven Settings UIA rejected");
+
+        var wrongSettingsPage = SettingsSession();
+        wrongSettingsPage.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
+            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.Other));
+        Check(wrongSettingsPage.State == CameraRecoveryState.WrongSettingsPage
+            && !wrongSettingsPage.LocalVerifierPassed, "Settings URI landing verified");
 
         var cancelled = StartedSession();
         cancelled.Cancel();
@@ -136,7 +149,8 @@ internal static class CameraRecoveryTests
     {
         var session = SettingsSession();
         session.ApplySettingsObservation(new(CameraSettingsFinding.PermissionOn, "",
-            Source: CameraSettingsObservationSource.PrivateVisual, ProbeValidated: true));
+            Source: CameraSettingsObservationSource.ControlsOnly, ProbeValidated: true,
+            Page: CameraSettingsPage.CameraPrivacy));
         session.MarkReturnedToTeams();
         return session;
     }

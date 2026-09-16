@@ -12,6 +12,7 @@ internal enum CameraRecoveryState
     NeedsLocalVerification,
     Ready,
     FixtureComplete,
+    WrongSettingsPage,
     ManagedOrDisabled,
     AlreadyOnOrWrongCause,
     StaleOrMoved,
@@ -61,12 +62,19 @@ internal enum CameraSettingsObservationSource
     Fixture
 }
 
+internal enum CameraSettingsPage
+{
+    Unknown,
+    CameraPrivacy,
+    Other
+}
+
 internal sealed record TeamsCameraObservation(string WindowId, TeamsCameraFinding Finding, string Detail);
-internal sealed record CameraRecoveryTarget(string ObservationId, string Label);
+internal sealed record CameraRecoveryTarget(string ObservationId, string Label, string? AutomationId = null);
 internal sealed record CameraSettingsObservation(
     CameraSettingsFinding Finding, string Detail, CameraRecoveryTarget? Target = null,
     CameraSettingsObservationSource Source = CameraSettingsObservationSource.Unknown,
-    bool ProbeValidated = false);
+    bool ProbeValidated = false, CameraSettingsPage Page = CameraSettingsPage.Unknown);
 internal sealed record CameraVerificationResult(
     string WindowId, CameraVerificationFinding Finding, bool LocalVerifierPassed, string Detail, bool IsFixture = false);
 internal sealed record CameraTargetPresentation(bool Shown, string Detail);
@@ -137,10 +145,14 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing
         settingsObservations++;
         return Task.FromResult(settingsObservations == 1
             ? new CameraSettingsObservation(CameraSettingsFinding.PermissionOff,
-                "Fixture: permission off.", new CameraRecoveryTarget("fixture-settings-1", "Fixture camera permission"),
-                CameraSettingsObservationSource.Fixture, ProbeValidated: true)
+                "Fixture: packaged Teams permission off.",
+                new CameraRecoveryTarget("fixture-settings-1", "Microsoft Teams Currently in use",
+                    "MSTeams_8wekyb3d8bbwe_ToggleSwitch"),
+                CameraSettingsObservationSource.Fixture, ProbeValidated: true,
+                Page: CameraSettingsPage.CameraPrivacy)
             : new CameraSettingsObservation(CameraSettingsFinding.PermissionOn, "Fixture: permission on.",
-                Source: CameraSettingsObservationSource.Fixture, ProbeValidated: true));
+                Source: CameraSettingsObservationSource.Fixture, ProbeValidated: true,
+                Page: CameraSettingsPage.CameraPrivacy));
     }
 
     public Task<CameraVerificationResult> VerifyTeamsAsync(
@@ -178,7 +190,7 @@ internal sealed class CameraRecoverySession
     public bool CanVerifyTeams => State == CameraRecoveryState.NeedsLocalVerification
         && !string.IsNullOrWhiteSpace(TeamsWindowId);
     public bool IsTerminal => State is CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete
-        or CameraRecoveryState.ManagedOrDisabled
+        or CameraRecoveryState.WrongSettingsPage or CameraRecoveryState.ManagedOrDisabled
         or CameraRecoveryState.AlreadyOnOrWrongCause or CameraRecoveryState.StaleOrMoved
         or CameraRecoveryState.UnresolvedAfterPermission or CameraRecoveryState.Unsupported
         or CameraRecoveryState.Cancelled;
@@ -263,7 +275,7 @@ internal sealed class CameraRecoverySession
     {
         Require(State == CameraRecoveryState.NeedsCameraSettings, "Camera Settings was not expected now.");
         MoveTo(CameraRecoveryState.NeedsSettingsObservation,
-            "Camera Settings opened. Leave it visible, then use Private visual check. Pure UIA targeting remains unproven.");
+            "Windows Settings launch requested. Leave it visible and verify the Camera privacy page before trusting any toggle.");
     }
 
     public void ApplySettingsObservation(CameraSettingsObservation observation)
@@ -271,6 +283,14 @@ internal sealed class CameraRecoverySession
         Require(State is CameraRecoveryState.NeedsSettingsObservation or CameraRecoveryState.VerifiedTarget,
             "A Camera Settings observation is not expected now.");
         Target = null;
+        if (observation.Finding is CameraSettingsFinding.PermissionOff or CameraSettingsFinding.PermissionOn
+                or CameraSettingsFinding.ManagedOrDisabled
+            && observation.Page != CameraSettingsPage.CameraPrivacy)
+        {
+            MoveTo(CameraRecoveryState.WrongSettingsPage,
+                "Windows Settings did not verify as the Camera privacy page. No permission claim or target was accepted.");
+            return;
+        }
         if (observation.Finding is CameraSettingsFinding.PermissionOff or CameraSettingsFinding.PermissionOn
                 or CameraSettingsFinding.ManagedOrDisabled
             && (!observation.ProbeValidated || observation.Source == CameraSettingsObservationSource.Unknown))
