@@ -24,7 +24,9 @@
         </Grid.ColumnDefinitions>
         <StackPanel>
           <TextBlock Text="MSGuide" FontSize="24" FontWeight="SemiBold"/>
-          <TextBlock Text="Get your Teams camera working—one safe step at a time."
+          <TextBlock x:Name="ProductSubtitle"
+                     Text="Your guide to getting things done at Microsoft."
+                     TextWrapping="Wrap"
                      Style="{StaticResource CaptionStyle}" Margin="0,2,0,0"/>
         </StackPanel>
         <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Top">
@@ -32,7 +34,7 @@
                   Style="{StaticResource PillStyle}"
                   Background="{StaticResource AccentSoftBrush}">
             <TextBlock x:Name="CameraModePillText"
-                       Text="GUIDE ONLY"
+                       Text="GUIDE ME"
                        Foreground="{StaticResource AccentBrush}"
                        FontSize="11"
                        FontWeight="SemiBold"/>
@@ -52,13 +54,22 @@
         <TextBlock x:Name="StatusText"
                    Text="Connecting · no capture or recording active"
                    FontSize="12"
+                   TextWrapping="Wrap"
                    Foreground="{StaticResource MutedTextBrush}"
                    AutomationProperties.LiveSetting="Polite"
                    AutomationProperties.Name="Application status"/>
       </Border>
     </StackPanel>
 
-    <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="12" Margin="0,12,0,0">
+    <ScrollViewer x:Name="WorkspaceScroll"
+                  Grid.Row="1" Grid.RowSpan="2"
+                  VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled"
+                  Margin="0,12,0,10"
+                  Padding="0,0,8,0"
+                  AutomationProperties.Name="MSGuide workspace">
+      <StackPanel>
+    <Border Style="{StaticResource CardStyle}" Padding="12" Margin="0,0,0,14">
       <StackPanel>
         <Grid>
           <Grid.ColumnDefinitions>
@@ -67,11 +78,47 @@
           </Grid.ColumnDefinitions>
           <TextBlock Text="Ask MSGuide" FontWeight="SemiBold" VerticalAlignment="Center"/>
           <Border Grid.Column="1" Style="{StaticResource PillStyle}" Margin="0,0,0,6">
-            <TextBlock Text="MIC OFF BY DEFAULT" FontSize="10" Foreground="{StaticResource MutedTextBrush}"/>
+            <TextBlock x:Name="MicrophoneStateText" Text="MIC OFF" FontSize="10" Foreground="{StaticResource MutedTextBrush}"/>
           </Border>
         </Grid>
+        <Grid x:Name="InteractionModePanel" Margin="0,4,0,10">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="Mode" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0"/>
+          <StackPanel Grid.Column="1">
+            <WrapPanel>
+              <RadioButton x:Name="CameraGuideMode"
+                           Content="Guide me"
+                           GroupName="CameraInteraction"
+                           IsChecked="True"
+                           ToolTipService.ShowOnDisabled="True"
+                           Checked="CameraMode_Changed"/>
+              <RadioButton x:Name="CameraControlMode"
+                           Content="Fix it for me"
+                           GroupName="CameraInteraction"
+                           ToolTipService.ShowOnDisabled="True"
+                           Checked="CameraMode_Changed"/>
+              <Button x:Name="CameraSwitchModeButton"
+                      Content="Stop and switch mode"
+                      Click="CameraSwitchMode_Click"
+                      Style="{StaticResource QuietButtonStyle}"
+                      Margin="10,0,0,0"
+                      Visibility="Collapsed"
+                      AutomationProperties.Name="Stop recovery and switch interaction mode"/>
+            </WrapPanel>
+            <TextBlock x:Name="CameraModeHint"
+                       Text="You make changes; MSGuide guides you and checks results."
+                       Style="{StaticResource CaptionStyle}"
+                       TextWrapping="Wrap"
+                       Margin="0,2,0,0"
+                       AutomationProperties.LiveSetting="Polite"/>
+          </StackPanel>
+        </Grid>
+        <TextBlock Text="What do you need help with?"
+                   Style="{StaticResource CaptionStyle}" Margin="0,0,0,5"/>
         <TextBox x:Name="PromptBox"
-                 Text="My camera isn't working in Teams"
                  AcceptsReturn="True"
                  TextWrapping="Wrap"
                  MinHeight="54"
@@ -79,45 +126,108 @@
                  MaxLength="4000"
                  VerticalScrollBarVisibility="Auto"
                  AutomationProperties.Name="Shared editable question and speech transcript"
+                 AutomationProperties.HelpText="Enter asks MSGuide. Shift+Enter adds a new line."
+                 PreviewKeyDown="PromptBox_PreviewKeyDown"
                  TextChanged="Prompt_Changed"
                  IsUndoEnabled="False"/>
+        <WrapPanel Margin="0,8,0,0">
+          <Button x:Name="AskPromptButton"
+                  Content="Ask MSGuide"
+                  Click="AskPrompt_Click"
+                  Style="{StaticResource PrimaryButtonStyle}"
+                  AutomationProperties.Name="Ask MSGuide"
+                  AutomationProperties.HelpText="Submit your question. No camera or permission change is authorized by asking."/>
+          <Button x:Name="UseScreenContextButton"
+                  Content="Use screen context"
+                  Click="UseScreenContext_Click"
+                  Style="{StaticResource QuietButtonStyle}"
+                  Visibility="Collapsed"
+                  AutomationProperties.Name="Choose a window and review its context before sharing"/>
+          <TextBlock Text="Enter to ask · Shift+Enter for a new line"
+                     Style="{StaticResource CaptionStyle}"
+                     TextWrapping="Wrap"
+                     VerticalAlignment="Center"
+                     Margin="4,0,0,0"/>
+        </WrapPanel>
+        <TextBlock x:Name="PromptFeedbackText"
+                   Style="{StaticResource CaptionStyle}"
+                   TextWrapping="Wrap"
+                   Margin="0,4,0,0"
+                   Visibility="Collapsed"
+                   AutomationProperties.LiveSetting="Polite"
+                   AutomationProperties.Name="Question status"/>
         <Grid Margin="0,5,0,0">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <Button x:Name="MicButton"
-                  Content="Start microphone"
-                  Click="Mic_Click"
-                  Style="{StaticResource QuietButtonStyle}"
-                  AutomationProperties.Name="Start or stop local dictation"/>
+          <WrapPanel>
+            <Button x:Name="MicButton"
+                    Content="Start microphone"
+                    Click="Mic_Click"
+                    Style="{StaticResource QuietButtonStyle}"
+                    AutomationProperties.Name="Record a new voice question"/>
+            <Button x:Name="AddVoiceButton"
+                    Content="Add more"
+                    Click="AddVoice_Click"
+                    Style="{StaticResource QuietButtonStyle}"
+                    Visibility="Collapsed"
+                    AutomationProperties.Name="Add more dictation to the current question"/>
+          </WrapPanel>
           <TextBlock x:Name="SpeechText"
                      Grid.Column="1"
                      Text="Microphone off · never always listening"
                      Style="{StaticResource CaptionStyle}"
+                     TextWrapping="Wrap"
                      VerticalAlignment="Center"
                      AutomationProperties.LiveSetting="Polite"
                      AutomationProperties.Name="Speech status"/>
           <Button Grid.Column="2"
+                  x:Name="StopAudioButton"
                   Content="Stop audio"
                   Click="StopSpeech_Click"
                   Style="{StaticResource QuietButtonStyle}"
                   AutomationProperties.Name="Stop dictation and playback"/>
         </Grid>
+        <TextBlock x:Name="SpeechPreviewText"
+                  Style="{StaticResource CaptionStyle}"
+                  TextWrapping="Wrap"
+                  Margin="0,6,0,0"
+                  Visibility="Collapsed"
+                  AutomationProperties.Name="Provisional local transcript"
+                  AutomationProperties.LiveSetting="Polite"/>
+        <Grid x:Name="SpeechInputPanel" Margin="0,6,0,0" Visibility="Collapsed">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="Input level" Style="{StaticResource CaptionStyle}" Margin="0,0,10,0"/>
+          <ProgressBar x:Name="SpeechInputLevel"
+                      Grid.Column="1"
+                      Maximum="100"
+                      Height="6"
+                      VerticalAlignment="Center"
+                      AutomationProperties.Name="Microphone input level"/>
+        </Grid>
+        <WrapPanel Margin="0,4,0,0">
+          <Button Content="Voice settings"
+                  Click="VoiceSettings_Click"
+                  Style="{StaticResource QuietButtonStyle}"
+                  AutomationProperties.Name="Open voice settings and microphone selection"/>
+          <TextBlock Text="Voice stays on this device · review before asking"
+                    Style="{StaticResource CaptionStyle}"
+                    TextWrapping="Wrap"
+                    VerticalAlignment="Center"/>
+        </WrapPanel>
       </StackPanel>
     </Border>
 
-    <ScrollViewer Grid.Row="2"
-                  VerticalScrollBarVisibility="Auto"
-                  HorizontalScrollBarVisibility="Disabled"
-                  Margin="0,14,0,10"
-                  Padding="0,0,8,0">
-      <StackPanel>
         <Border x:Name="CameraRecoveryCard"
                 Style="{StaticResource CardStyle}"
                 BorderBrush="#3D7392"
-                AutomationProperties.Name="Teams camera recovery guide">
+                Visibility="Collapsed"
+                AutomationProperties.Name="Current task: Teams camera">
           <StackPanel>
             <Grid>
               <Grid.ColumnDefinitions>
@@ -125,7 +235,7 @@
                 <ColumnDefinition Width="Auto"/>
               </Grid.ColumnDefinitions>
               <StackPanel>
-                <TextBlock Text="Teams camera recovery" FontSize="20" FontWeight="SemiBold"/>
+                <TextBlock Text="Teams camera" FontSize="20" FontWeight="SemiBold"/>
                 <TextBlock x:Name="CameraModeSubtitle"
                            Text="You make every click. MSGuide verifies each next step."
                            Style="{StaticResource CaptionStyle}" Margin="0,3,12,0"/>
@@ -154,33 +264,7 @@
               </Border>
             </WrapPanel>
 
-            <Grid Margin="0,4,0,10">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-              </Grid.ColumnDefinitions>
-              <TextBlock Text="Mode" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0"/>
-              <StackPanel Grid.Column="1">
-                <WrapPanel>
-                  <RadioButton x:Name="CameraGuideMode"
-                               Content="Guide me"
-                               GroupName="CameraInteraction"
-                               IsChecked="True"
-                               Checked="CameraMode_Changed"/>
-                  <RadioButton x:Name="CameraControlMode"
-                               Content="Fix it for me"
-                               GroupName="CameraInteraction"
-                               Checked="CameraMode_Changed"/>
-                </WrapPanel>
-                <TextBlock x:Name="CameraModeHint"
-                           Text="You make each change; MSGuide verifies the result."
-                           Style="{StaticResource CaptionStyle}"
-                           Margin="0,2,0,0"
-                           AutomationProperties.LiveSetting="Polite"/>
-              </StackPanel>
-            </Grid>
-
-            <Grid Margin="0,2,0,10">
+            <Grid x:Name="CameraProgressPanel" Margin="0,2,0,10">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -198,6 +282,11 @@
                          VerticalAlignment="Center"/>
             </Grid>
 
+            <TextBlock x:Name="CameraIdleHint"
+                       Text="Choose a mode, then ask your question above or start camera recovery below."
+                       Style="{StaticResource CaptionStyle}"
+                       TextWrapping="Wrap"
+                       Margin="0,4,0,0"/>
             <Border x:Name="CameraStatePanel"
                     Background="{StaticResource SurfaceRaisedBrush}"
                     BorderBrush="{StaticResource BorderBrush}"
@@ -225,6 +314,7 @@
                   <TextBlock x:Name="CameraStepText"
                              Text="Start when you want guide-only help with a Teams camera."
                              Style="{StaticResource CaptionStyle}"
+                             TextWrapping="Wrap"
                              Margin="0,3,0,0"
                              AutomationProperties.LiveSetting="Polite"
                              AutomationProperties.Name="Camera recovery next step"/>
@@ -332,21 +422,73 @@
           </StackPanel>
         </Border>
 
-        <Expander Header="Advanced"
+        <Expander x:Name="SettingsExpander" Header="Settings"
                   Margin="0,12,0,0"
                   IsExpanded="False"
-                  AutomationProperties.Name="Advanced and developer workflows">
+                  AutomationProperties.Name="Settings">
           <StackPanel Margin="0,10,0,0">
-            <TextBlock Text="Build Center, Notepad, diagnostics, raw capture, and technical details"
-                       Style="{StaticResource CaptionStyle}" Margin="0,0,0,8"/>
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
               <StackPanel>
-                <TextBlock Text="Demo and service" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock Text="Voice" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock Text="Local Whisper · English · stop recording to transcribe"
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,4,0,8"/>
+                <TextBlock Text="Microphone" FontWeight="SemiBold" Margin="0,0,0,5"/>
+                <ComboBox x:Name="MicrophonePicker"
+                          SelectionChanged="MicrophonePicker_SelectionChanged"
+                          AutomationProperties.Name="Microphone for local dictation"/>
+                <WrapPanel Margin="0,6,0,0">
+                  <Button x:Name="RefreshMicrophonesButton"
+                          Content="Refresh inputs"
+                          Click="RefreshMicrophones_Click"
+                          Style="{StaticResource QuietButtonStyle}"
+                          AutomationProperties.Name="Refresh microphone inputs"/>
+                  <Button Content="Sound input settings"
+                          Click="MicrophoneSettings_Click"
+                          Style="{StaticResource QuietButtonStyle}"
+                          AutomationProperties.Name="Open Windows Sound settings to choose the microphone"/>
+                  <Button Content="Back to question"
+                          Click="BackToQuestion_Click"
+                          Style="{StaticResource QuietButtonStyle}"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
+              <StackPanel>
+                <TextBlock Text="Connection" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock x:Name="ConnectionStatusText" Text="Checking the local connection..."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,4,0,8"
+                           AutomationProperties.Name="Connection status" AutomationProperties.LiveSetting="Polite"/>
+                <Button x:Name="CheckServiceButton" Content="Check connection" Click="Health_Click"
+                        HorizontalAlignment="Left" AutomationProperties.Name="Check the local service connection"/>
+              </StackPanel>
+            </Border>
+            <Border Style="{StaticResource CardStyle}">
+              <StackPanel>
+                <TextBlock Text="Privacy and control" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock Text="Voice transcription and camera checks run locally. Some camera preview checks inspect the selected window locally; they do not upload it. Sharing screen context for additional guidance requires a separate review and approval."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,5,0,8"/>
+                <TextBlock Text="MSGuide asks before changing a camera or permission setting. A broader permission change or Teams restart requires its own approval. A permission being on is not proof that the camera is working."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap"/>
+                <WrapPanel Margin="0,8,0,0">
+                  <Button Content="Pause and clear" Click="Pause_Click"/>
+                  <Button Content="Exit MSGuide" Click="Exit_Click" Style="{StaticResource DangerButtonStyle}"/>
+                </WrapPanel>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+        </Expander>
+
+        <Expander x:Name="DeveloperToolsExpander" Header="Developer tools"
+                  Margin="0,12,0,0" Visibility="Collapsed"
+                  AutomationProperties.Name="Developer tools">
+          <StackPanel Margin="0,10,0,0">
+            <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
+              <StackPanel>
+                <TextBlock Text="Synthetic demo" Style="{StaticResource SectionTitleStyle}"/>
                 <TextBlock Text="Use synthetic or public content only. Model mode may process approved data remotely."
                            Style="{StaticResource CaptionStyle}" Margin="0,4,0,7"/>
                 <WrapPanel>
                   <Button Content="Open demo" Click="OpenDemo_Click"/>
-                  <Button Content="Check service" Click="Health_Click"/>
                 </WrapPanel>
               </StackPanel>
             </Border>
@@ -401,12 +543,19 @@
                            AutomationProperties.LiveSetting="Polite"/>
               </StackPanel>
             </Border>
+          </StackPanel>
+        </Expander>
 
+        <Expander x:Name="ScreenContextExpander" Header="Screen context"
+                  Margin="0,12,0,0" Visibility="Collapsed"
+                  AutomationProperties.Name="Review screen context for guidance">
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
               <StackPanel>
-                <TextBlock Text="Raw snapshot diagnostics" Style="{StaticResource SectionTitleStyle}"/>
-                <TextBlock Text="A capture stays local until you review and explicitly approve it."
-                           Style="{StaticResource CaptionStyle}" Margin="0,4,0,8"/>
+                <TextBlock Text="Review screen context" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock Text="Choose one window to capture locally. Review it before approving any sharing. Screen-based guidance does not authorize control actions."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,4,0,8"/>
+                <TextBlock Text="Only public or synthetic content is supported for shared screen guidance. Do not share secrets or personal information."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,0,0,8"/>
                 <TextBlock Text="Window" FontWeight="SemiBold" Margin="0,0,0,6"/>
                 <ComboBox x:Name="WindowPicker"
                           AutomationProperties.Name="Window to capture"
@@ -415,9 +564,12 @@
                   <Button Content="Refresh windows" Click="Refresh_Click"/>
                   <Button x:Name="CaptureButton" Content="Capture and review" Click="Capture_Click"
                           Style="{StaticResource PrimaryButtonStyle}"/>
+                  <Button Content="Close screen context" Click="CloseScreenContext_Click"
+                          Style="{StaticResource QuietButtonStyle}"/>
                 </WrapPanel>
                 <Border Background="{StaticResource WarningSoftBrush}" CornerRadius="9" Padding="10" Margin="0,6,0,0">
                   <TextBlock Text="Screenshot pixels are not redacted. Review for passwords, secrets, and personal information before approval."
+                             TextWrapping="Wrap"
                              FontSize="12" Foreground="{StaticResource WarningBrush}"/>
                 </Border>
                 <Border x:Name="ReviewPanel"
@@ -467,7 +619,8 @@
                     <TextBlock x:Name="ModeText" Text="GUIDANCE · no response yet"
                                FontSize="11" Foreground="{StaticResource AccentBrush}" Margin="0,0,0,6"/>
                     <TextBlock x:Name="AnswerText"
-                               Text="Open the synthetic demo, choose MSGuide Demo, then capture and review."
+                               Text="Choose a window, capture it locally, and review what you want to share."
+                               TextWrapping="Wrap"
                                FontSize="15"
                                AutomationProperties.LiveSetting="Polite"/>
                     <StackPanel x:Name="CitationsPanel" Margin="0,8,0,0"/>
@@ -481,21 +634,6 @@
                 </Border>
               </StackPanel>
             </Border>
-
-            <Border Style="{StaticResource CardStyle}">
-              <StackPanel>
-                <TextBlock Text="Technical and privacy details" Style="{StaticResource SectionTitleStyle}"/>
-                <TextBlock Text="Teams and Camera Settings inspections use UI Automation without screenshot pixels. The final private visual check captures two selected-window frames locally, compares a bounded preview region, and disposes the evidence without saving or uploading it."
-                           Style="{StaticResource CaptionStyle}" Margin="0,5,0,8"/>
-                <TextBlock Text="The Camera page and selected window are re-verified before any target or readiness claim. Permission-on alone is never treated as camera-ready."
-                           Style="{StaticResource CaptionStyle}"/>
-                <WrapPanel Margin="0,8,0,0">
-                  <Button Content="Pause and clear" Click="Pause_Click"/>
-                  <Button Content="Exit MSGuide" Click="Exit_Click" Style="{StaticResource DangerButtonStyle}"/>
-                </WrapPanel>
-              </StackPanel>
-            </Border>
-          </StackPanel>
         </Expander>
       </StackPanel>
     </ScrollViewer>

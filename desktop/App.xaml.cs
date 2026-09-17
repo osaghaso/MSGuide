@@ -51,7 +51,33 @@ public partial class App : Application
                     await NotepadTests.RunNative(notepadHandle, checks, value => stage = value,
                         notepadGuide ? InteractionMode.Guide : InteractionMode.Control);
                 }
-                else { stage = "self-test"; SelfTests.Run(); checks.Add("desktop-safety"); NotepadTests.Run(checks); }
+                else
+                {
+                    stage = "self-test";
+                    SelfTests.Run();
+                    checks.Add("desktop-safety");
+                    NotepadTests.Run(checks);
+                    stage = "prompt-composer";
+                    PromptTests.Run();
+                    checks.Add("prompt-submit-keyboard-idle-ui");
+                    stage = "speech-lifecycle";
+                    await SpeechTests.RunAsync();
+                    checks.Add("speech-drain-uncertainty-cancellation-input-feedback");
+                    WhisperTests.Run();
+                    checks.Add("whisper-bounded-memory-capture");
+                    if (Environment.GetEnvironmentVariable("MSGUIDE_WHISPER_SYNTHETIC_TEST") == "1")
+                    {
+                        stage = "whisper-synthetic-input";
+                        await WhisperTests.RunSyntheticAsync();
+                        checks.Add("whisper-synthetic-transcription");
+                    }
+                    if (Environment.GetEnvironmentVariable("MSGUIDE_SPEECH_SYNTHETIC_TEST") == "1")
+                    {
+                        stage = "speech-synthetic-input";
+                        await SpeechTests.RunSyntheticAsync();
+                        checks.Add("speech-synthetic-memory-input");
+                    }
+                }
             }
             catch (Exception ex)
             {

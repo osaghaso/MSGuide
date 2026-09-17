@@ -109,7 +109,7 @@ public static class CaptureService
                 png = Encode(preview);
             }
             if (png.Length > 2_000_000) throw new InvalidOperationException("PNG exceeds the 2 MB limit; select a smaller window.");
-            var (elements, text, note) = ReadAutomation(window, rect, ct);
+            var (elements, text, note, _) = ReadAutomation(window, rect, ct);
             ct.ThrowIfCancellationRequested();
             if (!window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
                 throw new InvalidOperationException("Window changed during capture. Capture and review again.");
@@ -145,12 +145,15 @@ public static class CaptureService
         return bytes;
     }
 
-    internal static (ElementInfo[], string, string) ReadAutomation(WindowChoice window, Native.RECT rect, CancellationToken ct)
+    internal static AutomationReadResult ReadAutomation(
+        WindowChoice window, Native.RECT rect, CancellationToken ct, int maxDepth = 18)
     {
+        if (maxDepth is < 1 or > 64) throw new ArgumentOutOfRangeException(nameof(maxDepth));
         var elements = new List<ElementInfo>();
         var text = new List<string>();
         var clock = Stopwatch.StartNew();
         int visited = 0, chars = 0;
+        bool complete = true;
         string note = "Bounded UI Automation evidence only (not pixel OCR). Password/offscreen subtrees excluded; cross-process descendants are included only beneath the selected HWND root; image is NOT redacted.";
         try
         {
@@ -162,8 +165,12 @@ public static class CaptureService
             void Walk(AutomationElement node, int depth)
             {
                 ct.ThrowIfCancellationRequested();
-                if (++visited > 800 || depth > 18 || elements.Count >= 200
-                    || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds > 3000) return;
+                if (++visited > 800 || depth > maxDepth || elements.Count >= 200
+                    || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds > 3000)
+                {
+                    complete = false;
+                    return;
+                }
                 var value = node.Current;
                 // Do not read Name, Value, TextPattern or descendants of password controls.
                 // Cross-process descendants are permitted only through this exact HWND-rooted Raw View tree.
@@ -199,28 +206,66 @@ public static class CaptureService
                             chars += name.Length + 1;
                         }
                     }
+                    else if (name.Length > 0 && chars + name.Length + 1 > 12000)
+                        complete = false;
                 }
                 ct.ThrowIfCancellationRequested();
-                if (depth >= 18 || elements.Count >= 200 || text.Count >= 200
-                    || chars >= 12000 || clock.ElapsedMilliseconds > 3000) return;
+                if (elements.Count >= 200 || text.Count >= 200
+                    || chars >= 12000 || clock.ElapsedMilliseconds > 3000)
+                {
+                    complete = false;
+                    return;
+                }
                 var child = walker.GetFirstChild(node);
+                if (depth >= maxDepth)
+                {
+                    if (child is not null) complete = false;
+                    return;
+                }
                 while (child is not null && visited < 800 && elements.Count < 200
                     && text.Count < 200 && chars < 12000 && clock.ElapsedMilliseconds < 3000)
                 {
                     Walk(child, depth + 1);
                     ct.ThrowIfCancellationRequested();
                     if (visited >= 800 || elements.Count >= 200 || text.Count >= 200
-                        || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) break;
+                        || chars >= 12000 || clock.ElapsedMilliseconds >= 3000)
+                    {
+                        complete = false;
+                        break;
+                    }
                     child = walker.GetNextSibling(child);
                 }
+                if (child is not null) complete = false;
             }
             Walk(root, 0);
             if (visited >= 800 || elements.Count >= 200 || text.Count >= 200
-                || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) note += " Metadata was bounded/truncated.";
+                || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) complete = false;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException or UnauthorizedAccessException)
-        { note += " This application exposed incomplete/no accessible text; review carefully."; }
-        return (elements.ToArray(), string.Join('\n', text.Distinct()), note);
+        {
+            complete = false;
+            note += " This application exposed incomplete/no accessible text; review carefully.";
+        }
+        if (!complete) note += " Metadata was bounded/truncated.";
+        return new(elements.ToArray(), string.Join('\n', text.Distinct()), note, complete);
+    }
+}
+
+internal sealed record AutomationReadResult(
+    ElementInfo[] Elements, string Text, string Note, bool Complete)
+{
+    public ElementInfo[] RequireComplete()
+    {
+        if (!Complete) throw new IncompleteAutomationReadException();
+        return Elements;
+    }
+}
+
+internal sealed class IncompleteAutomationReadException : InvalidOperationException
+{
+    public IncompleteAutomationReadException()
+        : base("The controls inspection was incomplete. No camera state or action was accepted. Inspect the selected camera screen again.")
+    {
     }
 }

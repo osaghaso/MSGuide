@@ -7,7 +7,8 @@ param(
     [switch]$SkipBuild,
     [switch]$Copilot,
     [switch]$CameraFixture,
-    [switch]$Shareable
+    [switch]$Shareable,
+    [switch]$DeveloperTools
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +53,8 @@ try {
         $info.Environment['MSGUIDE_API_URL'] = $url
         $info.Environment['MSGUIDE_MODE'] = 'demo'
         $info.Environment['PYTHONUTF8'] = '1'
+        $info.Environment['MSGUIDE_DEVELOPER_TOOLS'] =
+            if ($DeveloperTools -or $IntegrationTest -or $CaptureTest) { '1' } else { '0' }
         if ($CameraFixture) {
             $info.Environment['MSGUIDE_CAMERA_RECOVERY_MODE'] = 'fixture'
         }
@@ -61,7 +64,18 @@ try {
         if ($Copilot) {
             $copilotCommand = Get-Command copilot -ErrorAction Stop
             $info.Environment['MSGUIDE_GUIDANCE_PROVIDER'] = 'copilot-sdk'
-            $info.Environment['MSGUIDE_COPILOT_MODEL'] = 'auto'
+            $info.Environment['MSGUIDE_COPILOT_MODEL'] =
+                if ([string]::IsNullOrWhiteSpace($env:MSGUIDE_COPILOT_MODEL)) {
+                    'gpt-6-astra'
+                } else { $env:MSGUIDE_COPILOT_MODEL }
+            $info.Environment['MSGUIDE_COPILOT_REASONING_EFFORT'] =
+                if ([string]::IsNullOrWhiteSpace($env:MSGUIDE_COPILOT_REASONING_EFFORT)) {
+                    'xhigh'
+                } else { $env:MSGUIDE_COPILOT_REASONING_EFFORT }
+            $info.Environment['MSGUIDE_COPILOT_CONTEXT_TIER'] =
+                if ([string]::IsNullOrWhiteSpace($env:MSGUIDE_COPILOT_CONTEXT_TIER)) {
+                    'long_context'
+                } else { $env:MSGUIDE_COPILOT_CONTEXT_TIER }
             $info.Environment['COPILOT_CLI_PATH'] = $copilotCommand.Source
         }
         if ($IntegrationTest -or $CaptureTest) { $info.Environment['MSGUIDE_GUIDANCE_PROVIDER'] = 'demo' }

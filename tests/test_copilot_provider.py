@@ -14,6 +14,7 @@ from src.copilot_provider import (
     AGENCY_LEARN_READ_ONLY_TOOLS,
     AgencyMicrosoftLearnConfig,
     ApprovedGuidanceContext,
+    COPILOT_INFERENCE_TIMEOUT_SECONDS,
     CopilotProvider,
     CopilotProviderConfig,
     CopilotProviderFailure,
@@ -134,6 +135,17 @@ def provider(tmp_path, output, **client_changes):
     return result, clients[0]
 
 
+def test_inference_timeout_is_bounded_for_fresh_observations(tmp_path):
+    config = CopilotProviderConfig(model="gpt-6-astra", base_directory=tmp_path)
+    assert config.timeout_seconds == COPILOT_INFERENCE_TIMEOUT_SECONDS == 45.0
+    with pytest.raises(ValueError):
+        CopilotProviderConfig(
+            model="gpt-6-astra",
+            base_directory=tmp_path,
+            timeout_seconds=COPILOT_INFERENCE_TIMEOUT_SECONDS + 0.1,
+        ).validate()
+
+
 @pytest.mark.asyncio
 async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     output = {
@@ -162,6 +174,8 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     assert options["enable_session_store"] is False
     assert options["infinite_sessions"] == {"enabled": False}
     assert options["memory"] == {"enabled": False}
+    assert options["reasoning_effort"] == "xhigh"
+    assert options["context_tier"] == "long_context"
     payload, attachments = client.sessions[0].sent
     body = json.loads(payload)
     assert body["untrustedObservation"]["ocrText"] == "untrusted screen text"
@@ -336,6 +350,18 @@ async def test_agency_mcp_is_opt_in_exact_and_read_only(tmp_path):
 def test_invalid_context_and_agency_configuration_fail_closed(tmp_path):
     with pytest.raises(ValueError):
         AgencyMicrosoftLearnConfig(enabled=True, tools=("unknown",)).validate()
+    with pytest.raises(ValueError):
+        CopilotProviderConfig(
+            model="gpt-6-astra",
+            base_directory=tmp_path,
+            reasoning_effort="maximum",
+        ).validate()
+    with pytest.raises(ValueError):
+        CopilotProviderConfig(
+            model="gpt-6-astra",
+            base_directory=tmp_path,
+            context_tier="largest",
+        ).validate()
 
     model = CopilotProvider(
         CopilotProviderConfig(model="gpt-5", base_directory=tmp_path),

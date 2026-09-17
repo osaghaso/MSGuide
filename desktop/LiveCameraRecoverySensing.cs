@@ -12,10 +12,10 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     : ICameraRecoverySensing, ICameraRecoveryControl
 {
     private const string TeamsPermissionId = "MSTeams_8wekyb3d8bbwe_ToggleSwitch";
-    private const string SystemPermissionId =
-        "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch";
-    private const string AppPermissionId =
-        "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch";
+    private const string SystemPermissionId = CameraRecoveryPinnedTargets.DeviceCameraToggle;
+    private const string AppPermissionId = CameraRecoveryPinnedTargets.AppCameraToggle;
+    private const string CameraConsentKey =
+        @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam";
     private const string TeamsConsentKey =
         @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\MSTeams_8wekyb3d8bbwe";
     private const string CameraPolicyKey = @"SOFTWARE\Policies\Microsoft\Camera";
@@ -58,7 +58,26 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                     window.Id, TeamsCameraFinding.Unsupported,
                     "Choose the Microsoft Teams desktop window.");
 
-            var read = ReadControls(window, cancellationToken);
+            var permission = ReadPermission();
+            if (permission.State != CameraPermissionState.On)
+            {
+                lock (gate)
+                {
+                    target = null;
+                    if (permission.State == CameraPermissionState.Off)
+                    {
+                        permissionOffObserved = true;
+                        permissionRestoredAt = null;
+                    }
+                }
+                return new TeamsCameraObservation(window.Id, permission.State switch
+                {
+                    CameraPermissionState.Off => TeamsCameraFinding.PermissionMayBeOff,
+                    CameraPermissionState.Managed => TeamsCameraFinding.ManagedOrDisabled,
+                    _ => TeamsCameraFinding.Unsupported
+                }, permission.Detail, PermissionScope: permission.Scope);
+            }
+            var read = ReadControls(window, cancellationToken, maxDepth: 32);
             var cameraControl = FindTeamsCameraControl(read.Elements);
             if (cameraControl is { State: TeamsCameraControlState.Off, Element: { } offCamera })
             {
@@ -94,22 +113,9 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                     window.Id, TeamsCameraFinding.Unsupported,
                     "Open Teams Settings > Devices so MSGuide can verify the camera surface.");
 
-            var permission = ReadPermission();
-            return permission switch
-            {
-                PermissionState.Managed => new TeamsCameraObservation(
-                    window.Id, TeamsCameraFinding.ManagedOrDisabled,
-                    "Camera access is controlled by policy."),
-                PermissionState.Off => new TeamsCameraObservation(
-                    window.Id, TeamsCameraFinding.PermissionMayBeOff,
-                    "The packaged Microsoft Teams camera permission is off."),
-                PermissionState.On => new TeamsCameraObservation(
-                    window.Id, TeamsCameraFinding.PermissionAlreadyOnOrDifferentCause,
-                    "The packaged Microsoft Teams camera permission is already on."),
-                _ => new TeamsCameraObservation(
-                    window.Id, TeamsCameraFinding.Unsupported,
-                    "The packaged Microsoft Teams camera permission could not be read safely.")
-            };
+            return new TeamsCameraObservation(
+                window.Id, TeamsCameraFinding.PermissionAlreadyOnOrDifferentCause,
+                permission.Detail);
         }, cancellationToken);
 
     public Task<CameraSettingsObservation> ObserveSettingsAsync(
@@ -126,74 +132,63 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                     ProbeValidated: true,
                     Page: CameraSettingsPage.Other);
 
-            var system = Find(read.Elements, SystemPermissionId);
-            var apps = Find(read.Elements, AppPermissionId);
-            var teams = Find(read.Elements, TeamsPermissionId);
-            if (system is null || apps is null || teams is null)
-                return new CameraSettingsObservation(
-                    CameraSettingsFinding.Unsupported,
-                    "The pinned Camera Settings controls were incomplete.",
-                    Source: CameraSettingsObservationSource.ControlsOnly,
-                    ProbeValidated: true,
-                    Page: CameraSettingsPage.CameraPrivacy);
-            if (ReadPermission() == PermissionState.Managed
-                || !system.IsEnabled || !apps.IsEnabled || !teams.IsEnabled)
-                return new CameraSettingsObservation(
-                    CameraSettingsFinding.ManagedOrDisabled,
-                    "One or more camera permissions are managed or disabled.",
-                    Source: CameraSettingsObservationSource.ControlsOnly,
-                    ProbeValidated: true,
-                    Page: CameraSettingsPage.CameraPrivacy);
-            if (system.ToggleState != "on" || apps.ToggleState != "on")
-                return new CameraSettingsObservation(
-                    CameraSettingsFinding.Unsupported,
-                    "This prototype supports only the individual Microsoft Teams permission branch.",
-                    Source: CameraSettingsObservationSource.ControlsOnly,
-                    ProbeValidated: true,
-                    Page: CameraSettingsPage.CameraPrivacy);
-
-            if (teams.ToggleState == "off")
+            var observation = AssessSettingsPermissions(
+                read.Elements, ReadPermission().State == CameraPermissionState.Managed);
+            if (observation.Target is { } blocked)
             {
-                var id = teams.TargetId;
+                var element = read.Elements.Single(item => item.TargetId == blocked.ObservationId);
                 lock (gate)
                 {
                     target = new(
-                        id, read.Window, read.Rect, teams,
-                        CameraRecoveryTargetKind.PackagedTeamsPermission);
+                        blocked.ObservationId, read.Window, read.Rect, element, blocked.Kind);
                     permissionOffObserved = true;
                     permissionRestoredAt = null;
                 }
-                return new CameraSettingsObservation(
-                    CameraSettingsFinding.PermissionOff,
-                    "The individual Microsoft Teams camera permission is off.",
-                    new CameraRecoveryTarget(
-                        id, teams.Label, teams.AutomationId,
-                        CameraRecoveryTargetKind.PackagedTeamsPermission),
-                    CameraSettingsObservationSource.ControlsOnly,
-                    ProbeValidated: true,
-                    Page: CameraSettingsPage.CameraPrivacy);
+                return observation;
             }
 
             lock (gate)
             {
                 target = null;
-                if (teams.ToggleState == "on" && permissionOffObserved)
+                if (observation.Finding == CameraSettingsFinding.PermissionOn && permissionOffObserved)
                     permissionRestoredAt ??= DateTimeOffset.UtcNow;
             }
-            return teams.ToggleState == "on"
-                ? new CameraSettingsObservation(
-                    CameraSettingsFinding.PermissionOn,
-                    "The individual Microsoft Teams camera permission is on.",
-                    Source: CameraSettingsObservationSource.ControlsOnly,
-                    ProbeValidated: true,
-                    Page: CameraSettingsPage.CameraPrivacy)
-                : new CameraSettingsObservation(
-                    CameraSettingsFinding.Unsupported,
-                    "The Microsoft Teams camera permission state is unavailable.",
-                    Source: CameraSettingsObservationSource.ControlsOnly,
-                    ProbeValidated: true,
-                    Page: CameraSettingsPage.CameraPrivacy);
+            return observation;
         }, cancellationToken);
+
+    internal static CameraSettingsObservation AssessSettingsPermissions(ElementInfo[] elements, bool policyManaged)
+    {
+        CameraSettingsObservation Result(CameraSettingsFinding finding, string detail, CameraRecoveryTarget? target = null) =>
+            new(finding, detail, target, CameraSettingsObservationSource.ControlsOnly,
+                ProbeValidated: true, Page: CameraSettingsPage.CameraPrivacy);
+        if (!Safety.VerifiedCameraSettingsPage(elements))
+            return new(CameraSettingsFinding.WrongPage, "The Camera privacy page could not be verified.",
+                Source: CameraSettingsObservationSource.ControlsOnly,
+                ProbeValidated: true, Page: CameraSettingsPage.Other);
+        if (policyManaged)
+            return Result(CameraSettingsFinding.ManagedOrDisabled,
+                "Camera access is blocked by policy. MSGuide will not override it.");
+        foreach (var (id, kind) in new[]
+        {
+            (SystemPermissionId, CameraRecoveryTargetKind.DeviceCameraPermission),
+            (AppPermissionId, CameraRecoveryTargetKind.AppCameraPermission),
+            (TeamsPermissionId, CameraRecoveryTargetKind.PackagedTeamsPermission)
+        })
+        {
+            var element = Find(elements, id);
+            if (element is null)
+                return Result(CameraSettingsFinding.Unsupported, "A required camera permission control is missing.");
+            if (!element.IsEnabled || !element.Targetable)
+                return Result(CameraSettingsFinding.ManagedOrDisabled,
+                    "The required camera setting is disabled. MSGuide will not override it.");
+            if (element.ToggleState == "off")
+                return Result(CameraSettingsFinding.PermissionOff, CameraPermissionEvidence.DescribeBlock(kind),
+                    new(element.TargetId, element.Label, element.AutomationId, kind));
+            if (element.ToggleState != "on")
+                return Result(CameraSettingsFinding.Unsupported, "The camera permission toggle state is unknown.");
+        }
+        return Result(CameraSettingsFinding.PermissionOn, "Device, app, and Teams camera permissions are on.");
+    }
 
     public async Task<CameraVerificationResult> VerifyTeamsAsync(
         WindowChoice window, CancellationToken cancellationToken)
@@ -203,12 +198,14 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
             return new CameraVerificationResult(
                 window.Id, CameraVerificationFinding.Unsupported, false,
                 "Choose the reopened Microsoft Teams desktop window.");
-        if (ReadPermission() != PermissionState.On)
+        var permission = ReadPermission();
+        if (permission.State != CameraPermissionState.On)
             return new CameraVerificationResult(
                 window.Id, CameraVerificationFinding.Unresolved, false,
-                "The packaged Microsoft Teams camera permission is not on.");
+                permission.Detail);
 
-        var read = await Task.Run(() => ReadControls(window, cancellationToken), cancellationToken);
+        var read = await Task.Run(
+            () => ReadControls(window, cancellationToken, maxDepth: 32), cancellationToken);
         var cameraControl = FindTeamsCameraControl(read.Elements);
         if (cameraControl is { State: TeamsCameraControlState.Off })
             return new CameraVerificationResult(
@@ -218,18 +215,11 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         {
             DateTimeOffset? enabledAt;
             lock (gate) enabledAt = teamsCameraEnabledAt;
-            if (enabledAt is null)
-                return new CameraVerificationResult(
-                    window.Id, CameraVerificationFinding.Unresolved, false,
-                    "MSGuide did not observe a fresh camera off-to-on transition in this session.");
             for (int attempt = 0; attempt < 8; attempt++)
             {
                 if (TryGetCameraUseStart(out var cameraUseForControl)
-                    && cameraUseForControl >= enabledAt.Value.AddSeconds(-2))
-                    return new CameraVerificationResult(
-                        window.Id, CameraVerificationFinding.Ready, true,
-                        "The Teams camera control is on and Windows reports active camera use.",
-                        Reinitialized: true);
+                    && MatchActiveCameraUse(window.Id, enabledAt, cameraUseForControl) is { } result)
+                    return result;
                 if (attempt < 7)
                     await Task.Delay(300, cancellationToken);
             }
@@ -267,6 +257,18 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
             Reinitialized: true);
     }
 
+    internal static CameraVerificationResult? MatchActiveCameraUse(
+        string windowId, DateTimeOffset? enabledAt, DateTimeOffset? activeUseStartedAt)
+    {
+        if (activeUseStartedAt is null
+            || enabledAt is not null && activeUseStartedAt.Value < enabledAt.Value.AddSeconds(-2))
+            return null;
+        return new(windowId,
+            enabledAt is null ? CameraVerificationFinding.AlreadyReady : CameraVerificationFinding.Ready,
+            true, "The Teams camera control is on and Windows reports active camera use.",
+            Reinitialized: enabledAt is not null);
+    }
+
     public Task<CameraTargetPresentation> ShowTargetAsync(
         CameraRecoveryTarget requested, CancellationToken cancellationToken)
     {
@@ -283,9 +285,9 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         ControlRead? refreshed;
         try
         {
-            refreshed = current.Kind == CameraRecoveryTargetKind.PackagedTeamsPermission
+            refreshed = CameraRecoveryPinnedTargets.IsPermission(current.Kind)
                 ? FindCameraSettings(cancellationToken)
-                : ReadControls(current.Window, cancellationToken);
+                : ReadControls(current.Window, cancellationToken, maxDepth: 32);
         }
         catch (InvalidOperationException) { refreshed = null; }
         var element = refreshed?.Elements.SingleOrDefault(
@@ -306,7 +308,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
             overlay.IsVisible, overlay.IsVisible
                 ? current.Kind == CameraRecoveryTargetKind.TeamsCameraButton
                     ? "The current Teams camera-on control is outlined."
-                    : "The current Microsoft Teams permission is outlined."
+                    : "The current camera permission setting is outlined."
                 : "The verified target could not be outlined."));
     }
 
@@ -315,7 +317,11 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     {
         cancellationToken.ThrowIfCancellationRequested();
         TargetCache? current;
-        lock (gate) current = target;
+        lock (gate)
+        {
+            current = target;
+            target = null;
+        }
         if (current is null
             || requested.ObservationId != current.Id
             || requested.Kind != current.Kind
@@ -437,9 +443,14 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         TargetCache current, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        ControlRead? refreshed = current.Kind == CameraRecoveryTargetKind.PackagedTeamsPermission
+        var permission = ReadPermission();
+        if (permission.State == CameraPermissionState.Managed
+            || current.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+                && permission.State != CameraPermissionState.On)
+            return new(false, true, permission.Detail);
+        ControlRead? refreshed = CameraRecoveryPinnedTargets.IsPermission(current.Kind)
             ? FindCameraSettings(cancellationToken)
-            : ReadControls(current.Window, cancellationToken);
+            : ReadControls(current.Window, cancellationToken, maxDepth: 32);
         var expected = refreshed?.Elements.SingleOrDefault(
             element => element.TargetId == current.Id);
         if (refreshed is null || expected is null
@@ -447,6 +458,12 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
             || !expected.IsEnabled || !expected.Targetable)
             return new CameraTargetControlResult(
                 false, true, "The verified camera target changed before the approved action.");
+        if (CameraRecoveryPinnedTargets.IsPermission(current.Kind))
+        {
+            var next = AssessSettingsPermissions(refreshed.Elements, policyManaged: false);
+            if (next.Target?.Kind != current.Kind || next.Target.ObservationId != current.Id)
+                return new(false, true, "The permission scope changed. Inspect settings and approve the new scope separately.");
+        }
 
         var raw = FindRawTarget(refreshed, expected, cancellationToken);
         if (raw is null)
@@ -464,7 +481,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                     true, true, "The approved camera toggle action was invoked once.");
             }
             if (current.Kind == CameraRecoveryTargetKind.TeamsCameraButton
-                && expected.Label == CameraRecoveryPinnedTargets.TeamsTurnCameraOn
+                && CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(expected.Label)
                 && raw.TryGetCurrentPattern(InvokePattern.Pattern, out var invokePattern)
                 && invokePattern is InvokePattern invoke)
             {
@@ -515,20 +532,22 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     private static bool IsTeams(WindowChoice window) =>
         window.Matches() && window.IsMicrosoftTeamsWindow;
 
-    private static ControlRead ReadControls(WindowChoice window, CancellationToken cancellationToken)
+    private static ControlRead ReadControls(
+        WindowChoice window, CancellationToken cancellationToken, int maxDepth = 18)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!window.Matches()
             || Native.IsHungAppWindow(window.Handle)
             || !Native.GetWindowRect(window.Handle, out var rect))
             throw new InvalidOperationException("The selected window is unavailable.");
-        var (elements, _, _) = CaptureService.ReadAutomation(window, rect, cancellationToken);
+        var read = CaptureService.ReadAutomation(
+            window, rect, cancellationToken, maxDepth);
         cancellationToken.ThrowIfCancellationRequested();
         if (!window.Matches()
             || !Native.GetWindowRect(window.Handle, out var after)
             || !rect.Same(after))
             throw new InvalidOperationException("The selected window changed during inspection.");
-        return new(window, rect, elements);
+        return new(window, rect, read.RequireComplete());
     }
 
     private static ControlRead? FindCameraSettings(CancellationToken cancellationToken)
@@ -553,7 +572,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 var read = ReadControls(candidate, cancellationToken);
                 if (Safety.VerifiedCameraSettingsPage(read.Elements)) return read;
             }
-            catch (InvalidOperationException) { }
+            catch (InvalidOperationException ex) when (ex is not IncompleteAutomationReadException) { }
         }
         return null;
     }
@@ -569,9 +588,9 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 element.Role is "button" or "checkbox"
                 && element.IsEnabled
                 && element.Targetable
-                && (element.Label is CameraRecoveryPinnedTargets.TeamsTurnCameraOn
-                        or CameraRecoveryPinnedTargets.TeamsTurnCameraOff
-                    || element.Label == CameraRecoveryPinnedTargets.TeamsCameraToggle
+                && (CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(element.Label)
+                    || CameraRecoveryPinnedTargets.IsTeamsTurnCameraOff(element.Label)
+                    || CameraRecoveryPinnedTargets.IsTeamsCameraToggle(element.Label)
                         && element.ToggleState is "off" or "on"))
             .ToArray();
         if (controls.Length > 1)
@@ -579,8 +598,8 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 "Multiple visible Teams camera controls matched the pinned state.");
         if (controls.Length == 0) return null;
         var control = controls[0];
-        bool off = control.Label == CameraRecoveryPinnedTargets.TeamsTurnCameraOn
-            || control.Label == CameraRecoveryPinnedTargets.TeamsCameraToggle
+        bool off = CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(control.Label)
+            || CameraRecoveryPinnedTargets.IsTeamsCameraToggle(control.Label)
                 && control.ToggleState == "off";
         return new TeamsCameraControl(
             off ? TeamsCameraControlState.Off : TeamsCameraControlState.On, control);
@@ -590,31 +609,31 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         ElementInfo element, CameraRecoveryTargetKind kind) =>
         kind switch
         {
-            CameraRecoveryTargetKind.PackagedTeamsPermission =>
-                element.AutomationId == TeamsPermissionId
+            CameraRecoveryTargetKind.PackagedTeamsPermission
+                or CameraRecoveryTargetKind.DeviceCameraPermission
+                or CameraRecoveryTargetKind.AppCameraPermission =>
+                CameraRecoveryPinnedTargets.IsPermissionTarget(element.AutomationId, kind)
                 && element.ToggleState == "off",
             CameraRecoveryTargetKind.TeamsCameraButton =>
-                element.Label == CameraRecoveryPinnedTargets.TeamsTurnCameraOn
-                || element.Label == CameraRecoveryPinnedTargets.TeamsCameraToggle
+                CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(element.Label)
+                || CameraRecoveryPinnedTargets.IsTeamsCameraToggle(element.Label)
                     && element.ToggleState == "off",
             _ => false
         };
 
-    private static PermissionState ReadPermission()
+    private static CameraPermissionEvidence ReadPermission()
     {
         using var cameraPolicy = Registry.LocalMachine.OpenSubKey(CameraPolicyKey);
-        if (cameraPolicy?.GetValue("AllowCamera") is int allowed && allowed == 0)
-            return PermissionState.Managed;
+        bool policyDenied = cameraPolicy?.GetValue("AllowCamera") is int allowed && allowed == 0;
         using var appPrivacy = Registry.LocalMachine.OpenSubKey(AppPrivacyPolicyKey);
-        if (appPrivacy?.GetValue("LetAppsAccessCamera") is int access && access == 2)
-            return PermissionState.Managed;
+        policyDenied |= appPrivacy?.GetValue("LetAppsAccessCamera") is int access && access == 2;
+        using var deviceConsent = Registry.LocalMachine.OpenSubKey(CameraConsentKey);
+        using var appConsent = Registry.CurrentUser.OpenSubKey(CameraConsentKey);
         using var consent = Registry.CurrentUser.OpenSubKey(TeamsConsentKey);
-        return (consent?.GetValue("Value") as string) switch
-        {
-            "Allow" => PermissionState.On,
-            "Deny" => PermissionState.Off,
-            _ => PermissionState.Unknown
-        };
+        return CameraPermissionEvidence.FromConsent(policyDenied,
+            deviceConsent?.GetValue("Value") as string,
+            appConsent?.GetValue("Value") as string,
+            consent?.GetValue("Value") as string);
     }
 
     private static bool TryGetCameraUseStart(out DateTimeOffset startedAt)
@@ -707,13 +726,6 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         _ => 0
     };
 
-    private enum PermissionState
-    {
-        Unknown,
-        Off,
-        On,
-        Managed
-    }
 
     private enum TeamsCameraControlState
     {

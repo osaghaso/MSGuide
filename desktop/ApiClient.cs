@@ -15,7 +15,7 @@ public sealed class ApiClient : IDisposable
     public ApiClient()
     {
         http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false, UseCookies = false })
-        { BaseAddress = Safety.ApiUri(Environment.GetEnvironmentVariable("MSGUIDE_API_URL")), Timeout = TimeSpan.FromSeconds(45), MaxResponseContentBufferSize = 512 * 1024 };
+        { BaseAddress = Safety.ApiUri(Environment.GetEnvironmentVariable("MSGUIDE_API_URL")), Timeout = TimeSpan.FromSeconds(55), MaxResponseContentBufferSize = 512 * 1024 };
         token = Environment.GetEnvironmentVariable("MSGUIDE_LOCAL_TOKEN");
     }
 

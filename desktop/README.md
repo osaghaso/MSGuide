@@ -1,6 +1,11 @@
 # MSGuide Desktop — native guide-only MVP
 
-WPF / .NET 10 Windows companion. The only NuGet dependency is **System.Speech 10.0.0**; WPF, UI Automation, HTTP, JSON and Win32 interop use the Windows/.NET platform. A .NET 10 SDK is required to build; Python 3.11 and PowerShell 7 are required by the root launcher. No cloud provisioning is needed.
+WPF / .NET 10 Windows companion. Local dictation uses **Whisper.net 1.9.1**,
+its CPU runtime (including Windows ARM64), and **NAudio.WinMM 2.2.1** for
+microphone capture. **System.Speech 10.0.0** supplies playback and synthetic
+test audio, not the interactive dictation engine. A .NET 10 SDK is required to
+build; Python 3.11 and PowerShell 7 are required by the root launcher. No cloud
+provisioning or Developer Mode is needed.
 
 ## Build and start
 
@@ -19,7 +24,7 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 4. Inspect the actual image (expand full-size inspection if needed) and UI Automation text/element metadata. Pixel sharing defaults **off**. Check consent, optionally enable image sharing for a vision provider, then click **Send approved snapshot**. No capture is uploaded without this click.
 5. Switch to the demo to see the nonactivating outline. Click the indicated button yourself. **View logs** reveals “Build failed: exit code 1” and **Open troubleshooting**; that reveals “Check compiler errors and missing dependencies” and **Mark resolved**; the last step shows “Issue resolved”. Old workflow buttons are removed. All changes are synthetic and local.
 6. **Check next step** starts a fresh capture/review, never a blind resend. Repeat approval at each step. **Reset demo** restarts the sandbox.
-7. **Start microphone** / **Stop microphone** is click-to-toggle local dictation, not a wake word. It auto-stops at 30 seconds. Recognized text is editable and is never automatically sent. **Speak response** is optional local playback. Missing recognizer, microphone, or voice support has a typed fallback.
+7. Select a **Microphone**, then **Start microphone** / **Stop & transcribe** for local Whisper dictation. Recording stops at 30 seconds and is transcribed after microphone closure. Input levels and low-volume diagnostics are visible. Review/edit the transcript before **Ask MSGuide**; submission is disabled until transcription finishes. Use **Cancel transcription** while local processing is active. **Sound input settings** opens Windows' volume/mute controls without changing them. **Speak response** is optional local playback.
 8. **Pause / clear**, **Dismiss**, Escape, minimize, or Exit cancel work, clear snapshot references/bytes and transcript, stop microphone/speech, and hide highlights. Already transmitted data cannot be recalled. A title-bar close exits the application.
 
 ## Privacy and support boundaries
@@ -36,7 +41,20 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 
 ## Runnable checks and verification
 
-Run `desktop/bin/Debug/net10.0-windows/MSGuide.Desktop.exe --self-test` (or `dotnet run --project desktop/MSGuide.Desktop.csproj -- --self-test`). This exits 0 on success, 1 on failure, without creating a window or connecting to the backend. Checks cover loopback URL rejection, unsafe citation schemes, freshness boundaries, response echo mismatch, malformed target boxes, and physical target mapping at 100/125/150/200% scale with a negative desktop origin.
+Run `desktop/bin/Debug/net10.0-windows/MSGuide.Desktop.exe --self-test` (or `dotnet run --project desktop/MSGuide.Desktop.csproj -- --self-test`). This exits 0 on success, 1 on failure, without showing a window or connecting to the backend. Checks cover loopback URL rejection, unsafe citation schemes, freshness boundaries, response echo mismatch, malformed target boxes, and physical target mapping at 100/125/150/200% scale with a negative desktop origin.
+
+Install the local English model with
+`scripts\Install-MSGuideSpeechModel.ps1 -AcceptDownload` after approving the
+466 MiB download. Its verified model file stays under
+`%LOCALAPPDATA%\MSGuide\models`, never in the repository. Normal startup never
+downloads or substitutes another speech model automatically.
+
+Speech lifecycle self-tests use a fake input and never open a microphone.
+Set `MSGUIDE_WHISPER_SYNTHETIC_TEST=1` for real local Whisper transcription of
+synthetic speech and silence. These use memory only, with no speaker output,
+microphone input, audio file, or remote call. The older
+`MSGUIDE_SPEECH_SYNTHETIC_TEST=1` checks the legacy Windows test adapter only;
+it is not proof of Whisper accuracy.
 
 ### Capture-only runtime check (parent starts backend)
 

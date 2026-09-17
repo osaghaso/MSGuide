@@ -1,8 +1,22 @@
 # MSGuide desktop MVP
 
-A Windows WPF companion with **Guide me** and **Do it for me** modes. The approved local task invokes two controls in its synthetic demo. An experimental Notepad adapter can guide or insert an approved draft into a selected empty editor; external writes are disabled by default pending native acceptance. This is not general screen control. The default provider is deterministic, not AI; an explicitly configured [optional model provider](docs/MODEL_SETUP.md) can process approved synthetic/public evidence.
+A Windows companion for asking by text or voice and getting help with Microsoft
+tools. **Guide me** keeps changes with the user; **Fix it for me** requires
+approval for each supported action. Current workflows include local Teams camera
+diagnosis and approved recovery, local voice transcription, and reviewed screen
+context for guidance. This is not unrestricted desktop control. Synthetic
+developer workflows are hidden unless explicitly enabled. The
+[provider configuration](docs/MODEL_SETUP.md) determines whether approved
+public/synthetic screen context uses Copilot or deterministic sample guidance.
 
-**Status, September 15, 2026:** desktop build, safety/component tests, strict native demo Control and the four-state capture/API test pass. A DPI-triggered overlay activation bug was fixed; full integration passed three post-fix runs, including two with stronger zero-activation and hide/re-show checks. Notepad policy tests use a fake editor; real Notepad acceptance still needs user interaction and writes remain gated. Historical intermittent blank captures, full manual UX, mixed-DPI visual quality, microphone operation and live model quality remain unresolved or unverified. See [Notepad acceptance](docs/NOTEPAD_TASK.md), [dual-mode scope](docs/DUAL_MODE.md) and [validation evidence](docs/VALIDATION.md).
+**Current test and presentation:** see the
+[Teams camera and voice walkthrough](docs/teams-camera-demo/README.md) for setup,
+live recovery, permission approvals, voice input, repeat-recording behavior, and
+regression commands. Live camera recovery and local voice input were exercised
+on Windows 11 ARM64 with English Teams on September 16, 2026. This is not a claim
+of arbitrary-app, all-device, or multilingual automation. Historical capture
+limits and separate Notepad acceptance remain documented in
+[validation](docs/VALIDATION.md) and [Notepad acceptance](docs/NOTEPAD_TASK.md).
 
 ## Install and start
 
@@ -29,16 +43,28 @@ No virtual-environment activation is required. The launcher expects the environm
 - `-IntegrationTest`: run the synthetic desktop harness instead of normal UI; forces the deterministic provider. See [how to run validation](docs/VALIDATION.md).
 - `-CaptureTest`: test real demo-window capture and API guidance without requiring foreground activation. This does not test overlay interaction.
 - `-Copilot`: use the persistent GitHub Copilot SDK provider for the generic
-  snapshot-guidance workflow. The Teams camera journey keeps its deterministic
-  local state and verification.
+  snapshot-guidance workflow, pinned to GPT-6 Astra with `xhigh` reasoning and
+  the long-context tier. The Teams camera journey keeps its local state,
+  target revalidation, approval, and invocation boundary.
 - `-CameraFixture`: run the camera recovery card against its clearly labelled
   deterministic Teams-camera-off fixture. Choose **Guide me** or
   **Fix it for me**; fixture completion never claims real camera recovery.
 - `-Shareable`: explicitly allow MSGuide and its guidance overlay to appear in
   full-screen sharing. They are excluded from capture by default. Share the
   **Screen**, not an individual Teams window.
+- `-DeveloperTools`: show the synthetic Build Center/Notepad workflows and
+  manual screen-context diagnostics. Hidden during normal use.
+
+The normal shell starts with a blank **Ask MSGuide** composer and **Guide me** /
+**Fix it for me** modes. Task-specific controls appear after a request; Settings
+holds voice, connection, and privacy options. When no automated fix is supported,
+**Use screen context** offers explicit capture/review/approval for guidance
+without implying that a fix has already occurred.
 
 ## Try the built-in demo
+
+These older synthetic workflows require `-DeveloperTools`. For the primary live
+scenario, use the [camera and voice walkthrough](docs/teams-camera-demo/README.md).
 
 For the new dual-mode task: **Open demo → choose Guide me / Do it for me → Prepare demo task → review and approve → Start approved task**. Guide mode waits for your clicks and **I did it · check**. Control mode invokes View logs and Open troubleshooting, then revokes authority. **Stop task** and **Take over manually** remain available. See [the complete dual-mode instructions](docs/DUAL_MODE.md).
 
@@ -56,7 +82,40 @@ Editing the prompt, changing the selected window, or moving/resizing the capture
 
 ## Voice
 
-**Start microphone / Stop microphone** is local click-to-toggle dictation, auto-stopping after 30 seconds—not hold-to-talk or a wake word. Review/edit recognized text before capture; it is never automatically sent. **Speak response** uses local playback. Recognition depends on installed Windows speech recognizers, language support, and a usable default microphone; playback needs an installed voice. Type instead if these are unavailable. **Stop speech** also cancels pending guidance.
+Dictation uses **local Whisper (`small.en`)**, not the legacy Windows dictation
+engine or the Copilot model. No Developer Mode, MSIX registration, cloud audio
+processing, or speech subscription is needed. Install the model once, only
+after approving its approximately 466 MiB download:
+
+```powershell
+.\scripts\Install-MSGuideSpeechModel.ps1 -AcceptDownload
+```
+
+The installer verifies the model's SHA-256 digest and stores it under
+`%LOCALAPPDATA%\MSGuide\models`, outside the repository. The launcher never
+downloads models automatically; a missing model fails visibly with no silent
+fallback to another recognizer.
+
+Open **Voice settings**, choose the intended **Microphone**, then return to the
+question and select **Start microphone**.
+With an existing draft, that button becomes **New voice question** and replaces
+the old text only after new speech is recognized. Use **Add more** to explicitly
+append. Failed or cancelled replacement recordings retain the old draft; typing
+while recording cancels pending speech so it cannot overwrite your edits.
+The input meter shows incoming audio. **Stop & transcribe** closes the microphone
+and transcribes the bounded recording locally; recording auto-stops after 30
+seconds. Audio stays in memory and is cleared after processing or cancellation.
+Transcription can take several seconds and has a 45-second deadline. During
+processing, **Cancel transcription** stops the operation. Review/edit the words,
+then select **Ask MSGuide** or press Enter. Speech never submits automatically.
+
+Use **Sound input settings** for hardware mute or input-volume problems; choosing
+a microphone in MSGuide does not change Windows' default input. **Speak response**
+uses Windows local playback and requires an installed voice. Pause, dismissal,
+and exit cancel dictation and discard pending speech callbacks.
+If a microphone driver fails to confirm stopping, MSGuide reports **MIC STATUS
+UNKNOWN**, prevents another recording, and asks you to close the app; it does
+not pretend the microphone is off.
 
 ## Privacy and limits
 
@@ -69,6 +128,7 @@ Editing the prompt, changing the selected window, or moving/resizing the capture
 
 ## Documentation
 
+- [docs/teams-camera-demo/README.md](docs/teams-camera-demo/README.md): live test and presentation runbook, expected results, voice behavior, and repeatable checks.
 - [docs/NOTEPAD_TASK.md](docs/NOTEPAD_TASK.md): experimental external task, test evidence and acceptance checklist.
 - [docs/DUAL_MODE.md](docs/DUAL_MODE.md): implemented Guide/Control fixture, authorization, test results and external-control limits.
 - [SUMMARY.md](SUMMARY.md): current status at a glance.

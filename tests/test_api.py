@@ -7,7 +7,8 @@ import secrets
 
 import pytest
 from tests.local_client import TestClient
-from src.main import Config, LocalBoundary, create_app, now
+from src.copilot_provider import CopilotProviderFailure
+from src.main import GUIDANCE_TIMEOUT_SECONDS, Config, LocalBoundary, create_app, now
 
 
 @pytest.fixture
@@ -289,6 +290,66 @@ def test_provider_validation(client):
         return {"status": "next_step", "instruction": "wrong", "target": {"label": "Imaginary", "box": [0, 0, 1, 1], "confidence": 1.0}}
     with TestClient(create_app(Config(token=client.headers["authorization"].split()[1]), guidance_provider=bad), base_url="http://localhost", headers=dict(client.headers)) as c:
         assert c.post("/v1/guidance", json=evidence(c)).status_code == 502
+
+
+def test_guidance_route_has_outer_timeout_headroom(client, monkeypatch):
+    observed = []
+    original = asyncio.wait_for
+
+    async def capture_timeout(awaitable, timeout):
+        observed.append(timeout)
+        return await original(awaitable, timeout)
+
+    monkeypatch.setattr("src.main.asyncio.wait_for", capture_timeout)
+    assert client.post("/v1/guidance", json=evidence(client)).status_code == 200
+    assert observed == [GUIDANCE_TIMEOUT_SECONDS]
+    assert GUIDANCE_TIMEOUT_SECONDS == 50.0
+
+
+def test_provider_timeout_maps_to_gateway_timeout(client):
+    async def timed_out(prompt, observation):
+        raise CopilotProviderFailure("timeout", "private provider timeout detail")
+
+    with TestClient(
+        create_app(
+            Config(token=client.headers["authorization"].split()[1]),
+            guidance_provider=timed_out,
+        ),
+        base_url="http://localhost",
+        headers=dict(client.headers),
+    ) as c:
+        response = c.post("/v1/guidance", json=evidence(c))
+        assert response.status_code == 504
+        assert response.json() == {"detail": "Guidance timed out"}
+
+
+def test_guidance_still_rejects_observation_that_ages_out(client, monkeypatch):
+    clock = [now()]
+    monkeypatch.setattr("src.main.now", lambda: clock[0])
+
+    async def ages_out(prompt, observation):
+        clock[0] += timedelta(seconds=61)
+        return {
+            "mode": "model",
+            "status": "clarification",
+            "instruction": "Capture and review the current screen again.",
+            "target": None,
+            "citations": [],
+        }
+
+    with TestClient(
+        create_app(
+            Config(token=client.headers["authorization"].split()[1]),
+            guidance_provider=ages_out,
+        ),
+        base_url="http://localhost",
+        headers=dict(client.headers),
+    ) as c:
+        response = c.post("/v1/guidance", json=evidence(c))
+        assert response.status_code == 422
+        assert response.json() == {
+            "detail": "Observation must be at most 60 seconds old and at most 5 seconds in the future"
+        }
 
 
 def test_remote_peer_and_huge_content_length(client):

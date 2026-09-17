@@ -29,6 +29,7 @@ from src.copilot_provider import (
     AgencyMicrosoftLearnConfig,
     CopilotProvider,
     CopilotProviderConfig,
+    CopilotProviderFailure,
 )
 from src.model_provider import ModelConfig, OpenAICompatibleProvider
 from src.models import (
@@ -38,6 +39,8 @@ from src.models import (
 )
 from src.policy import PolicyEngine
 from src.retrieval import RetrieverMock
+
+GUIDANCE_TIMEOUT_SECONDS = 50.0
 
 
 def now():
@@ -238,8 +241,14 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
         configured_cli = os.getenv("COPILOT_CLI_PATH", "")
         provider = CopilotProvider(
             CopilotProviderConfig(
-                model=os.getenv("MSGUIDE_COPILOT_MODEL", "auto"),
+                model=os.getenv("MSGUIDE_COPILOT_MODEL", "gpt-6-astra"),
                 base_directory=base_directory,
+                reasoning_effort=os.getenv(
+                    "MSGUIDE_COPILOT_REASONING_EFFORT", "xhigh"
+                ),
+                context_tier=os.getenv(
+                    "MSGUIDE_COPILOT_CONTEXT_TIER", "long_context"
+                ),
                 cli_path=Path(configured_cli).expanduser().resolve() if configured_cli else None,
                 agency_microsoft_learn=AgencyMicrosoftLearnConfig(
                     enabled=os.getenv("MSGUIDE_ENABLE_AGENCY_LEARN", "").lower() == "true",
@@ -351,7 +360,10 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                     raise CameraRecoveryError("Camera target no longer matches the observation")
             else:
                 result = GuidanceResult.model_validate(
-                    await asyncio.wait_for(provider(body.prompt, body.observation), timeout=10)
+                    await asyncio.wait_for(
+                        provider(body.prompt, body.observation),
+                        timeout=GUIDANCE_TIMEOUT_SECONDS,
+                    )
                 )
                 if result.target is not None:
                     matches = []
@@ -383,6 +395,10 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
             fresh(body.observation.capturedAt)
         except asyncio.TimeoutError:
             raise HTTPException(504, "Guidance timed out") from None
+        except CopilotProviderFailure as exc:
+            if exc.code == "timeout":
+                raise HTTPException(504, "Guidance timed out") from None
+            raise HTTPException(502, "Guidance provider failed") from None
         except CameraRecoveryError as exc:
             raise HTTPException(422, str(exc)) from None
         except (ValidationError, ValueError):

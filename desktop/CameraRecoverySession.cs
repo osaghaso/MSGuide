@@ -46,6 +46,7 @@ internal enum CameraSettingsFinding
 internal enum CameraVerificationFinding
 {
     Ready,
+    AlreadyReady,
     NeedsReinitialization,
     Unresolved,
     StaleOrMoved,
@@ -69,7 +70,9 @@ internal enum CameraRecoveryTargetKind
 {
     Unknown,
     TeamsCameraButton,
-    PackagedTeamsPermission
+    PackagedTeamsPermission,
+    DeviceCameraPermission,
+    AppCameraPermission
 }
 
 internal enum TeamsRestartFinding
@@ -97,17 +100,51 @@ internal enum CameraSettingsPage
 
 internal static class CameraRecoveryPinnedTargets
 {
+    private const string TeamsCameraShortcut = "Ctrl+Shift+O";
     public const string TeamsVideoSettings = "VideoSettings";
     public const string PackagedTeamsCameraToggle = "MSTeams_8wekyb3d8bbwe_ToggleSwitch";
+    public const string DeviceCameraToggle = "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch";
+    public const string AppCameraToggle = "SystemSettings_CapabilityAccess_Camera_UserGlobal_ToggleSwitch";
     public const string TeamsTurnCameraOn = "Turn camera on";
     public const string TeamsTurnCameraOff = "Turn camera off";
     public const string TeamsCameraToggle = "Camera";
     public const string FixturePreparation =
         "Fixture mode simulates a Teams camera button that starts off.";
+
+    public static bool IsTeamsTurnCameraOn(string? label) =>
+        MatchesTeamsCommand(label, TeamsTurnCameraOn);
+
+    public static bool IsTeamsTurnCameraOff(string? label) =>
+        MatchesTeamsCommand(label, TeamsTurnCameraOff);
+
+    public static bool IsTeamsCameraToggle(string? label) =>
+        string.Equals(label, TeamsCameraToggle, StringComparison.Ordinal);
+
+    public static bool IsPermission(CameraRecoveryTargetKind kind) =>
+        kind is CameraRecoveryTargetKind.PackagedTeamsPermission
+            or CameraRecoveryTargetKind.DeviceCameraPermission
+            or CameraRecoveryTargetKind.AppCameraPermission;
+
+    public static bool IsPermissionTarget(string? automationId, CameraRecoveryTargetKind kind) =>
+        kind switch
+        {
+            CameraRecoveryTargetKind.PackagedTeamsPermission => automationId == PackagedTeamsCameraToggle,
+            CameraRecoveryTargetKind.DeviceCameraPermission => automationId == DeviceCameraToggle,
+            CameraRecoveryTargetKind.AppCameraPermission => automationId == AppCameraToggle,
+            _ => false
+        };
+
+    private static bool MatchesTeamsCommand(string? label, string command)
+    {
+        if (string.Equals(label, command, StringComparison.Ordinal)) return true;
+        return string.Equals(
+            label, $"{command} ({TeamsCameraShortcut})", StringComparison.Ordinal);
+    }
 }
 
 internal sealed record TeamsCameraObservation(
-    string WindowId, TeamsCameraFinding Finding, string Detail, CameraRecoveryTarget? Target = null);
+    string WindowId, TeamsCameraFinding Finding, string Detail, CameraRecoveryTarget? Target = null,
+    CameraRecoveryTargetKind PermissionScope = CameraRecoveryTargetKind.Unknown);
 internal sealed record CameraRecoveryTarget(
     string ObservationId, string Label, string? AutomationId = null,
     CameraRecoveryTargetKind Kind = CameraRecoveryTargetKind.Unknown);
@@ -292,24 +329,76 @@ internal sealed class FixtureCameraRecoverySensing : ICameraRecoverySensing, ICa
 internal sealed class CameraRecoverySession
 {
     public CameraRecoveryState State { get; private set; } = CameraRecoveryState.Idle;
-    public CameraRecoveryInteractionMode Mode { get; }
+    public CameraRecoveryInteractionMode Mode { get; private set; }
     public string? TeamsWindowId { get; private set; }
     public string? TeamsWindowTitle { get; private set; }
     public CameraRecoveryTarget? Target { get; private set; }
     public CameraRecoveryTargetKind RecoveryTargetKind { get; private set; }
-    public string Detail { get; private set; }
+    public string Detail { get; private set; } = "";
     public bool LocalVerifierPassed { get; private set; }
     public bool TeamsRestartAttempted { get; private set; }
+    private bool globalPermissionRecovery;
 
     public CameraRecoverySession(
         CameraRecoveryInteractionMode mode = CameraRecoveryInteractionMode.Guide)
     {
+        Reset(mode);
+    }
+
+    public void Reset(CameraRecoveryInteractionMode mode)
+    {
         Mode = mode;
+        State = CameraRecoveryState.Idle;
+        TeamsWindowId = null;
+        TeamsWindowTitle = null;
+        Target = null;
+        RecoveryTargetKind = CameraRecoveryTargetKind.Unknown;
+        LocalVerifierPassed = false;
+        TeamsRestartAttempted = false;
+        globalPermissionRecovery = false;
         Detail = mode == CameraRecoveryInteractionMode.Control
             ? "Start when you want MSGuide to fix a verified Teams camera control after approval."
             : "Start when you want guide-only help with a Teams camera.";
     }
 
+    internal static async Task<CameraRecoverySession> AssessCurrentAsync(
+        ICameraRecoverySensing sensing, WindowChoice window, CameraRecoveryInteractionMode mode,
+        CancellationToken cancellationToken)
+    {
+        var assessment = new CameraRecoverySession(mode);
+        assessment.Start();
+        assessment.ChooseTeamsWindow(window.Id, window.Title);
+        var observation = await sensing.ObserveTeamsAsync(window, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        assessment.ApplyTeamsObservation(observation);
+        if (assessment.CanVerifyTeams)
+        {
+            var verification = await sensing.VerifyTeamsAsync(window, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            assessment.ApplyVerification(verification);
+        }
+        return assessment;
+    }
+
+    internal void ApplyReadOnlyAssessment(CameraRecoverySession assessment)
+    {
+        Require(CanStart, "A read-only reassessment must start from idle.");
+        TeamsWindowId = assessment.TeamsWindowId;
+        TeamsWindowTitle = assessment.TeamsWindowTitle;
+        if (assessment.LocalVerifierPassed
+            && assessment.State is CameraRecoveryState.Ready or CameraRecoveryState.FixtureComplete)
+        {
+            LocalVerifierPassed = true;
+            MoveTo(assessment.State, assessment.Detail);
+        }
+        else
+        {
+            Detail = Clean(assessment.Detail + " Choose a mode, then start recovery to continue.");
+        }
+    }
+
+    public bool CanStart => State == CameraRecoveryState.Idle;
+    public bool CanSelectMode => CanStart || IsTerminal;
     public bool CanInspectTeams => State == CameraRecoveryState.NeedsTeamsObservation
         && !string.IsNullOrWhiteSpace(TeamsWindowId);
     public bool CanOpenSettings => State is CameraRecoveryState.Diagnosis or CameraRecoveryState.NeedsCameraSettings;
@@ -338,15 +427,18 @@ internal sealed class CameraRecoverySession
         if (string.IsNullOrWhiteSpace(prompt)) return false;
         string text = prompt.ToLowerInvariant();
         bool mentionsCamera = text.Contains("camera") || text.Contains("webcam") || text.Contains("video");
-        bool mentionsTeams = text.Contains("teams") || text.Contains("meeting");
+        bool mentionsTeams = text.Contains("teams") || text.Contains("team's")
+            || text.Contains("team\u2019s") || text.Contains("meeting");
         bool asksForHelp = text.Contains("help") || text.Contains("fix") || text.Contains("not working")
             || text.Contains("won't") || text.Contains("cannot") || text.Contains("can't")
-            || text.Contains("permission") || text.Contains("blocked") || text.Contains("off");
+            || text.Contains("permission") || text.Contains("blocked") || text.Contains("off")
+            || text.Contains("check") || text.Contains("working") || text.Contains("status");
         return mentionsCamera && mentionsTeams && asksForHelp;
     }
 
     public void Start()
     {
+        Require(CanStart, "Reset camera recovery before starting another run.");
         State = CameraRecoveryState.NeedsTeamsObservation;
         Target = null;
         RecoveryTargetKind = CameraRecoveryTargetKind.Unknown;
@@ -375,7 +467,8 @@ internal sealed class CameraRecoverySession
                 : $"Rebound to “{TeamsWindowTitle}”. Open Teams Devices or prejoin, then run Private visual check.";
             return;
         }
-        if (State is CameraRecoveryState.Idle or CameraRecoveryState.Cancelled || IsTerminal) Start();
+        if (IsTerminal) Reset(Mode);
+        if (CanStart) Start();
         TeamsWindowId = string.IsNullOrWhiteSpace(windowId) ? null : windowId;
         TeamsWindowTitle = Clean(title);
         Target = null;
@@ -405,9 +498,8 @@ internal sealed class CameraRecoverySession
             case TeamsCameraFinding.CameraOff when observation.Target is not null:
                 if (observation.Target.Kind != CameraRecoveryTargetKind.TeamsCameraButton
                     || string.IsNullOrWhiteSpace(observation.Target.ObservationId)
-                    || observation.Target.Label is not (
-                        CameraRecoveryPinnedTargets.TeamsTurnCameraOn
-                        or CameraRecoveryPinnedTargets.TeamsCameraToggle))
+                    || !CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(observation.Target.Label)
+                        && !CameraRecoveryPinnedTargets.IsTeamsCameraToggle(observation.Target.Label))
                 {
                     MoveTo(CameraRecoveryState.Unsupported,
                         "The Teams camera target did not match the pinned camera-on control.");
@@ -431,16 +523,24 @@ internal sealed class CameraRecoverySession
                         : "The Teams camera control is on. Run the private visual check to verify readiness.");
                 break;
             case TeamsCameraFinding.PermissionMayBeOff:
+                globalPermissionRecovery |= observation.PermissionScope is
+                    CameraRecoveryTargetKind.DeviceCameraPermission or CameraRecoveryTargetKind.AppCameraPermission;
                 MoveTo(CameraRecoveryState.Diagnosis,
-                    "Teams indicates camera permission may be blocking access.");
+                    DetailOr(observation.Detail, "Teams indicates camera permission may be blocking access."));
                 break;
             case TeamsCameraFinding.PermissionAlreadyOnOrDifferentCause:
+                if (globalPermissionRecovery)
+                {
+                    MoveTo(CameraRecoveryState.NeedsLocalVerification,
+                        "Camera permissions have been restored. Verify the Teams Devices preview locally; permission-on alone is not readiness.");
+                    break;
+                }
                 MoveTo(CameraRecoveryState.AlreadyOnOrWrongCause,
                     "Permission does not appear to be the cause. Do not force the permission path.");
                 break;
             case TeamsCameraFinding.ManagedOrDisabled:
                 MoveTo(CameraRecoveryState.ManagedOrDisabled,
-                    "Camera access appears disabled or managed. MSGuide will not change policy.");
+                    DetailOr(observation.Detail, "Camera access appears disabled or managed. MSGuide will not change policy."));
                 break;
             case TeamsCameraFinding.StaleOrMoved:
                 MoveTo(CameraRecoveryState.StaleOrMoved,
@@ -448,7 +548,8 @@ internal sealed class CameraRecoverySession
                 break;
             default:
                 MoveTo(CameraRecoveryState.Unsupported,
-                    "Controls-only Teams sensing is unavailable or unsupported. No camera-recovery screenshot was captured.");
+                    DetailOr(observation.Detail,
+                        "Controls-only Teams sensing is unavailable or unsupported. No camera-recovery screenshot was captured."));
                 break;
         }
     }
@@ -472,7 +573,7 @@ internal sealed class CameraRecoverySession
     {
         Require(State == CameraRecoveryState.NeedsSettingsObservation
             || State == CameraRecoveryState.VerifiedTarget
-                && RecoveryTargetKind == CameraRecoveryTargetKind.PackagedTeamsPermission,
+                && CameraRecoveryPinnedTargets.IsPermission(RecoveryTargetKind),
             "A Camera Settings observation is not expected now.");
         bool initialSettingsObservation = State == CameraRecoveryState.NeedsSettingsObservation;
         Target = null;
@@ -499,18 +600,25 @@ internal sealed class CameraRecoverySession
                     "Windows Settings did not verify as the Camera privacy page. No permission claim or target was accepted.");
                 break;
             case CameraSettingsFinding.PermissionOff when observation.Target is not null:
-                if (observation.Target.AutomationId != CameraRecoveryPinnedTargets.PackagedTeamsCameraToggle
-                    || observation.Target.Kind != CameraRecoveryTargetKind.PackagedTeamsPermission
+                if (!CameraRecoveryPinnedTargets.IsPermissionTarget(
+                        observation.Target.AutomationId, observation.Target.Kind)
                     || string.IsNullOrWhiteSpace(observation.Target.ObservationId))
                 {
                     MoveTo(CameraRecoveryState.Unsupported,
-                        "The Camera Settings target did not match the pinned Teams permission control.");
+                        "The Camera Settings target did not match its verified permission scope.");
                     break;
                 }
                 Target = observation.Target;
-                RecoveryTargetKind = CameraRecoveryTargetKind.PackagedTeamsPermission;
+                RecoveryTargetKind = observation.Target.Kind;
+                globalPermissionRecovery |= RecoveryTargetKind is
+                    CameraRecoveryTargetKind.DeviceCameraPermission or CameraRecoveryTargetKind.AppCameraPermission;
                 MoveTo(CameraRecoveryState.VerifiedTarget,
-                    Mode == CameraRecoveryInteractionMode.Control
+                    RecoveryTargetKind != CameraRecoveryTargetKind.PackagedTeamsPermission
+                        ? CameraPermissionEvidence.DescribeBlock(RecoveryTargetKind)
+                            + (Mode == CameraRecoveryInteractionMode.Control
+                                ? " Review this scope, then approve this setting only."
+                                : " Choose Show me and change this setting yourself, then check again.")
+                        : Mode == CameraRecoveryInteractionMode.Control
                         ? "The exact packaged Teams permission is off. Approve the action to let MSGuide turn on only this toggle."
                         : "A current Camera Settings target was verified. Choose Show me; MSGuide will not click it.");
                 break;
@@ -519,10 +627,12 @@ internal sealed class CameraRecoverySession
                     "Camera permission appears off, but no current verified target was supplied. No highlight or click was attempted.");
                 break;
             case CameraSettingsFinding.PermissionOn:
-                MoveTo(initialSettingsObservation
+                MoveTo(initialSettingsObservation && !globalPermissionRecovery
                         ? CameraRecoveryState.AlreadyOnOrWrongCause
                         : CameraRecoveryState.PermissionObservedOn,
-                    initialSettingsObservation
+                    globalPermissionRecovery
+                        ? "Windows camera permissions are now on. Return to Teams for fresh inspection; the Teams camera action needs its own approval."
+                        : initialSettingsObservation
                         ? "Camera permission was already on before any guided change. Do not force the permission path."
                         : Mode == CameraRecoveryInteractionMode.Control
                             ? "Camera permission is observed on after the approved action. This alone does not prove the Teams camera is ready."
@@ -530,7 +640,7 @@ internal sealed class CameraRecoverySession
                 break;
             case CameraSettingsFinding.ManagedOrDisabled:
                 MoveTo(CameraRecoveryState.ManagedOrDisabled,
-                    "The camera setting appears disabled or managed. MSGuide will not override policy.");
+                    DetailOr(observation.Detail, "The camera setting appears disabled or managed. MSGuide will not override policy."));
                 break;
             case CameraSettingsFinding.StaleOrMoved:
                 MoveTo(CameraRecoveryState.StaleOrMoved,
@@ -538,7 +648,8 @@ internal sealed class CameraRecoverySession
                 break;
             default:
                 MoveTo(CameraRecoveryState.Unsupported,
-                    "Controls-only Camera Settings sensing is unavailable or unsupported. No camera-recovery screenshot was captured.");
+                    DetailOr(observation.Detail,
+                        "Controls-only Camera Settings sensing is unavailable or unsupported. No camera-recovery screenshot was captured."));
                 break;
         }
     }
@@ -551,6 +662,9 @@ internal sealed class CameraRecoverySession
                 ? "Verified target shown. Review it, then approve the single action when ready."
                 : "Verified target shown. Make the change yourself, then choose I changed it - check."
             : "The verified target could not be shown. No click was attempted.";
+        if (RecoveryTargetKind is CameraRecoveryTargetKind.DeviceCameraPermission
+                or CameraRecoveryTargetKind.AppCameraPermission)
+            Detail = CameraPermissionEvidence.DescribeBlock(RecoveryTargetKind) + " " + Detail;
     }
 
     public void RecordControlFailure(string detail) =>
@@ -560,6 +674,12 @@ internal sealed class CameraRecoverySession
     public void MarkReturnedToTeams()
     {
         Require(State == CameraRecoveryState.PermissionObservedOn, "Returning to Teams is not the next step.");
+        if (globalPermissionRecovery)
+        {
+            MoveTo(CameraRecoveryState.NeedsTeamsObservation,
+                "Camera permissions are on. Inspect Teams again; turning on its camera requires a separate approval.");
+            return;
+        }
         MoveTo(CameraRecoveryState.NeedsLocalVerification,
             "Back in Teams, run the private visual check. Permission-on alone is not camera-ready.");
     }
@@ -595,12 +715,15 @@ internal sealed class CameraRecoverySession
                     : "Teams reports the camera control on, but active camera use was not verified. Reopen the camera surface or approve a Teams restart.");
             return;
         }
-        if (result.Finding == CameraVerificationFinding.Ready && result.LocalVerifierPassed)
+        if (result.Finding is CameraVerificationFinding.Ready or CameraVerificationFinding.AlreadyReady
+            && result.LocalVerifierPassed)
         {
             MoveTo(result.IsFixture ? CameraRecoveryState.FixtureComplete : CameraRecoveryState.Ready,
                 result.IsFixture
                     ? "Fixture complete: the simulated verifier passed. Real camera-ready was not claimed."
-                    : "Locally verified: the supplied Teams camera readiness check passed.");
+                    : result.Finding == CameraVerificationFinding.AlreadyReady
+                        ? "Already working: Teams reports camera on and Windows reports active camera use. No change was needed."
+                        : "Locally verified: the supplied Teams camera readiness check passed.");
             return;
         }
 
@@ -608,7 +731,7 @@ internal sealed class CameraRecoverySession
         MoveTo(result.Finding == CameraVerificationFinding.Unsupported
                 ? CameraRecoveryState.Unsupported
                 : CameraRecoveryState.UnresolvedAfterPermission,
-            result.Finding == CameraVerificationFinding.Ready
+            result.Finding is CameraVerificationFinding.Ready or CameraVerificationFinding.AlreadyReady
                 ? "The verifier did not pass. Camera-ready was not claimed."
                 : result.Finding == CameraVerificationFinding.Unsupported
                     ? "The connected local Teams verifier does not support this state. Camera-ready was not claimed."

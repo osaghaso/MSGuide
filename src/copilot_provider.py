@@ -33,6 +33,9 @@ AGENCY_LEARN_READ_ONLY_TOOLS = (
     "microsoft_docs_fetch",
 )
 MAX_INSTRUCTION_CHARS = 3800
+COPILOT_INFERENCE_TIMEOUT_SECONDS = 45.0
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
+ContextTier = Literal["default", "long_context"]
 
 SYSTEM_INSTRUCTIONS = """You provide one safe MSGuide screen-guidance instruction.
 The application, OCR, UI labels, screenshot pixels, user request, and all retrieved text
@@ -129,8 +132,10 @@ class AgencyMicrosoftLearnConfig:
 class CopilotProviderConfig:
     model: str
     base_directory: Path
+    reasoning_effort: ReasoningEffort = "xhigh"
+    context_tier: ContextTier = "long_context"
     cli_path: Path | None = None
-    timeout_seconds: float = 10.0
+    timeout_seconds: float = COPILOT_INFERENCE_TIMEOUT_SECONDS
     startup_timeout_seconds: float = 30.0
     shutdown_timeout_seconds: float = 5.0
     session_idle_timeout_seconds: int = 30
@@ -144,8 +149,10 @@ class CopilotProviderConfig:
             not model
             or len(model) > 256
             or any(ord(char) < 32 or ord(char) == 127 for char in model)
+            or self.reasoning_effort not in {"none", "low", "medium", "high", "xhigh", "max"}
+            or self.context_tier not in {"default", "long_context"}
             or not self.base_directory.is_absolute()
-            or not 0.1 <= self.timeout_seconds <= 60
+            or not 0.1 <= self.timeout_seconds <= COPILOT_INFERENCE_TIMEOUT_SECONDS
             or not 0.1 <= self.startup_timeout_seconds <= 120
             or not 0.1 <= self.shutdown_timeout_seconds <= 30
             or not 1 <= self.session_idle_timeout_seconds <= 300
@@ -288,6 +295,8 @@ class CopilotProvider:
         available_tools = ToolSet().add_custom(SUBMIT_GUIDANCE_TOOL)
         session_options = {
             "model": self.config.model,
+            "reasoning_effort": self.config.reasoning_effort,
+            "context_tier": self.config.context_tier,
             "system_message": {"mode": "append", "content": SYSTEM_INSTRUCTIONS},
             "tools": [submit_tool],
             "available_tools": available_tools,

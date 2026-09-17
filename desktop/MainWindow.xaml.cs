@@ -13,7 +13,7 @@ public partial class MainWindow : Window
 {
     private ApiClient? api;
     private readonly OverlayWindow overlay = new();
-    private readonly SpeechService speech = new();
+    private readonly SpeechService speech;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(200) };
     private CancellationTokenSource? operation;
     private Snapshot? snapshot;
@@ -26,30 +26,39 @@ public partial class MainWindow : Window
     private sealed record Highlight(WindowChoice Window, Native.RECT Rect, DateTimeOffset CapturedAt, double[] Box)
     { public bool HasShown { get; set; } }
 
-    public MainWindow()
+    public MainWindow() : this(new SpeechService()) { }
+
+    internal MainWindow(SpeechService speech)
     {
+        this.speech = speech;
         InitializeComponent();
+        MicrophonePicker.ItemsSource = new[] { MicrophoneChoice.Default };
+        MicrophonePicker.SelectedItem = MicrophoneChoice.Default;
         ConfigureScreenShareStatus();
+        ConfigureProductShell();
         InitializeCameraRecovery();
-        speech.Transcribed += text => Dispatcher.BeginInvoke(() =>
-        {
-            if (!closing && speech.Listening)
-            {
-                PromptBox.Text = (PromptBox.Text + " " + text).Trim();
-                PromptBox.CaretIndex = PromptBox.Text.Length;
-            }
-        });
-        speech.StatusChanged += status => Dispatcher.BeginInvoke(() =>
+        speech.Transcribed += ApplyTranscript;
+        speech.StatusChanged += status =>
         {
             if (closing) return;
             SpeechText.Text = status;
-            MicButton.Content = speech.Listening ? "Stop microphone" : "Start microphone";
-        });
+            AutomationProperties.SetHelpText(SpeechText, status);
+            if (!speech.Listening && !speech.Finishing) replaceVoiceDraft = false;
+            UpdatePromptSubmissionUi();
+        };
+        speech.PreviewChanged += text =>
+        {
+            if (closing) return;
+            SpeechPreviewText.Text = string.IsNullOrWhiteSpace(text) ? "" : $"Hearing: {text}";
+            SpeechPreviewText.Visibility = string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
+        };
+        speech.AudioLevelChanged += level => { if (!closing) SpeechInputLevel.Value = level; };
         SourceInitialized += InitializeNative;
         Loaded += async (_, _) =>
         {
             loaded = true;
             RefreshWindows();
+            RefreshMicrophones();
             timer.Tick += Timer_Tick;
             timer.Start();
             PromptBox.Focus();
@@ -96,7 +105,7 @@ public partial class MainWindow : Window
         ScreenShareText.SetResourceReference(TextBlock.ForegroundProperty,
             shareable ? "WarningBrush" : "MutedTextBrush");
         ScreenSharePill.ToolTip = shareable
-            ? "Demo mode: MSGuide and its guidance overlay can appear in full-screen sharing."
+            ? "MSGuide and its guidance overlay can appear in full-screen sharing."
             : "Privacy default: MSGuide and its guidance overlay are excluded from screen capture.";
     }
 
@@ -190,6 +199,7 @@ public partial class MainWindow : Window
     private void Pause()
     {
         CancelWork();
+        ResetScreenContextUi();
         speech.Stop();
         PromptBox.Clear();
         DraftBox.Clear();
@@ -210,21 +220,33 @@ public partial class MainWindow : Window
 
     private async Task CheckHealth()
     {
-        var ct = BeginWork();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var ct = timeout.Token;
         long mine = generation;
+        CheckServiceButton.IsEnabled = false;
+        SetConnectionStatus("Checking the local service...");
         try
         {
             api ??= new ApiClient();
-            StatusText.Text = "Checking the local service…";
             var health = await api.Health(ct);
-            if (mine != generation) return;
+            if (closing) return;
             if (health.Status != "ok" || health.Version != "0.2.0" || health.Mode is not ("demo" or "model"))
                 throw new InvalidOperationException("Incompatible service. Expected healthy API v0.2.0 with demo/model mode.");
             ModeText.Text = ModeLabel(health.Mode);
-            StatusText.Text = $"Connected · {health.Mode} · v{health.Version} · no capture active";
+            SetConnectionStatus($"Connected · {health.Mode} · v{health.Version}");
+            if (mine == generation && cameraRecovery.CanStart && snapshot is null && !sending)
+                StatusText.Text = "Ready. Type or speak a question to get started.";
         }
-        catch (OperationCanceledException) { if (mine == generation) StatusText.Text = "Service check cancelled or timed out."; }
-        catch (Exception ex) { if (mine == generation) ShowError(ex); }
+        catch (OperationCanceledException)
+        {
+            if (!closing) SetConnectionStatus("Connection check cancelled or timed out.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Net.Http.HttpRequestException
+            or JsonException or ArgumentException)
+        {
+            if (!closing) SetConnectionStatus("The guidance service is unavailable or incompatible. Local camera checks and dictation remain available.");
+        }
+        finally { if (!closing) CheckServiceButton.IsEnabled = true; }
     }
 
     private static string ModeLabel(string mode) => mode == "demo"
@@ -234,7 +256,7 @@ public partial class MainWindow : Window
     private async void Capture_Click(object sender, RoutedEventArgs e)
     {
         if (WindowPicker.SelectedItem is not WindowChoice window)
-        { StatusText.Text = "Choose a visible window first. Open demo for the supported synthetic workflow."; return; }
+        { StatusText.Text = "Choose the visible window you want help with before capturing it."; return; }
         var ct = BeginWork();
         long mine = generation;
         speech.Stop();
@@ -282,6 +304,7 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException("Focus changed to another application. Response discarded; capture again.");
             ModeText.Text = ModeLabel(response.Mode);
             AnswerText.Text = response.Instruction;
+            ShowPromptFeedback("Guidance is ready in Screen context. Review the next step below.");
             SpeakButton.IsEnabled = true;
             RenderCitations(response.Citations);
             StatusText.Text = response.Status switch
@@ -327,7 +350,7 @@ public partial class MainWindow : Window
     private void Timer_Tick(object? sender, EventArgs e)
     {
         ValidateDemoTask();
-        if (speech.Listening && DateTimeOffset.UtcNow - microphoneStarted > TimeSpan.FromSeconds(30)) speech.StopListening();
+        if (speech.Listening && DateTimeOffset.UtcNow - microphoneStarted > TimeSpan.FromSeconds(30)) speech.FinishListening();
         // Snapshot/outline checks below inspect identity/bounds only. ValidateDemoTask above
         // also checks Notepad tab metadata; neither path captures pixels or reads editor text here.
         if (snapshot is not null && !snapshot.Valid())
@@ -388,9 +411,24 @@ public partial class MainWindow : Window
     private void Prompt_Changed(object sender, TextChangedEventArgs e)
     {
         if (!loaded) return;
-        bool cameraIntent = CameraRecoverySession.IsCameraHelpIntent(PromptBox.Text);
+        bool cancelledSpeech = !applyingTranscript && (speech.Listening || speech.Finishing);
+        if (cancelledSpeech) speech.Stop();
+        promptRequestActive = false;
+        bool recoveryWasActive = !cameraRecovery.CanSelectMode || cameraRecoveryBusy;
         CancelWork();
-        if (cameraIntent) StartCameraRecovery(fromPrompt: true);
+        ResetScreenContextUi();
+        ResetCameraRecovery();
+        StatusText.Text = cancelledSpeech
+            ? "Dictation cancelled because you edited the question. Your edits are retained."
+            : recoveryWasActive
+                ? "Previous task stopped. Review your new question before asking; previous approval was cleared."
+            : "Question draft updated. Review it, then select Ask MSGuide; previous approval was cleared.";
+        ShowPromptFeedback(cancelledSpeech ? StatusText.Text
+            : applyingTranscript
+                ? "Voice draft updated. Review it before selecting Ask MSGuide."
+                : "Draft changed. Select Ask MSGuide or press Enter to submit; previous approval was cleared.");
+        UpdateCameraRecoveryUi();
+        UpdatePromptSubmissionUi();
     }
     private void Approval_Changed(object sender, RoutedEventArgs e)
     {
@@ -404,15 +442,19 @@ public partial class MainWindow : Window
     private void Exit_Click(object sender, RoutedEventArgs e) => Close();
     private void Mic_Click(object sender, RoutedEventArgs e)
     {
-        CancelWork(cancelCameraRecovery: false);
-        microphoneStarted = DateTimeOffset.UtcNow;
-        speech.Toggle();
+        if (speech.Listening) speech.FinishListening();
+        else StartVoiceDraft(append: false);
     }
     private void StopSpeech_Click(object sender, RoutedEventArgs e)
     {
-        speech.Stop();
+        bool cancelling = speech.Finishing;
+        if (cancelling) speech.StopListening();
+        else speech.FinishListening();
+        speech.StopSpeaking();
         CancelWork(cancelCameraRecovery: false);
-        StatusText.Text = "Speech and pending generic guidance stopped. Camera recovery, if active, remains guide-only.";
+        StatusText.Text = cancelling
+            ? "Local transcription cancelled. Existing text is retained; no request was submitted."
+            : "Audio stop requested. Review the transcript before asking; camera mode and approval are unchanged.";
     }
     private void Speak_Click(object sender, RoutedEventArgs e) => speech.Speak(AnswerText.Text);
 

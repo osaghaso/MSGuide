@@ -29,7 +29,7 @@ The endpoint must accept the chat-completions-style fields `model`, `messages`, 
 
 The response must have exactly one stopped assistant choice containing a JSON object with `instruction`, `status`, and optional `targetIndex`. Unknown model-output fields, tools, URLs/citations, duplicate JSON keys, invalid coordinates/indexes, refusal responses, and oversized responses fail closed. Targets come only from supplied UIA candidates with confidence at least 0.8. Without a reliable UIA target, guidance may be non-targeted; the model cannot draw an invented box.
 
-HTTP redirects, automatic retries, and environment proxies are disabled. The call is bounded to ten seconds overall; socket timeouts are eight seconds, with three seconds for connecting. Failures return generic errors without exposing provider response bodies or credentials. The client does not implement provider-specific authentication flows or tool execution.
+HTTP redirects, automatic retries, and environment proxies are disabled. The OpenAI-compatible call is bounded to ten seconds overall; socket timeouts are eight seconds, with three seconds for connecting. Failures return generic errors without exposing provider response bodies or credentials. The client does not implement provider-specific authentication flows or tool execution.
 
 ## What is shared
 
@@ -43,8 +43,9 @@ To return to local-only guidance, stop the desktop/launcher, set `MSGUIDE_GUIDAN
 
 `src/copilot_provider.py` provides an optional `CopilotProvider` with the same
 `async provider(prompt, Observation) -> GuidanceResult` callable seam. It is
-not selected by the launcher yet, so deterministic demo guidance remains
-unchanged. `OpenAICompatibleProvider` remains available.
+selected by the launcher's `-Copilot` switch; deterministic demo guidance
+remains the default without that switch. `OpenAICompatibleProvider` remains
+available.
 
 Clean-machine setup requires Python 3.11+, a GitHub Copilot entitlement (unless
 the SDK is configured separately for BYOK), and:
@@ -67,7 +68,9 @@ the SDK runtime download cache, pass its absolute executable path:
 from pathlib import Path
 
 config = CopilotProviderConfig(
-    model="gpt-5",
+    model="gpt-6-astra",
+    reasoning_effort="xhigh",
+    context_tier="long_context",
     base_directory=Path(r"C:\ProgramData\MSGuide\copilot"),
     cli_path=Path(r"C:\path\to\copilot.exe"),
 )
@@ -80,6 +83,14 @@ passes it through `RuntimeConnection.for_stdio(path=...)`, which bypasses the
 bundled runtime download/install path and avoids concurrent cache extraction.
 Do not point it at `agency copilot`; Agency integration is the separately
 bounded MCP server described below.
+
+The launcher pins GPT-6 Astra with `xhigh`, the highest reasoning effort that
+model currently advertises, and `long_context`. On the validated Copilot
+entitlement, the SDK reported a 1,178,000-token context window. GPT-5.6 Sol also
+remains available and supports `max`, but its reported context window is
+1,050,000 tokens. Override `MSGUIDE_COPILOT_MODEL`,
+`MSGUIDE_COPILOT_REASONING_EFFORT`, and `MSGUIDE_COPILOT_CONTEXT_TIER` only with
+values supported by the selected model.
 
 An integrator must:
 
@@ -99,6 +110,9 @@ Each call creates one bounded, isolated SDK session while reusing the persistent
 `CopilotClient` runtime process. Empty mode, an explicit tool allowlist,
 disabled session store/memory/infinite sessions, and a deny-by-default
 permission handler prevent shell, filesystem, edit, and built-in tool access.
+SDK inference is bounded to 45 seconds, the API route to 50 seconds, and the
+desktop HTTP request to 55 seconds. The API still rejects a response when its
+observation has become more than 60 seconds old; there are no automatic retries.
 Only the locally handled terminal `submit_guidance` tool can produce guidance.
 It accepts exactly `observationId`, `stepId`, allowlisted `targetId`,
 `instruction`, and allowlisted `citationIds`; output cannot set coordinates,
