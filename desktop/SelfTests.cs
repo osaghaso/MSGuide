@@ -88,6 +88,16 @@ internal static class SelfTests
         placed = CompanionPlacement.NearCursor(
             new Native.POINT { X = -1910, Y = 10 }, workArea, 390, 154);
         Check(placed.Left == -1888 && placed.Top == 22);
+        foreach (double scale in new[] { 1d, 1.5d, 2d })
+        {
+            int size = (int)(48 * scale);
+            var targetPoint = new Native.POINT { X = -900, Y = -400 };
+            placed = CompanionPlacement.NearCursor(targetPoint,
+                new Native.RECT { Left = -1920, Top = -1080, Right = 0, Bottom = 0 },
+                size, size, -size / 2, -size / 2);
+            Check(placed.Width == size && placed.Height == size
+                && placed.Left + size / 2 == targetPoint.X && placed.Top + size / 2 == targetPoint.Y);
+        }
         Check(CursorCompanionWindow.TaskText(
             ["✓ 1. invoke “Open”", "✓ 2. select “Details”"],
             "Thinking about action 3…") ==

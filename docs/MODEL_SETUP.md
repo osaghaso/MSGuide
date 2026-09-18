@@ -201,7 +201,10 @@ keyboard, shell, or unknown-outcome retry fallback exists.
 Screenshot bytes are attached only when approved `Observation.imageBase64` is
 present. The desktop sends an initial, same-resource automatic refresh, or explicitly reviewed replanning image,
 then uses fresh local UIA-only steps/checks instead of another inference per action.
-Generic file/site document surfaces without proven resource identity stop for
+Execution first presents the grounded target in the foreground with the Windows
+marker; it never falls back to background input. A supported Edge/Chrome page can
+be scoped by a unique browser-chrome address checked locally, not by a URL
+claimed in web content. Generic file/site document surfaces without proven resource identity stop for
 handoff rather than speculative multi-step navigation. No screenshot or task
 history file is created. This removes repeated image work and foreground
 teardown latency, not remote inference or per-plan session creation latency.

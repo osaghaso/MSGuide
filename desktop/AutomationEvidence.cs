@@ -115,7 +115,8 @@ internal static class AutomationEvidence
         try
         {
             using var process = Process.GetProcessById((int)window.ProcessId);
-            return process.ProcessName is "msedge" or "chrome";
+            return process.ProcessName.Equals("msedge", StringComparison.OrdinalIgnoreCase)
+                || process.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase);
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
             or System.ComponentModel.Win32Exception)
@@ -162,6 +163,7 @@ internal static class AutomationEvidence
         int visited = 0, documents = 0, addresses = 0;
         bool incomplete = false;
         string? resource = null;
+        AutomationElement? addressControl = null;
         void Walk(AutomationElement node, int depth)
         {
             token.ThrowIfCancellationRequested();
@@ -183,6 +185,7 @@ internal static class AutomationEvidence
                     && IsBrowserAddressControl("edit", field.Cached.Name, insideDocument: false))
                 {
                     addresses++;
+                    addressControl = field;
                     if (!field.Current.IsPassword
                         && field.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern)
                         && pattern is ValuePattern address)
@@ -198,8 +201,16 @@ internal static class AutomationEvidence
             }
         }
         Walk(root, 0);
-        return !incomplete && addresses == 1 && documents == 1 && window.Matches()
-            && Native.GetWindowRect(window.Handle, out var after) && rect.Same(after) ? resource : null;
+        token.ThrowIfCancellationRequested();
+        if (incomplete || clock.ElapsedMilliseconds >= ScanMilliseconds
+            || addresses != 1 || documents != 1 || addressControl is null || resource is null
+            || !window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
+            return null;
+        var current = addressControl.Current;
+        return !current.IsPassword && !current.IsOffscreen && current.IsEnabled
+            && addressControl.TryGetCurrentPattern(ValuePattern.Pattern, out var lastPattern)
+            && lastPattern is ValuePattern last
+            && BrowserResourceId(window, last.Current.Value) == resource ? resource : null;
     }
 
     internal static bool ResourceMatches(WindowChoice window, string expected, CancellationToken token) =>
@@ -230,7 +241,7 @@ internal static class AutomationEvidence
 
     internal static ActionMetadata ReadAction(AutomationElement element, bool cachedPatterns = false)
     {
-        var current = element.Current;
+        var current = cachedPatterns ? element.Cached : element.Current;
         if (current.IsPassword || current.IsOffscreen || !current.IsEnabled) return new(null);
         bool TryPattern(AutomationPattern pattern, AutomationProperty available, out object value)
         {
@@ -241,6 +252,8 @@ internal static class AutomationEvidence
         if (TryPattern(ValuePattern.Pattern, AutomationElement.IsValuePatternAvailableProperty, out var valuePattern)
             && valuePattern is ValuePattern value && !value.Current.IsReadOnly)
         {
+            var live = element.Current;
+            if (live.IsPassword || live.IsOffscreen || !live.IsEnabled) return new(null);
             string text = value.Current.Value;
             // Full-field replacement only. Large/document editors need a dedicated adapter.
             return text.Length <= 1000

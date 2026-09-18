@@ -266,6 +266,24 @@ internal static class CaptureTests
             var rebound = await Task.Run(() => AutomationEvidence.FindUniqueTarget(window, snapshot.Rect,
                 element.TargetId!, element.Label, element.AutomationId, ct, snapshot.ResourceId), ct);
             Require(rebound is not null);
+            var marker = new CursorCompanionWindow();
+            var outline = new OverlayWindow();
+            try
+            {
+                nint foreground = Native.GetForegroundWindow();
+                outline.PointAt(snapshot.Rect, element.Box, showBadge: false);
+                Require(marker.ShowActionTarget(snapshot.Rect, element.Box));
+                await Idle(ct);
+                var targetRect = Safety.PhysicalTarget(snapshot.Rect, element.Box);
+                Require(outline.IsVisible && marker.IsVisible && !marker.IsHitTestVisible
+                    && Native.GetForegroundWindow() == foreground
+                    && Native.GetWindowRect(new WindowInteropHelper(marker).Handle, out var markerRect)
+                    && markerRect.Left <= targetRect.X + targetRect.Width / 2
+                    && markerRect.Right >= targetRect.X + targetRect.Width / 2
+                    && markerRect.Top <= targetRect.Y + targetRect.Height / 2
+                    && markerRect.Bottom >= targetRect.Y + targetRect.Height / 2);
+            }
+            finally { marker.Stop(); outline.Close(); }
             Require(Native.GetForegroundWindow() != handle);
             var result = await DesktopAction.ExecuteAsync(window, snapshot.Rect, snapshot.CapturedAt,
                 target, ct, snapshot.ResourceId);

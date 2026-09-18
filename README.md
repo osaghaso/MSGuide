@@ -47,6 +47,17 @@ An approved generic observation requests a structured **plan segment**: up to **
 
 A task retains its original request, plan/cursor, task/step IDs, last 16 action outcomes, and bounded clarification text in memory. Repeated controls are allowed on progressed states; every step is uniquely rebound locally and its native target/state is checked again. Deferred writes require an empty writable non-password field; observed writes require the unchanged reviewed value digest. Unknown outcomes and cancelled queued work cannot resume. Generic goal completion remains **not independently verified**, even after observed control effects and a model completion suggestion.
 
+The normal hotkey remains **Ctrl+Alt+M**. Other keys require an explicit
+`MSGUIDE_HOTKEY` override; they are not a new default. Close an older MSGuide copy
+before relaunching an updated build. If registration conflicts, the new copy
+keeps Details visible instead of hiding with no usable hotkey.
+
+Generic Fix-mode actions are presented **in the foreground**: the target is
+outlined and the Windows-logo marker moves onto it before invocation. The app
+can return focus from its own companion to the approved window, but never steals
+focus from an unrelated application or falls back to background input. Switching
+away, cancellation, or a stale target prevents the action.
+
 The launcher creates an ephemeral local token, writes no token to disk, and removes model credentials from the desktop child's environment. On exit it stops its owned server. Bounded rotating diagnostics under `%LOCALAPPDATA%\MSGuide\logs` connect task/step IDs with capture, guidance, invocation, verification, and stop timings; they exclude prompts, labels, typed values, screenshots, and model prose.
 
 - `-Port 8766`: choose a different free port (1024–65535); existing processes are never stopped to free a port.
@@ -109,7 +120,13 @@ Editing the prompt replaces the old task. Changing the selected window or moving
 
 The initial plan request and an explicitly requested replan can share an approved screenshot; steps inside the segment and post-action checks stay **local UIA-only**, reusing suitable post-action evidence for the next binding. Verification retries observations, not actions: up to six reads within five seconds. Semantic actions require their expected effect; only `invoke` can use a stable screen change, which is not causal or goal proof. Logical `controlId` survives label/position changes for verification; the separate `targetId` still binds the exact reviewed state before invocation.
 
-Queued execution requires a stable selected-window resource scope. Caption changes pause it; generic UIA document trees do not establish a file/site identity, so they require manual/resource handoff rather than automatic multi-step navigation. New windows are not selected automatically. SDK sessions remain isolated, and remaining plan/history is untrusted context, not cached execution authority.
+Queued execution requires a stable selected-window resource scope. Supported English Microsoft Edge and Chrome windows can establish a page scope from one visible HTTP(S) address control in browser chrome, outside page documents, with one visible document surface. The address is hashed locally and rechecked before actions; ambiguous, unsupported, or changed page identity still stops execution. Other document trees without proven file/site identity require handoff. New windows are not selected automatically. SDK sessions remain isolated, and remaining plan/history is untrusted context, not cached execution authority.
+
+UIA inspection caches bounded per-node properties and prioritizes actionable
+controls plus scope markers in the 200-element export. Shortening decorative
+text/context alone no longer disables an otherwise complete control scan.
+Actual traversal/provider failures or too many action controls still fail
+closed. Camera diagnosis retains its stricter complete-context requirement.
 
 ## Voice
 

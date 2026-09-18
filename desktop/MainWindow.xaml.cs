@@ -158,8 +158,13 @@ public partial class MainWindow : Window
 
     public void StartCompanionMode()
     {
-        Hide();
         companion.Start();
+        if (hotkeyRegistered) Hide();
+        else
+        {
+            ShowDetailsNearCursor();
+            StatusText.Text = HotkeyText.Text;
+        }
     }
 
     private void ShowDetailsNearCursor()
@@ -710,10 +715,10 @@ public partial class MainWindow : Window
             token.ThrowIfCancellationRequested();
             if (!CurrentWork(mine, token) || Native.GetForegroundWindow() != approved.Window.Handle) return false;
             highlight = approved;
-            overlay.PointAt(approved.Rect, approved.Target.Box);
+            bool markerShown = companion.ShowActionTarget(approved.Rect, approved.Target.Box);
+            overlay.PointAt(approved.Rect, approved.Target.Box, showBadge: !markerShown);
             if (!overlay.IsVisible) return false;
             approved.HasShown = true;
-            companion.HideForAction();
             DiagnosticLog.Record("screen_action_presented", new
             { targetId = approved.Target.TargetId, action = approved.Target.Action, foreground = true });
             await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);

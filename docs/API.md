@@ -41,7 +41,7 @@ Session creation returns `sessionId` and `expiresAt`. Guidance requires:
 | `observation.ocrText` | Required text, at most 16000 characters; desktop supplies UIA names, not pixel OCR. |
 | `observation.elements` | Required list, at most 200 entries: `role`, `label`, `box`, `confidence`; optional strict evidence is described below. |
 | `observation.imageBase64` | Optional raw canonical base64 PNG, not a data-URL string. Omit unless pixel sharing was approved. |
-| `observation.automationComplete` | Strict boolean; an incomplete controls inspection cannot authorize generic execution. |
+| `observation.automationComplete` | Strict boolean for the controls inspection; traversal/provider failures or omitted action controls cannot authorize generic execution. The desktop may shorten non-action context while retaining all inspected action controls. |
 | `observation.resourceId` | Optional opaque local resource-scope ID. Required for queued desktop execution; absence still permits descriptive guidance. |
 | `planSegments` | Strict boolean, default `false` for legacy clients. The desktop sends `true`; a missing plan then fails explicitly rather than silently returning one click. Mutually exclusive with camera recovery. |
 | `cameraRecovery` | Optional deterministic Teams camera-recovery request. Omit for legacy/demo guidance. |
@@ -152,11 +152,13 @@ desktop resolves each against fresh complete evidence, requiring exactly one
 actionable match and a unique logical identity before creating a fresh target token.
 
 The desktop reuses suitable post-action evidence for the next local binding.
-Routine expected changes do not cause another model call. It retains remaining
-steps across batch checkpoints; missing/changed targets and resource boundaries
+Routine expected changes do not cause another model call. It runs retained
+steps continuously; missing/changed targets and resource boundaries
 pause for explicit review/replanning. New windows are not selected, permissions
 are not granted, and external resources are not fetched automatically. Generic
-document trees without a proven file/site identity require handoff; scope/caption
+document trees without a proven file/site identity require handoff. Supported
+Edge/Chrome windows can provide a locally hashed page identity from a unique
+browser-chrome HTTP(S) address and visible document surface; scope/address
 changes cannot authorize the rest of an old plan. Guide mode remains non-executing,
 including when approved partial text/images can support a descriptive plan.
 

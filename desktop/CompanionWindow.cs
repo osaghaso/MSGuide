@@ -77,10 +77,18 @@ internal static class CompanionPlacement
     {
         rect = default;
         if (!Native.GetCursorPos(out var cursor)) return false;
-        var monitor = Native.MonitorFromPoint(cursor, 2);
+        return TryAtPoint(cursor, width, height, out rect, offsetX, offsetY);
+    }
+
+    internal static bool TryAtPoint(Native.POINT point, int width, int height, out Native.RECT rect,
+        int offsetX, int offsetY)
+    {
+        rect = default;
+        var monitor = Native.MonitorFromPoint(point, 0);
+        if (monitor == 0) return false;
         var info = new Native.MONITORINFO { Size = Marshal.SizeOf<Native.MONITORINFO>() };
         if (!Native.GetMonitorInfo(monitor, ref info)) return false;
-        rect = NearCursor(cursor, info.Work, width, height, offsetX, offsetY);
+        rect = NearCursor(point, info.Work, width, height, offsetX, offsetY);
         return true;
     }
 }
@@ -97,6 +105,7 @@ internal sealed class CursorCompanionWindow : Window
     private readonly List<string> taskActions = [];
     private string taskStatus = "";
     private bool expanded;
+    private Native.POINT? actionPoint;
     private double currentX = double.NaN;
     private double currentY = double.NaN;
     private nint Handle => new WindowInteropHelper(this).Handle;
@@ -190,6 +199,7 @@ internal sealed class CursorCompanionWindow : Window
 
     public void ShowIdle()
     {
+        actionPoint = null;
         autoHide.Stop();
         expanded = false;
         bubble.Visibility = Visibility.Collapsed;
@@ -202,6 +212,7 @@ internal sealed class CursorCompanionWindow : Window
 
     public void ShowProcessing()
     {
+        actionPoint = null;
         autoHide.Stop();
         expanded = true;
         message.Text = "Thinking about the app you invoked MSGuide from...";
@@ -247,6 +258,7 @@ internal sealed class CursorCompanionWindow : Window
 
     private void ShowTask()
     {
+        actionPoint = null;
         autoHide.Stop();
         expanded = true;
         message.MaxHeight = 250;
@@ -267,6 +279,7 @@ internal sealed class CursorCompanionWindow : Window
 
     public void ShowResponse(string text)
     {
+        actionPoint = null;
         expanded = true;
         activityRing.Visibility = Visibility.Collapsed;
         message.MaxHeight = 126;
@@ -286,13 +299,43 @@ internal sealed class CursorCompanionWindow : Window
         if (!tracking.IsEnabled) tracking.Start();
     }
 
-    private void Position()
+    public bool ShowActionTarget(Native.RECT window, double[] box)
     {
+        if (!Safety.ValidBox(box)) return false;
+        var target = Safety.PhysicalTarget(window, box);
+        actionPoint = new Native.POINT
+        {
+            X = (int)Math.Round(target.X + target.Width / 2),
+            Y = (int)Math.Round(target.Y + target.Height / 2)
+        };
+        autoHide.Stop();
+        expanded = false;
+        bubble.Visibility = Visibility.Collapsed;
+        activityRing.Visibility = Visibility.Visible;
+        Width = Height = 48;
+        ShowCompanion();
+        return IsVisible && Position();
+    }
+
+    private bool Position()
+    {
+        if (actionPoint is { } point)
+        {
+            var dpi = VisualTreeHelper.GetDpi(this);
+            int markerWidth = (int)Math.Ceiling(48 * dpi.DpiScaleX);
+            int markerHeight = (int)Math.Ceiling(48 * dpi.DpiScaleY);
+            if (!CompanionPlacement.TryAtPoint(point, markerWidth, markerHeight, out var anchored,
+                -markerWidth / 2, -markerHeight / 2)) return false;
+            currentX = anchored.Left;
+            currentY = anchored.Top;
+            return Native.SetWindowPos(Handle, new nint(-1), anchored.Left, anchored.Top,
+                anchored.Width, anchored.Height, 0x10);
+        }
         int width = expanded ? 390 : 48;
         int height = expanded ? (int)Height : 48;
         int offsetX = expanded ? 22 : 35;
         int offsetY = expanded ? 12 : 25;
-        if (!CompanionPlacement.TryCurrent(width, height, out var rect, offsetX, offsetY)) return;
+        if (!CompanionPlacement.TryCurrent(width, height, out var rect, offsetX, offsetY)) return false;
         if (double.IsNaN(currentX) || Math.Abs(rect.Left - currentX) > 900 || Math.Abs(rect.Top - currentY) > 900)
         {
             currentX = rect.Left;
@@ -304,7 +347,7 @@ internal sealed class CursorCompanionWindow : Window
             currentX += (rect.Left - currentX) * follow;
             currentY += (rect.Top - currentY) * follow;
         }
-        Native.SetWindowPos(Handle, new nint(-1), (int)Math.Round(currentX), (int)Math.Round(currentY),
+        return Native.SetWindowPos(Handle, new nint(-1), (int)Math.Round(currentX), (int)Math.Round(currentY),
             rect.Width, rect.Height, 0x10);
     }
 
@@ -560,7 +603,7 @@ internal sealed class CompanionShell
         prompt.Invoke(draft);
     }
     public void ShowProcessing() { if (active) cursor.ShowProcessing(); }
-    public void HideForAction() { if (active) cursor.Hide(); }
+    public bool ShowActionTarget(Native.RECT window, double[] box) => active && cursor.ShowActionTarget(window, box);
     public void ShowResponse(string text) { if (active) cursor.ShowResponse(text); }
     public void BeginTask() { if (active) cursor.BeginTask(); }
     public void ShowTaskAction(int number, string action) { if (active) cursor.ShowTaskAction(number, action); }

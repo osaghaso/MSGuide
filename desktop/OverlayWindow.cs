@@ -7,6 +7,7 @@ namespace MSGuide.Desktop;
 
 public sealed class OverlayWindow : Window
 {
+    private readonly Border badge;
     public nint Handle => new WindowInteropHelper(this).Handle;
 
     public OverlayWindow()
@@ -30,7 +31,7 @@ public sealed class OverlayWindow : Window
             CornerRadius = new CornerRadius(5),
             Background = Brushes.Transparent
         });
-        var badge = new Border
+        badge = new Border
         {
             Width = 28,
             Height = 28,
@@ -70,9 +71,10 @@ public sealed class OverlayWindow : Window
         return 0;
     }
 
-    public void PointAt(Native.RECT captureRect, double[] box)
+    public void PointAt(Native.RECT captureRect, double[] box, bool showBadge = true)
     {
         if (!Safety.ValidBox(box)) { Hide(); return; }
+        badge.Visibility = showBadge ? Visibility.Visible : Visibility.Collapsed;
         var target = Safety.PhysicalTarget(captureRect, box);
         // Native position/size are physical pixels. WPF only draws the border in local DIPs;
         // no desktop-coordinate division by a single primary-monitor scale.

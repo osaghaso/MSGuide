@@ -39,7 +39,7 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 - Full window bounds use physical coordinates, matching the bitmap and normalized UIA boxes. PNGs are limited to 1280 pixels on the longest side and 2,000,000 bytes. Large physical allocations are rejected. Captures stay in memory; the application writes no screenshots, transcripts, tokens, UI text, prompts, or model output to disk. Bounded rotating operational diagnostics contain only timestamps, endpoints, dimensions/counts, lifecycle stages, status/error codes, exception types, and correlation IDs under `%LOCALAPPDATA%\MSGuide\logs`. .NET/WPF may retain temporary managed/native copies until collection; this is not a forensic memory-erasure guarantee.
 - UI Automation names are collected with bounded traversal, not pixel OCR. Offscreen/password subtrees and disabled target controls are excluded. **This is not image redaction**: screenshot pixels and other accessible text can still contain passwords or sensitive information. There is no redaction editor. Do not approve sensitive content; discard it. A backend model may process approved content remotely even though the client connects only to loopback.
 - Some GPU, elevated, protected, minimized, or unresponsive windows cannot be captured. Blank/uniform images are rejected heuristically (not guaranteed detection). UIA can be unavailable or incomplete. Inspect the preview rather than assuming capture success means all pixels are valid.
-- Capture/UIA calls can block inside native providers. Capture callers wait at most 30 seconds; action callers at most **eight seconds**, including target lookup. Lookup is a selected-root raw-tree walk, capped at 800 nodes, depth 32, and three seconds between native calls; an incomplete search cannot claim a unique match. At most one native action is outstanding. Cancellation before invocation seals the invocation gate; after invocation starts, timeout/cancellation means **unknown outcome**, not failure-to-act. Late returns never advance a task, and new actions/captures are blocked while the worker remains active. Cooperative tokens cannot interrupt a hung COM call: permanent hangs require restarting MSGuide; process isolation remains deferred.
+- Capture/UIA calls can block inside native providers. Capture callers wait at most 30 seconds; action callers at most **eight seconds**, including target lookup. Generic inspection and lookup use privacy-first per-node caches and a selected-root raw-tree walk, capped at 2000 nodes, depth 64, and three seconds between native calls; an incomplete search cannot claim a unique match. At most one native action is outstanding. Cancellation before invocation seals the invocation gate; after invocation starts, timeout/cancellation means **unknown outcome**, not failure-to-act. Late returns never advance a task, and new actions/captures are blocked while the worker remains active. Cooperative tokens cannot interrupt a hung COM call: permanent hangs require restarting MSGuide; process isolation remains deferred.
 - Snapshot TTL is 60 seconds, measured conservatively from the earliest capture evidence, not after encoding/inspection. SDK/API/desktop guidance waits reserve 10/8/6 seconds of the remaining TTL (caps 50/52/54 seconds). Focus/window/target checks still run immediately before action. Moves, resizes, minimization, disappearance, approval revocation, edits, and supersession cancel current work. Exact response/task/step IDs and semantic input are checked; low-confidence, password, offscreen, ambiguous, changed-value, and mismatched targets are rejected.
 - Native overlay placement uses physical desktop coordinates and a PerMonitorV2 manifest; WPF draws the border in local DIPs. Negative origins and scale math have executable checks, but mixed-DPI monitor rendering/straddling windows still require runtime verification. Capture exclusion via `SetWindowDisplayAffinity` is best effort, not a security guarantee.
 - Citation URLs never open automatically; only a user click opens an HTTPS source. Other schemes display as non-clickable text. HTTPS does not imply that a source is trusted.
@@ -89,11 +89,30 @@ Deferred target intents match exact role/label/action and any declared metadata,
 never fuzzy text or first-match selectors. Deferred writes require an empty field;
 observed writes require the unchanged prior value hash.
 
-Resource scope is conservative: selected HWND identity and caption must remain
-stable. A generic document tree cannot establish the current file/site identity
-and therefore requires handoff instead of queued execution. New windows/resources,
+Resource scope is conservative: selected HWND identity and current evidence must
+remain stable. Edge/Chrome page scopes require one visible HTTP(S) address field
+in browser chrome (not content supplied by a document), one visible document
+surface, and matching fresh address evidence. Only an opaque hash leaves this
+local identity check; raw addresses are not logged. Changed/ambiguous addresses,
+multiple document surfaces and unsupported browser layouts require handoff.
+Other generic document trees still cannot establish file/site identity. New windows/resources,
 permissions and credentials are not acquired automatically. Guide mode can
 describe approved partial text/images, but incomplete evidence cannot execute.
+
+Before generic invocation, the approved app must be foreground. Focus may be
+returned from this companion, not taken from an unrelated application. A
+click-through outline and Windows-logo marker identify the exact target for a
+250 ms presentation beat before the native action. The native worker rechecks
+foreground, identity, resource, capability and freshness; failed presentation,
+cancellation or focus loss never produces background input. The system pointer
+is not moved and no coordinate click is injected.
+
+The exported 200 elements prioritize actions and document/known scope markers.
+Text/context cropping is reported separately from traversal failure; it does not
+discard verified action controls. Camera `RequireComplete()` still rejects
+cropped context. Diagnostics record node count, elapsed time and the limiting
+condition without recording UI text. Hotkey conflicts keep Details visible;
+the default stays Ctrl+Alt+M rather than silently assigning a different shortcut.
 
 Statuses distinguish `checkpoint`, `needs_input`, `blocked`, `no_progress`,
 `cancelled`, `failed`, `unknown`, and `review_required`. An invocation returning
@@ -171,6 +190,11 @@ It renders its own actual DemoWindow with `ShowActivated = false`, awaits `Conte
 All four real states must contain exactly the expected workflow heading and button labels (and no old workflow labels). Checks validate bounded metadata/boxes, real PNG/preview presence, metadata-only ApiClient requests, matching response IDs, observed target labels/boxes, next-step/completed status, and a null completed target. Only owned demo buttons are invoked through their WPF automation peers on the dispatcher. Every snapshot is disposed, its PNG bytes cleared and references released, and disposed observations rejected; moving the owned window invalidates the final snapshot's bounds. Owned windows/evidence are cleaned up on failure too.
 
 The JSON report identifies `test: "capture"`, not integration. It defaults to `capture-results.json` in the working directory; the parent should pass `--test-results desktop/obj/capture-results.json` to keep it separate from integration results. Exit codes and sanitized report fields follow the integration format below. Four-minute overall and existing per-capture timeouts apply.
+
+An additional owned, non-activating fixture nests controls below the former
+depth limit and supplies over 200 non-action labels. It verifies complete
+action-priority capture, exact target reacquisition and refusal to invoke a
+background control. No user application is modified.
 
 **This does not test foreground retention, overlay rendering/placement/click-through, real mouse input, or MainWindow pause/supersession.** Passing capture-only does not unblock or replace the foreground integration test. Build/self-test alone do not verify capture-only runtime behavior; that run remains pending the parent's backend environment.
 
