@@ -9,8 +9,10 @@ using System.Windows.Media.Imaging;
 namespace MSGuide.Desktop;
 
 public sealed class Snapshot(WindowChoice window, Native.RECT rect, DateTimeOffset captured,
-    byte[] png, BitmapSource preview, ElementInfo[] elements, string text, string note) : IDisposable
+    byte[] png, BitmapSource? preview, ElementInfo[] elements, string text, string note,
+    bool automationComplete = true) : IDisposable
 {
+    private bool disposed;
     public string Id { get; } = Guid.NewGuid().ToString();
     public WindowChoice Window { get; } = window;
     public Native.RECT Rect { get; } = rect;
@@ -20,16 +22,19 @@ public sealed class Snapshot(WindowChoice window, Native.RECT rect, DateTimeOffs
     public ElementInfo[] Elements { get; private set; } = elements;
     public string Text { get; private set; } = text;
     public string Note { get; } = note;
-    public bool Valid() => Preview is not null && Safety.Fresh(CapturedAt, DateTimeOffset.UtcNow) && Window.Matches()
+    public bool AutomationComplete { get; } = automationComplete;
+    public bool Valid() => !disposed && Safety.Fresh(CapturedAt, DateTimeOffset.UtcNow) && Window.Matches()
         && Native.GetWindowRect(Window.Handle, out var now) && Rect.Same(now);
     public Observation Observation(bool image)
     {
-        if (Preview is null) throw new ObjectDisposedException(nameof(Snapshot));
+        if (disposed) throw new ObjectDisposedException(nameof(Snapshot));
         return new(Id, Window.Id, Window.Title[..Math.Min(Window.Title.Length, 256)], CapturedAt,
-            Preview.PixelWidth, Preview.PixelHeight, Text, Elements, image ? Convert.ToBase64String(Png) : null);
+            Preview?.PixelWidth ?? Rect.Width, Preview?.PixelHeight ?? Rect.Height, Text, Elements,
+            image && Png.Length > 0 ? Convert.ToBase64String(Png) : null, AutomationComplete);
     }
     public void Dispose()
     {
+        disposed = true;
         Array.Clear(Png); Png = []; Preview = null; Elements = []; Text = "";
     }
 }
@@ -43,9 +48,11 @@ public static class CaptureService
     private static int busy;
     internal static Task WhenIdle { get; private set; } = Task.CompletedTask;
 
-    public static async Task<Snapshot> Capture(WindowChoice window, CancellationToken ct)
+    public static async Task<Snapshot> Capture(WindowChoice window, CancellationToken ct, bool includeImage = true)
     {
         ct.ThrowIfCancellationRequested();
+        if (DesktopAction.IsBusy)
+            throw new InvalidOperationException("A native action is still returning. No new capture or action can start until it finishes.");
         if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
             throw new InvalidOperationException("A previous window capture is still returning. Use another application after it finishes, or restart MSGuide.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -56,7 +63,7 @@ public static class CaptureService
             Snapshot? result = null;
             try
             {
-                result = CaptureCore(window, captureToken);
+                result = CaptureCore(window, captureToken, includeImage);
                 captureToken.ThrowIfCancellationRequested();
                 return result;
             }
@@ -84,7 +91,7 @@ public static class CaptureService
         }
     }
 
-    private static Snapshot CaptureCore(WindowChoice window, CancellationToken ct)
+    private static Snapshot CaptureCore(WindowChoice window, CancellationToken ct, bool includeImage)
     {
         var previousDpi = Native.SetThreadDpiAwarenessContext(new nint(-4));
         byte[]? png = null;
@@ -98,22 +105,27 @@ public static class CaptureService
                 || (long)rect.Width * rect.Height > 32_000_000)
                 throw new InvalidOperationException("Unsupported window dimensions. Resize the selected window and retry.");
             var captured = DateTimeOffset.UtcNow;
-            var preview = ReadWindow(window, rect, ct);
-            ct.ThrowIfCancellationRequested();
-            png = Encode(preview);
-            while (png.Length > 2_000_000 && preview.PixelWidth > 320 && preview.PixelHeight > 200)
+            BitmapSource? preview = null;
+            png = [];
+            if (includeImage)
             {
+                preview = ReadWindow(window, rect, ct);
                 ct.ThrowIfCancellationRequested();
-                Array.Clear(png);
-                preview = Resize(preview, 0.75);
                 png = Encode(preview);
+                while (png.Length > 2_000_000 && preview.PixelWidth > 320 && preview.PixelHeight > 200)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    Array.Clear(png);
+                    preview = Resize(preview, 0.75);
+                    png = Encode(preview);
+                }
+                if (png.Length > 2_000_000) throw new InvalidOperationException("PNG exceeds the 2 MB limit; select a smaller window.");
             }
-            if (png.Length > 2_000_000) throw new InvalidOperationException("PNG exceeds the 2 MB limit; select a smaller window.");
-            var (elements, text, note, _) = ReadAutomation(window, rect, ct);
+            var (elements, text, note, complete) = ReadAutomation(window, rect, ct);
             ct.ThrowIfCancellationRequested();
             if (!window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
                 throw new InvalidOperationException("Window changed during capture. Capture and review again.");
-            return new(window, rect, captured, png, preview, elements, text, note);
+            return new(window, rect, captured, png, preview, elements, text, note, complete);
         }
         catch { if (png is not null) Array.Clear(png); throw; }
         finally { Native.SetThreadDpiAwarenessContext(previousDpi); }
@@ -123,7 +135,7 @@ public static class CaptureService
     {
         // The backend receives only the approved HWND. It must never copy the desktop.
         var source = FrameCapture.Capture(window, rect, ct);
-        double scale = Math.Min(1, 1600d / Math.Max(rect.Width, rect.Height));
+        double scale = Math.Min(1, 1280d / Math.Max(rect.Width, rect.Height));
         return scale < 1 ? Resize(source, scale) : source;
     }
 
@@ -193,13 +205,21 @@ public static class CaptureService
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
                         try { toggleState = AutomationEvidence.ToggleState(node); }
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
+                        var action = new AutomationEvidence.ActionMetadata(null);
+                        try { action = AutomationEvidence.ReadAction(node); }
+                        catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
                         bool enabled = value.IsEnabled;
                         elements.Add(new(role, label, box, TargetId: AutomationEvidence.TargetId(window,
                             role, label, box, automationId, frameworkId, value.ProcessId, runtimeId),
                             AutomationId: automationId, FrameworkId: frameworkId,
                             IsEnabled: enabled, Targetable: enabled, ToggleState: toggleState,
                             HelpText: name.Length > 0 ? AutomationEvidence.Optional(value.HelpText, 256) : null,
-                            ItemStatus: name.Length > 0 ? AutomationEvidence.Optional(value.ItemStatus, 128) : null));
+                            ItemStatus: name.Length > 0 ? AutomationEvidence.Optional(value.ItemStatus, 128) : null,
+                            Action: action.Name, IsReadOnly: action.IsReadOnly,
+                            ValueHash: action.ValueHash, ValueLength: action.ValueLength,
+                            IsSelected: action.IsSelected, ScrollDirections: action.ScrollDirections,
+                            HorizontalScrollPercent: action.HorizontalScrollPercent,
+                            VerticalScrollPercent: action.VerticalScrollPercent));
                         if (name.Length > 0)
                         {
                             text.Add(name);

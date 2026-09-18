@@ -156,6 +156,20 @@
                    Visibility="Collapsed"
                    AutomationProperties.LiveSetting="Polite"
                    AutomationProperties.Name="Question status"/>
+        <StackPanel x:Name="ScreenTaskPanel" Visibility="Collapsed" Margin="0,10,0,0">
+          <TextBlock x:Name="ScreenTaskStatusText" TextWrapping="Wrap"
+                     AutomationProperties.LiveSetting="Polite"
+                     AutomationProperties.Name="Retained screen task checkpoint and stop reason"/>
+          <TextBox x:Name="ScreenTaskReplyBox" MaxLength="1000" IsUndoEnabled="False"
+                   TextWrapping="Wrap" MaxHeight="80" VerticalScrollBarVisibility="Auto"
+                   AutomationProperties.Name="Optional clarification for the retained task"/>
+          <WrapPanel>
+            <Button x:Name="ContinueScreenTaskButton" Content="Review &amp; continue"
+                    Click="ContinueScreenTask_Click"
+                    AutomationProperties.Name="Review and continue this task with fresh evidence and a new bounded action budget"/>
+            <Button x:Name="StopScreenTaskButton" Content="Stop task" Click="StopScreenTask_Click"/>
+          </WrapPanel>
+        </StackPanel>
         <Grid Margin="0,5,0,0">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto"/>
@@ -484,18 +498,23 @@
           <StackPanel Margin="0,10,0,0">
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
               <StackPanel>
-                <TextBlock Text="Synthetic demo" Style="{StaticResource SectionTitleStyle}"/>
-                <TextBlock Text="Use synthetic or public content only. Model mode may process approved data remotely."
-                           Style="{StaticResource CaptionStyle}" Margin="0,4,0,7"/>
-                <WrapPanel>
-                  <Button Content="Open demo" Click="OpenDemo_Click"/>
-                </WrapPanel>
+                <TextBlock Text="Try the Clicky-style flow" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock Text="1. Review the local capture and send it.&#x0a;2. Approve the highlighted action.&#x0a;3. Choose Check next step and repeat."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,4,0,8"/>
+                <Button x:Name="ClickyDemoButton"
+                        Content="Start demo · capture locally"
+                        Click="StartClickyDemo_Click"
+                        Style="{StaticResource PrimaryButtonStyle}"
+                        HorizontalAlignment="Left"
+                        AutomationProperties.Name="Start the Clicky-style synthetic demo and capture it locally"/>
+                <TextBlock Text="Nothing is sent until you review the capture and approve Send."
+                           Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,6,0,0"/>
               </StackPanel>
             </Border>
 
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
               <StackPanel>
-                <TextBlock Text="Build Center and Notepad" Style="{StaticResource SectionTitleStyle}"/>
+                <TextBlock Text="Legacy component tests" Style="{StaticResource SectionTitleStyle}"/>
                 <TextBlock Text="Two bounded tasks: investigate the sample build or insert an approved draft into blank Notepad."
                            Style="{StaticResource CaptionStyle}" Margin="0,4,0,8"/>
                 <WrapPanel>
@@ -552,7 +571,7 @@
             <Border Style="{StaticResource CardStyle}" Margin="0,0,0,10">
               <StackPanel>
                 <TextBlock Text="Review screen context" Style="{StaticResource SectionTitleStyle}"/>
-                <TextBlock Text="Choose one window to capture locally. Review it before approving any sharing. Screen-based guidance does not authorize control actions."
+                <TextBlock Text="Choose one window to capture locally. Review it before approving any sharing. Copilot launch consent authorizes one freshly grounded control action per response; manual sessions still ask."
                            Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,4,0,8"/>
                 <TextBlock Text="Only public or synthetic content is supported for shared screen guidance. Do not share secrets or personal information."
                            Style="{StaticResource CaptionStyle}" TextWrapping="Wrap" Margin="0,0,0,8"/>
@@ -626,6 +645,12 @@
                     <StackPanel x:Name="CitationsPanel" Margin="0,8,0,0"/>
                     <WrapPanel>
                       <Button x:Name="NextButton" Content="Check next step" Click="Capture_Click"/>
+                      <Button x:Name="ApproveScreenActionButton"
+                              Content="Approve &amp; do this"
+                              Click="ApproveScreenAction_Click"
+                              Style="{StaticResource PrimaryButtonStyle}"
+                              Visibility="Collapsed"
+                              AutomationProperties.Name="Approve one action on the exact reviewed control"/>
                       <Button x:Name="SpeakButton" Content="Speak response" Click="Speak_Click" IsEnabled="False"/>
                     </WrapPanel>
                     <TextBlock Text="Check next step creates a new local full-window screenshot for review. It never uploads automatically."

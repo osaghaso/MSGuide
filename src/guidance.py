@@ -1,9 +1,11 @@
 """Deterministic synthetic-screen guidance. No model, network, or tool execution."""
 
-from src.models import GuidanceResult, Observation, Target
+from src.models import GuidanceResult, Observation, Target, TaskProgress
 
 
-async def get_guidance(prompt: str, observation: Observation) -> GuidanceResult:
+async def get_guidance(
+    prompt: str, observation: Observation, *, task: TaskProgress | None = None,
+) -> GuidanceResult:
     """Provider seam: validated observation in, structured guidance out; no side effects."""
     clarification = GuidanceResult(
         status="clarification",
@@ -27,5 +29,17 @@ async def get_guidance(prompt: str, observation: Observation) -> GuidanceResult:
     element = matches[0]
     return GuidanceResult(
         status="next_step", instruction=f"Demo: select {label} yourself, then check the screen again.",
-        target=Target(label=label, box=element.box, confidence=element.confidence),
+        target=Target(
+            label=label,
+            box=element.box,
+            confidence=element.confidence,
+            processId=element.processId,
+            targetId=element.targetId,
+            automationId=element.automationId,
+            frameworkId=element.frameworkId,
+            isEnabled=element.isEnabled,
+            isOffscreen=element.isOffscreen,
+            toggleState=element.toggleState,
+            action=element.action,
+        ),
     )

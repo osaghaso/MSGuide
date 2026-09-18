@@ -11,17 +11,36 @@ public sealed record ElementInfo(string Role, string Label, double[] Box, double
     bool IsEnabled = true, bool Targetable = true,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ToggleState = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? HelpText = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ItemStatus = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ItemStatus = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Action = null,
+    bool IsOffscreen = false, bool IsPassword = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? IsReadOnly = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ValueHash = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? ValueLength = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? IsSelected = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? ScrollDirections = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? HorizontalScrollPercent = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? VerticalScrollPercent = null);
 public sealed record Observation(string Id, string WindowId, string Application, DateTimeOffset CapturedAt,
     int Width, int Height, string OcrText, ElementInfo[] Elements,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ImageBase64);
-public sealed record GuidanceRequest(string SessionId, string Prompt, bool Consent, Observation Observation);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ImageBase64,
+    bool AutomationComplete = true);
+public sealed record TaskStep(int Step, string ObservationId, string? AfterObservationId,
+    string TargetId, string Label, string Action, string Outcome);
+public sealed record TaskProgress(string TaskId, int Step, string Status, TaskStep[] History,
+    string RemainingWork, string UserInput = "");
+public sealed record GuidanceRequest(string SessionId, string Prompt, bool Consent, Observation Observation,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TaskProgress? Task = null);
 public sealed record SessionInfo(string SessionId, DateTimeOffset ExpiresAt);
 public sealed record HealthInfo(string Status, string Mode, string Version);
-public sealed record TargetInfo(string Label, double[] Box, double Confidence);
+public sealed record TargetInfo(string Label, double[] Box, double Confidence,
+    string? TargetId = null, string? AutomationId = null, string? FrameworkId = null,
+    bool? IsEnabled = null, bool? IsOffscreen = null, string? ToggleState = null,
+    string? Action = null, string? Value = null, string? ScrollDirection = null, string? ValueHash = null);
 public sealed record Citation(string Source, string Title);
 public sealed record Guidance(string CorrelationId, string ObservationId, string WindowId, string Instruction,
-    string Status, TargetInfo? Target, Citation[]? Citations, string Mode);
+    string Status, TargetInfo? Target, Citation[]? Citations, string Mode,
+    string? RemainingWork = null, string? TaskId = null, int? Step = null);
 
 public static class Safety
 {
@@ -59,8 +78,30 @@ public static class Safety
     internal static bool ObservedTarget(TargetInfo target, ElementInfo[] elements) =>
         !string.IsNullOrWhiteSpace(target.Label) && double.IsFinite(target.Confidence)
         && target.Confidence is >= 0.8 and <= 1 && ValidBox(target.Box)
-        && elements.Any(e => e.Targetable && e.IsEnabled && e.Label == target.Label && ValidBox(e.Box)
-            && e.Box.Zip(target.Box).All(pair => Math.Abs(pair.First - pair.Second) < 0.000001));
+        && elements.Count(e => e.Targetable && e.IsEnabled && !e.IsOffscreen && !e.IsPassword
+            && e.Confidence >= target.Confidence && e.Label == target.Label
+            && (target.TargetId is null || target.TargetId == e.TargetId)
+            && (target.AutomationId is null || target.AutomationId == e.AutomationId)
+            && (target.FrameworkId is null || target.FrameworkId == e.FrameworkId)
+            && target.IsEnabled is not false && target.IsOffscreen is not true
+            && target.ToggleState == e.ToggleState && target.ValueHash == e.ValueHash
+            && target.Action == e.Action && ValidBox(e.Box) && ValidActionInput(target)
+            && (target.Action is null || !string.IsNullOrEmpty(target.TargetId))
+            && (target.Action != "set_value" || e.IsReadOnly is false && e.ValueLength is >= 0 and <= 1000)
+            && (target.Action != "scroll" || e.ScrollDirections?.Contains(target.ScrollDirection!) == true)
+            && e.Box.Zip(target.Box).All(pair => Math.Abs(pair.First - pair.Second) < 0.000001)) == 1;
+
+    internal static bool ValidActionInput(TargetInfo target) =>
+        target.Action is null or "invoke" or "toggle" or "select" or "expand" or "collapse" or "set_value" or "scroll"
+        && (target.Action == "set_value"
+            ? target.Value is { Length: <= 1000 } && target.ValueHash is { Length: 64 }
+                && target.ValueHash.All(c => c is >= 'a' and <= 'f' or >= '0' and <= '9')
+                && target.Value.All(c => !char.IsControl(c) || c is '\r' or '\n' or '\t')
+            : target.Value is null)
+        && (target.Action == "scroll"
+            ? target.ScrollDirection is "up" or "down" or "left" or "right"
+            : target.ScrollDirection is null)
+        && (target.Action != "toggle" || target.ToggleState is "off" or "on");
 
     public static bool VerifiedCameraSettingsPage(ElementInfo[] elements) =>
         AutomationEvidence.VerifiedPage(elements.Select(e => e.AutomationId)) == "camera-privacy";
@@ -75,11 +116,16 @@ public static class Safety
     public static bool Fresh(DateTimeOffset captured, DateTimeOffset now) =>
         now >= captured && now - captured < TimeSpan.FromSeconds(60);
 
+    internal static TimeSpan GuidanceBudget(DateTimeOffset captured, DateTimeOffset now) =>
+        TimeSpan.FromSeconds(Math.Max(0, 54 - Math.Max(0, (now - captured).TotalSeconds)));
+
     public static bool Matches(Guidance g, string observation, string window) =>
         g.ObservationId == observation && g.WindowId == window && !string.IsNullOrWhiteSpace(g.CorrelationId)
         && !string.IsNullOrWhiteSpace(g.Instruction) && g.Instruction.Length <= 16000
-        && g.Mode is "demo" or "model" && g.Status is "next_step" or "clarification" or "completed"
-        && (g.Status == "next_step" || g.Target is null);
+        && g.Mode is "demo" or "model"
+        && g.Status is "next_step" or "clarification" or "completed" or "blocked" or "needs_input" or "completion_candidate"
+        && (g.Status == "next_step" || g.Target is null)
+        && (g.RemainingWork is null || g.RemainingWork.Length <= 1000);
 
     public static Uri? CitationUri(string? value) => Uri.TryCreate(value, UriKind.Absolute, out var uri)
         && uri.Scheme == "https" && uri.UserInfo.Length == 0 ? uri : null;

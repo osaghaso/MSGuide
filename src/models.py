@@ -49,6 +49,18 @@ EvidenceId = Annotated[str, Field(strict=True, min_length=1, max_length=128,
                                   pattern=r"^[A-Za-z0-9_.:-]+$")]
 EvidenceName = Annotated[str, Field(strict=True, min_length=1, max_length=256)]
 OptionalEvidenceName = Annotated[str, Field(strict=True, max_length=256)]
+UIAction = Literal["invoke", "toggle", "select", "expand", "collapse", "set_value", "scroll"]
+ScrollDirection = Literal["up", "down", "left", "right"]
+InputValue = Annotated[str, Field(strict=True, max_length=1000)]
+ValueHash = Annotated[str, Field(strict=True, pattern=r"^[a-f0-9]{64}$")]
+TaskId = Annotated[str, Field(strict=True, pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")]
+OBSERVATION_MAX_AGE_SECONDS = 60.0
+
+
+def guidance_seconds(captured_at: datetime, current: datetime, headroom: float) -> float:
+    # Keep the timestamp of the earliest evidence, not the end of capture/encoding.
+    age = max(0.0, (current - captured_at).total_seconds())
+    return max(0.0, OBSERVATION_MAX_AGE_SECONDS - age - headroom)
 
 
 class ToggleState(str, Enum):
@@ -154,8 +166,31 @@ class UIElement(Contract):
     toggleState: ToggleState | None = None
     helpText: Annotated[str, Field(strict=True, max_length=256)] | None = None
     itemStatus: Annotated[str, Field(strict=True, max_length=128)] | None = None
+    action: UIAction | None = None
+    isPassword: StrictBool | None = None
+    isReadOnly: StrictBool | None = None
+    valueHash: ValueHash | None = None
+    valueLength: Annotated[int, Field(strict=True, ge=0, le=1000)] | None = None
+    isSelected: StrictBool | None = None
+    scrollDirections: Annotated[list[ScrollDirection], Field(max_length=4)] = Field(default_factory=list)
+    horizontalScrollPercent: Annotated[float, Field(ge=-1, le=100)] | None = None
+    verticalScrollPercent: Annotated[float, Field(ge=-1, le=100)] | None = None
 
     _box = field_validator("box")(bounded_box)
+
+
+def executable_element(element: UIElement) -> bool:
+    if (element.action is None or element.targetId is None
+            or element.confidence < 0.8 or element.isEnabled is not True
+            or element.isOffscreen is not False or element.targetable is not True
+            or element.isPassword is True):
+        return False
+    if element.action == "set_value":
+        return (element.isPassword is False and element.isReadOnly is False
+                and element.valueHash is not None and element.valueLength is not None)
+    if element.action == "scroll":
+        return bool(element.scrollDirections)
+    return element.action != "toggle" or element.toggleState in {ToggleState.OFF, ToggleState.ON}
 
 
 class Observation(Contract):
@@ -170,6 +205,7 @@ class Observation(Contract):
     ocrText: Text
     elements: Annotated[list[UIElement], Field(max_length=200)]
     imageBase64: Annotated[str, Field(strict=True, max_length=MAX_BASE64_CHARS)] | None = None
+    automationComplete: StrictBool = True
 
     _utc = field_validator("capturedAt")(utc_timestamp)
 
@@ -217,15 +253,47 @@ class CameraRecoveryRequest(Contract):
     verification: CameraReadyVerification | None = None
 
 
+class TaskStep(Contract):
+    step: Annotated[int, Field(strict=True, ge=1, le=10000)]
+    observationId: Identifier
+    afterObservationId: Identifier | None = None
+    targetId: EvidenceId
+    label: Label
+    action: UIAction
+    outcome: Literal["effect_observed", "screen_changed", "no_progress", "unknown", "not_invoked"]
+
+
+class TaskProgress(Contract):
+    taskId: TaskId
+    step: Annotated[int, Field(strict=True, ge=1, le=10000)]
+    status: Literal[
+        "running", "checkpoint", "blocked", "needs_input", "review_required",
+        "no_progress", "unknown", "cancelled", "failed",
+    ] = "running"
+    history: Annotated[list[TaskStep], Field(max_length=16)] = Field(default_factory=list)
+    remainingWork: Annotated[str, Field(strict=True, max_length=1000)] = ""
+    userInput: Annotated[str, Field(strict=True, max_length=1000)] = ""
+
+    @model_validator(mode="after")
+    def ordered_history(self):
+        steps = [item.step for item in self.history]
+        if steps != sorted(set(steps)) or any(step >= self.step for step in steps):
+            raise ValueError("Task history must precede the current step in order")
+        return self
+
+
 class GuidanceRequest(Contract):
     sessionId: Identifier
     prompt: Prompt
     consent: StrictBool
     observation: Observation
     cameraRecovery: CameraRecoveryRequest | None = None
+    task: TaskProgress | None = None
 
     @model_validator(mode="after")
     def bind_camera_verification(self):
+        if self.task is not None and self.cameraRecovery is not None:
+            raise ValueError("Generic task context cannot authorize camera recovery")
         if self.cameraRecovery is None or self.cameraRecovery.verification is None:
             return self
         verification = self.cameraRecovery.verification
@@ -252,16 +320,48 @@ class Target(Contract):
     isEnabled: StrictBool | None = None
     isOffscreen: StrictBool | None = None
     toggleState: ToggleState | None = None
+    action: UIAction | None = None
+    value: InputValue | None = None
+    scrollDirection: ScrollDirection | None = None
+    valueHash: ValueHash | None = None
 
     _box = field_validator("box")(bounded_box)
+
+    @model_validator(mode="after")
+    def semantic_input(self):
+        if ((self.action == "set_value") != (self.value is not None)
+                or (self.action == "scroll") != (self.scrollDirection is not None)
+                or (self.action == "set_value" and self.valueHash is None)
+                or (self.value is not None
+                    and any(ord(c) < 32 and c not in "\r\n\t" for c in self.value))):
+            raise ValueError("Explicit input must match the observed semantic action")
+        return self
+
+
+def target_for(element: UIElement, *, value=None, scroll_direction=None) -> Target:
+    if element.action is not None and not executable_element(element):
+        raise ValueError("Non-actionable target")
+    if element.action == "scroll" and scroll_direction not in element.scrollDirections:
+        raise ValueError("Unsupported scroll direction")
+    return Target(
+        **element.model_dump(include={
+            "label", "box", "confidence", "processId", "targetId", "isEnabled",
+            "isOffscreen", "toggleState", "action", "valueHash",
+        }),
+        automationId=element.automationId or None,
+        frameworkId=element.frameworkId or None,
+        value=value,
+        scrollDirection=scroll_direction,
+    )
 
 
 class GuidanceResult(Contract):
     instruction: Annotated[str, Field(min_length=1, max_length=4000)]
-    status: Literal["next_step", "clarification", "completed"]
+    status: Literal["next_step", "clarification", "completed", "blocked", "needs_input", "completion_candidate"]
     target: Target | None = None
     citations: Annotated[list[Citation], Field(max_length=20)] = Field(default_factory=list)
     mode: Literal["demo", "model"] = "demo"
+    remainingWork: Annotated[str, Field(strict=True, max_length=1000)] | None = None
 
     @model_validator(mode="after")
     def target_matches_status(self):
@@ -305,6 +405,8 @@ class GuidanceResponse(GuidanceResult):
     observationId: Identifier
     windowId: Identifier
     cameraRecovery: CameraRecoveryResponse | None = None
+    taskId: TaskId | None = None
+    step: Annotated[int, Field(strict=True, ge=1, le=10000)] | None = None
 
     @model_validator(mode="after")
     def camera_completion_is_verifier_owned(self):

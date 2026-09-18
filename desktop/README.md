@@ -1,4 +1,4 @@
-# MSGuide Desktop — native guide-only MVP
+# MSGuide Desktop — native guide and approved-action MVP
 
 WPF / .NET 10 Windows companion. Local dictation uses **Whisper.net 1.9.1**,
 its CPU runtime (including Windows ARM64), and **NAudio.WinMM 2.2.1** for
@@ -13,35 +13,92 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 
 - `MSGUIDE_LOCAL_TOKEN`: required for `/v1` calls; inherited from the launcher, never embedded or persisted by this client.
 - `MSGUIDE_API_URL`: default `http://127.0.0.1:8000`. Only a literal loopback HTTP origin or `localhost` is accepted; localhost is pinned to 127.0.0.1. Proxies and redirects are disabled to prevent forwarding the token.
-- `MSGUIDE_HOTKEY`: optional, default `Ctrl+Alt+M`; examples `Ctrl+Shift+G` or `Alt+Shift+M`. A registration conflict is reported. Without a working hotkey, dismiss minimizes to the taskbar instead of making the app unreachable.
+- `MSGUIDE_HOTKEY`: optional, default `Ctrl+Alt+M`; examples `Ctrl+Shift+G` or `Alt+Shift+M`. Normal launch keeps the full workspace hidden and shows a click-through Windows-logo buddy 35 pixels right and 25 pixels below the pointer. The hotkey remembers the foreground app and opens a compact prompt beside the pointer. Its thinking and response bubble tracks the pointer at roughly 60 FPS, flips at screen edges, and never intercepts clicks. **Details** opens the full workspace for manual review, settings, and action approval. A registration conflict is reported in Details.
 - Expected backend: `GET /health` with status `ok`, version `0.2.0`, mode `demo`/`model`; authenticated `POST /v1/sessions` and `POST /v1/guidance`. No legacy assist/action routes are called.
 
 ## Try the supported workflow
 
-1. Start the local backend and desktop through the parent launcher. Read the mode label: **DEMO** means deterministic sample guidance, not AI; **MODEL** means the backend-configured provider, not a claim of enterprise authorization.
+1. Start the local backend and desktop through the parent launcher. The Windows-logo buddy appears beside the pointer; the full workspace does not open first. Press `Ctrl+Alt+M` over the foreground app, type a question in the compact prompt, and press Enter. Choose **Details** when you need the mode label or manual controls: **DEMO** means deterministic sample guidance, not AI; **MODEL** means the backend-configured provider, not a claim of enterprise authorization.
 2. Click **Open demo**. A separate **MSGuide Demo** window shows a synthetic build dashboard; only **View logs** is initially available.
 3. Invoke the companion with the hotkey, type “Help me find the build error”, select **MSGuide Demo**, and click **Capture / review**.
 4. Inspect the actual image (expand full-size inspection if needed) and UI Automation text/element metadata. Pixel sharing defaults **off**. Check consent, optionally enable image sharing for a vision provider, then click **Send approved snapshot**. No capture is uploaded without this click.
-5. Switch to the demo to see the nonactivating outline. Click the indicated button yourself. **View logs** reveals “Build failed: exit code 1” and **Open troubleshooting**; that reveals “Check compiler errors and missing dependencies” and **Mark resolved**; the last step shows “Issue resolved”. Old workflow buttons are removed. All changes are synthetic and local.
+5. Switch to the demo to see the nonactivating, click-through outline and Windows-logo marker. Guide mode never executes. Copilot launch sessions can auto-execute in **Fix it for me** only; manual developer sessions retain their approval button. **View logs** reveals “Build failed: exit code 1” and **Open troubleshooting**; that reveals “Check compiler errors and missing dependencies” and **Mark resolved**; the last step shows “Issue resolved”. Old workflow buttons are removed. All changes are synthetic and local.
 6. **Check next step** starts a fresh capture/review, never a blind resend. Repeat approval at each step. **Reset demo** restarts the sandbox.
 7. Select a **Microphone**, then **Start microphone** / **Stop & transcribe** for local Whisper dictation. Recording stops at 30 seconds and is transcribed after microphone closure. Input levels and low-volume diagnostics are visible. Review/edit the transcript before **Ask MSGuide**; submission is disabled until transcription finishes. Use **Cancel transcription** while local processing is active. **Sound input settings** opens Windows' volume/mute controls without changing them. **Speak response** is optional local playback.
 8. **Pause / clear**, **Dismiss**, Escape, minimize, or Exit cancel work, clear snapshot references/bytes and transcript, stop microphone/speech, and hide highlights. Already transmitted data cannot be recalled. A title-bar close exits the application.
 
 ## Privacy and support boundaries
 
-- Manual selected-HWND `PrintWindow(PW_RENDERFULLCONTENT)` only. **Normal mode has no CopyFromScreen, desktop capture fallback, periodic capture, automatic upload, injected clicks, or keystrokes.** The timer only checks bounds/window identity and snapshot age. The explicit integration-test and capture-test harnesses invoke only buttons belonging to their own synthetic DemoWindow instance.
-- Full window bounds use physical coordinates, matching the bitmap and normalized UIA boxes. PNGs are limited to 1600 pixels on the longest side and 2,000,000 bytes. Large physical allocations are rejected. Captures stay in memory; the application writes no screenshots, transcripts, tokens, or request logs to disk. .NET/WPF may retain temporary managed/native copies until collection; this is not a forensic memory-erasure guarantee.
+- Selected-HWND Windows Graphics Capture, with **no desktop/PrintWindow fallback or global input injection**. Manual snapshots require review/upload approval; the explicit Copilot launch grant allows task-driven captures. Fix mode supports UIA `invoke`, `toggle`, `select`, `expand`, `collapse`, `set_value`, and `scroll`, one action at a time after exact target reacquisition. Guide mode never executes, even with a launch grant.
+- `set_value` requires a writable, non-password ValuePattern field containing at most 1000 characters and an explicit full replacement of at most 1000 characters. The field's previous value digest is checked again before replacement. Read-only/password/large unsupported editors are not typed into. `scroll` takes exactly one small increment in a freshly available direction. Unsupported surfaces require manual handoff, never coordinate or keyboard fallback.
+- Full window bounds use physical coordinates, matching the bitmap and normalized UIA boxes. PNGs are limited to 1280 pixels on the longest side and 2,000,000 bytes. Large physical allocations are rejected. Captures stay in memory; the application writes no screenshots, transcripts, tokens, UI text, prompts, or model output to disk. Bounded rotating operational diagnostics contain only timestamps, endpoints, dimensions/counts, lifecycle stages, status/error codes, exception types, and correlation IDs under `%LOCALAPPDATA%\MSGuide\logs`. .NET/WPF may retain temporary managed/native copies until collection; this is not a forensic memory-erasure guarantee.
 - UI Automation names are collected with bounded traversal, not pixel OCR. Offscreen/password subtrees and disabled target controls are excluded. **This is not image redaction**: screenshot pixels and other accessible text can still contain passwords or sensitive information. There is no redaction editor. Do not approve sensitive content; discard it. A backend model may process approved content remotely even though the client connects only to loopback.
 - Some GPU, elevated, protected, minimized, or unresponsive windows cannot be captured. Blank/uniform images are rejected heuristically (not guaranteed detection). UIA can be unavailable or incomplete. Inspect the preview rather than assuming capture success means all pixels are valid.
-- PrintWindow and UI Automation are synchronous native/provider calls on a background worker. The UI stops waiting after 30 seconds or cancellation (a real capture can take 10 seconds); a stuck native call cannot be safely terminated. At most one native capture is outstanding, late data is discarded, and a stuck provider may require restarting the client. Process isolation is deferred.
-- Snapshot TTL is 60 seconds. Window moves, resizes, minimization, disappearance/title change, approval changes during a request, prompt edits, or supersession invalidate work and clear old answers/citations/playback. Echo IDs and response schema are checked. Targets below 0.8 confidence, with invalid normalized boxes, or without a matching reviewed UIA label/box are not highlighted. The timer cannot detect every in-window content change: after acting, request a fresh step. Focus loss removes a displayed outline; it does not silently restore an old one.
+- Capture/UIA calls can block inside native providers. Capture callers wait at most 30 seconds; action callers at most **eight seconds**, including target lookup. Lookup is a selected-root raw-tree walk, capped at 800 nodes, depth 32, and three seconds between native calls; an incomplete search cannot claim a unique match. At most one native action is outstanding. Cancellation before invocation seals the invocation gate; after invocation starts, timeout/cancellation means **unknown outcome**, not failure-to-act. Late returns never advance a task, and new actions/captures are blocked while the worker remains active. Cooperative tokens cannot interrupt a hung COM call: permanent hangs require restarting MSGuide; process isolation remains deferred.
+- Snapshot TTL is 60 seconds, measured conservatively from the earliest capture evidence, not after encoding/inspection. SDK/API/desktop guidance waits reserve 10/8/6 seconds of the remaining TTL (caps 50/52/54 seconds). Focus/window/target checks still run immediately before action. Moves, resizes, minimization, disappearance, approval revocation, edits, and supersession cancel current work. Exact response/task/step IDs and semantic input are checked; low-confidence, password, offscreen, ambiguous, changed-value, and mismatched targets are rejected.
 - Native overlay placement uses physical desktop coordinates and a PerMonitorV2 manifest; WPF draws the border in local DIPs. Negative origins and scale math have executable checks, but mixed-DPI monitor rendering/straddling windows still require runtime verification. Capture exclusion via `SetWindowDisplayAffinity` is best effort, not a security guarantee.
 - Citation URLs never open automatically; only a user click opens an HTTPS source. Other schemes display as non-clickable text. HTTPS does not imply that a source is trusted.
-- No tray dependency, enterprise sign-in, authorized enterprise retrieval, always-on voice, OCR engine, arbitrary desktop action execution, or deployment is included.
+- No tray dependency, enterprise sign-in, authorized enterprise retrieval, always-on voice, OCR engine, arbitrary keystrokes/coordinates, dragging, unrestricted automation, durable job system, or deployment is included.
+
+## Generic task progress and continuation
+
+`ScreenTaskSession.RunAsync` is the production generic loop and its offline
+test seam. It retains the original prompt, task ID, monotonic step, at most 16
+action records, and bounded model checkpoint/clarification text in local
+memory. A batch has at most eight actions; **Review & continue** starts a new
+bounded batch with fresh evidence and the same context. An optional reply field
+answers questions without replacing the original goal. New prompts, Pause/clear,
+dismissal, and exit discard this context; there is no durable task store.
+
+The first automatic observation may include its approved screenshot. Subsequent
+steps and verification use fresh UIA-only observations. After invocation,
+verification makes at most six reads within five seconds, waiting 250 ms only
+between reads. Toggle, value replacement, selection, expansion/collapse, and
+scroll actions require their expected semantic effect; unrelated UI changes
+cannot substitute for it. If that effect is still missing after the bounded
+checks, the outcome is `unknown` and continuation is disabled. Only `invoke`,
+which has no generic semantic postcondition, can use two consecutive stable
+changed UIA states. Reads, not actions, are retried. The eighth action is also
+observed before pausing. Repeated controls are valid on progressed states;
+unchanged/repeated states stop, and continuing an unchanged no-progress
+checkpoint cannot replay its action.
+
+Statuses distinguish `checkpoint`, `needs_input`, `blocked`, `no_progress`,
+`cancelled`, `failed`, `unknown`, and `review_required`. An invocation returning
+is not progress; a changed screen is not causal proof; neither proves the goal.
+Generic completion suggestions remain **not independently verified** and retain
+context for review. Unknown invocation/verification outcomes disable continuation.
+Capture-access denials retain a `failed` checkpoint before invocation, or an
+`unknown` outcome while checking an invoked action; uncertain actions are not
+replayed. Companion action results use their recorded step numbers, not the
+invocation count, including across continuation and the rolling history bound.
+The buddy no longer auto-hides final task states; Details retains the stop reason,
+recent outcomes, and model checkpoint. Current images/evidence are disposed on
+stop; bounded task text stays only until explicit clearing/replacement/exit.
+
+The camera and demo adapters keep their independent local state/verifiers and
+approval rules. Camera UIA actions share the single-in-flight native action
+guard; experimental Notepad control retains its opt-in adapter. The desktop is
+the executor: `/v1/actions/*` and `/v1/jobs/*` are still the unrelated in-memory
+250 ms mock simulator, not the progress source for desktop tasks.
 
 ## Runnable checks and verification
 
 Run `desktop/bin/Debug/net10.0-windows/MSGuide.Desktop.exe --self-test` (or `dotnet run --project desktop/MSGuide.Desktop.csproj -- --self-test`). This exits 0 on success, 1 on failure, without showing a window or connecting to the backend. Checks cover loopback URL rejection, unsafe citation schemes, freshness boundaries, response echo mismatch, malformed target boxes, and physical target mapping at 100/125/150/200% scale with a negative desktop origin.
+
+Self-tests also run the actual generic loop with synthetic observations and fake
+guidance/actions: multi-step history, legitimate repeated controls, no progress,
+eighth-action verification, budget continuation, bounded history, all stop states,
+Guide-mode non-execution, semantic value/scroll effects, cancellation/supersession,
+unrelated UI churn with missing/late semantic effects, capture-access failures
+before/after invocation, result notifications across continuation/history rollover,
+and a fake hung native worker. A delayed HTTP handler verifies cancellation at the
+remaining freshness deadline. Camera state/consent tests use fixtures only.
+Build with `dotnet build .\desktop\MSGuide.Desktop.csproj --no-restore --output <unique-artifact-directory>`
+and run that directory's `MSGuide.Desktop.exe --self-test --test-results <absolute-json-path>`
+to avoid replacing an active desktop binary. Disable session grants and synthetic
+speech/Whisper opt-ins when running these noninteractive checks. These tests do not
+claim live-app UIA or remote-model acceptance.
 
 Install the local English model with
 `scripts\Install-MSGuideSpeechModel.ps1 -AcceptDownload` after approving the
@@ -60,7 +117,7 @@ it is not proof of Whisper accuracy.
 
 `--capture-test` is a separate, narrower test, mutually exclusive with `--integration-test` and `--self-test`. Use the parent's existing `MSGUIDE_API_URL` and `MSGUIDE_LOCAL_TOKEN`; health must report `ok`, `demo`, `0.2.0`. The harness never starts a backend or generates credentials. Parent launcher support is separate work.
 
-It renders its own actual DemoWindow with `ShowActivated = false`, awaits `ContentRendered`, and passes only that instance's HWND/PID to the real CaptureService. It does not call Activate or require foreground ownership. PrintWindow/UIA can capture a background window; an unavailable desktop, unsupported/blank capture, or missing UIA still fails, never skips or fabricates evidence.
+It renders its own actual DemoWindow with `ShowActivated = false`, awaits `ContentRendered`, and passes only that instance's HWND/PID to the real CaptureService. It does not call Activate or require foreground ownership. Selected-window Windows Graphics Capture/UIA support must be available; an unavailable desktop, unsupported/blank capture, or missing UIA still fails, never skips or fabricates evidence.
 
 All four real states must contain exactly the expected workflow heading and button labels (and no old workflow labels). Checks validate bounded metadata/boxes, real PNG/preview presence, metadata-only ApiClient requests, matching response IDs, observed target labels/boxes, next-step/completed status, and a null completed target. Only owned demo buttons are invoked through their WPF automation peers on the dispatcher. Every snapshot is disposed, its PNG bytes cleared and references released, and disposed observations rejected; moving the owned window invalidates the final snapshot's bounds. Owned windows/evidence are cleaned up on failure too.
 

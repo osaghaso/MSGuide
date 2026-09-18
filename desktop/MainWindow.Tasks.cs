@@ -101,7 +101,7 @@ public partial class MainWindow
         if (task.Finished)
         {
             StopDemoTask();
-            highlight = null; overlay.Hide();
+            ClearHighlight();
             TaskStatusText.Text = "Verified: troubleshooting instructions reached. Task finished; no build was repaired. Execution authority revoked.";
             return;
         }
@@ -157,7 +157,7 @@ public partial class MainWindow
     private void FailTask(Exception ex)
     {
         StopDemoTask();
-        highlight = null; overlay.Hide();
+        ClearHighlight();
         TaskStatusText.Text = ex is InvalidOperationException ? ex.Message : "Task stopped because local control could not be verified. No automatic retry.";
     }
 
@@ -205,7 +205,7 @@ public partial class MainWindow
         var target = note.Observe();
         if (note.Finished)
         {
-            StopDemoTask(); highlight = null; overlay.Hide();
+            StopDemoTask(); ClearHighlight();
             TaskStatusText.Text = "Verified: Notepad contains the exact approved draft. Authority revoked. No Save command issued; Notepad may retain unsaved session data.";
             return;
         }

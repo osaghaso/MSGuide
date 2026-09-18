@@ -105,6 +105,7 @@ internal static class CaptureTests
                 using var evidence = await Capture(window, ct);
                 Require(evidence.Valid() && evidence.Window == window && evidence.Preview is { IsFrozen: true }
                     && evidence.Preview.PixelWidth > 0 && evidence.Preview.PixelHeight > 0
+                    && Math.Max(evidence.Preview.PixelWidth, evidence.Preview.PixelHeight) <= 1280
                     && evidence.Png.Length is > 8 and <= 2_000_000
                     && evidence.Png.Take(8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }));
                 var lines = evidence.Text.Split('\n');

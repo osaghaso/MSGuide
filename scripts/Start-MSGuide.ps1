@@ -42,6 +42,10 @@ try {
     $token = [Convert]::ToBase64String($bytes)
     [Array]::Clear($bytes, 0, $bytes.Length)
     $url = "http://127.0.0.1:$Port"
+    $logDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'MSGuide\logs'
+    [void](New-Item -ItemType Directory -Path $logDirectory -Force)
+    $backendLog = Join-Path $logDirectory 'backend.log'
+    $desktopLog = Join-Path $logDirectory 'desktop.log'
 
     function New-LocalProcess([string]$File) {
         $info = [System.Diagnostics.ProcessStartInfo]::new()
@@ -51,6 +55,8 @@ try {
         $info.CreateNoWindow = $true
         $info.Environment['MSGUIDE_LOCAL_TOKEN'] = $token
         $info.Environment['MSGUIDE_API_URL'] = $url
+        $info.Environment['MSGUIDE_DIAGNOSTIC_LOG'] = $backendLog
+        $info.Environment['MSGUIDE_DESKTOP_LOG'] = $desktopLog
         $info.Environment['MSGUIDE_MODE'] = 'demo'
         $info.Environment['PYTHONUTF8'] = '1'
         $info.Environment['MSGUIDE_DEVELOPER_TOOLS'] =
@@ -62,19 +68,21 @@ try {
             $info.Environment['MSGUIDE_ALLOW_SCREEN_SHARE'] = '1'
         }
         if ($Copilot) {
-            $copilotCommand = Get-Command copilot -ErrorAction Stop
+            $copilotCommand = Get-Command copilot.exe -CommandType Application -ErrorAction Stop
             $info.Environment['MSGUIDE_GUIDANCE_PROVIDER'] = 'copilot-sdk'
+            $info.Environment['MSGUIDE_SESSION_SCREEN_CONTEXT'] = '1'
+            $info.Environment['MSGUIDE_SESSION_AUTOMATION'] = '1'
             $info.Environment['MSGUIDE_COPILOT_MODEL'] =
                 if ([string]::IsNullOrWhiteSpace($env:MSGUIDE_COPILOT_MODEL)) {
                     'gpt-6-astra'
                 } else { $env:MSGUIDE_COPILOT_MODEL }
             $info.Environment['MSGUIDE_COPILOT_REASONING_EFFORT'] =
                 if ([string]::IsNullOrWhiteSpace($env:MSGUIDE_COPILOT_REASONING_EFFORT)) {
-                    'xhigh'
+                    'low'
                 } else { $env:MSGUIDE_COPILOT_REASONING_EFFORT }
             $info.Environment['MSGUIDE_COPILOT_CONTEXT_TIER'] =
                 if ([string]::IsNullOrWhiteSpace($env:MSGUIDE_COPILOT_CONTEXT_TIER)) {
-                    'long_context'
+                    'default'
                 } else { $env:MSGUIDE_COPILOT_CONTEXT_TIER }
             $info.Environment['COPILOT_CLI_PATH'] = $copilotCommand.Source
         }
@@ -110,13 +118,14 @@ try {
         if ($server.WaitForExit(150)) { break }
     }
     if (!$ready) { throw 'Local API did not become ready. Check dependency installation and optional provider configuration.' }
-    Write-Host "MSGuide ready at $url (local single-user mode). No token is written to disk."
+    Write-Host "MSGuide ready at $url (local single-user mode). Diagnostic logs: $logDirectory"
     if ($Shareable) {
         Write-Warning 'Shareable demo mode is on. MSGuide can appear when you share the full screen.'
     }
     $start = New-LocalProcess $desktop
     # Only the Python service receives remote model credentials.
     [void]$start.Environment.Remove('MSGUIDE_MODEL_API_KEY')
+    [void]$start.Environment.Remove('COPILOT_GITHUB_TOKEN')
     if ($IntegrationTest) {
         foreach ($arg in @('--integration-test', '--test-results', 'desktop/obj/integration-results.json')) { $start.ArgumentList.Add($arg) }
     }

@@ -6,13 +6,22 @@ namespace MSGuide.Desktop;
 public partial class MainWindow
 {
     private bool developerToolsEnabled;
+    private bool sessionScreenContextApproved;
+    private bool sessionAutomationApproved;
 
     private void ConfigureProductShell()
     {
         developerToolsEnabled = Environment.GetEnvironmentVariable("MSGUIDE_DEVELOPER_TOOLS") == "1";
+        sessionScreenContextApproved =
+            Environment.GetEnvironmentVariable("MSGUIDE_SESSION_SCREEN_CONTEXT") == "1";
+        sessionAutomationApproved =
+            Environment.GetEnvironmentVariable("MSGUIDE_SESSION_AUTOMATION") == "1";
         DeveloperToolsExpander.Visibility = developerToolsEnabled ? Visibility.Visible : Visibility.Collapsed;
         ResetScreenContextUi();
     }
+
+    internal static bool CanAutoCapture(bool sessionApproved, WindowChoice? window) =>
+        sessionApproved && window is not null;
 
     private void ResetScreenContextUi()
     {
@@ -42,6 +51,11 @@ public partial class MainWindow
             ShowPromptFeedback("Enter your question before choosing screen context.");
             return;
         }
+        OpenScreenContext();
+    }
+
+    private void OpenScreenContext()
+    {
         speech.Stop();
         CancelWork();
         ResetCameraRecovery();

@@ -7,7 +7,6 @@ namespace MSGuide.Desktop;
 
 public sealed class OverlayWindow : Window
 {
-    private readonly Border outline;
     public nint Handle => new WindowInteropHelper(this).Handle;
 
     public OverlayWindow()
@@ -23,8 +22,30 @@ public sealed class OverlayWindow : Window
         IsHitTestVisible = false;
         Focusable = false;
         MinWidth = MinHeight = 1;
-        outline = new Border { BorderBrush = new SolidColorBrush(Color.FromRgb(104, 224, 255)), BorderThickness = new Thickness(3), CornerRadius = new CornerRadius(5), Background = Brushes.Transparent };
-        Content = outline;
+        var content = new Grid();
+        content.Children.Add(new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.FromRgb(104, 224, 255)),
+            BorderThickness = new Thickness(3),
+            CornerRadius = new CornerRadius(5),
+            Background = Brushes.Transparent
+        });
+        var badge = new Border
+        {
+            Width = 28,
+            Height = 28,
+            Padding = new Thickness(4),
+            Margin = new Thickness(5),
+            CornerRadius = new CornerRadius(6),
+            Background = new SolidColorBrush(Color.FromArgb(235, 15, 23, 42)),
+            BorderBrush = Brushes.White,
+            BorderThickness = new Thickness(1),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            Child = WindowsLogoVisual.Create()
+        };
+        content.Children.Add(badge);
+        Content = content;
         SourceInitialized += (_, _) =>
         {
             // WS_EX_TRANSPARENT | TOOLWINDOW | NOACTIVATE. Native hit testing also fails through.

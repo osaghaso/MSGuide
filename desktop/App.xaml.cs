@@ -17,6 +17,7 @@ public partial class App : Application
         bool native = e.Args.Contains("--native-diagnostic");
         bool notepad = e.Args.Contains("--notepad-test");
         bool notepadGuide = e.Args.Contains("--notepad-guide-test");
+        DiagnosticLog.Record("desktop_started", new { version = "0.2.0" });
         if (integration || self || capture || control || controlComponent || native || notepad || notepadGuide)
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -57,9 +58,21 @@ public partial class App : Application
                     SelfTests.Run();
                     checks.Add("desktop-safety");
                     NotepadTests.Run(checks);
+                    stage = "camera-state-fixtures";
+                    CameraRecoveryTests.Run();
+                    checks.Add("camera-fixture-consent-state-readiness-boundaries");
                     stage = "prompt-composer";
                     PromptTests.Run();
                     checks.Add("prompt-submit-keyboard-idle-ui");
+                    stage = "screen-task-loop";
+                    await PromptTests.RunTaskLoopAsync();
+                    checks.Add("screen-task-progress-checkpoint-outcomes-supersession");
+                    stage = "native-action-lifecycle";
+                    await PromptTests.RunNativeLifecycleAsync();
+                    checks.Add("bounded-native-action-unknown-late-return-no-retry");
+                    stage = "guidance-client-deadline";
+                    await PromptTests.RunClientDeadlineAsync();
+                    checks.Add("guidance-client-remaining-freshness-cancellation");
                     stage = "speech-lifecycle";
                     await SpeechTests.RunAsync();
                     checks.Add("speech-drain-uncertainty-cancellation-input-feedback");
@@ -100,8 +113,10 @@ public partial class App : Application
             Shutdown(failure.Length == 0 ? 0 : 1);
             return;
         }
-        MainWindow = new MainWindow();
-        MainWindow.Show();
+        var mainWindow = new MainWindow();
+        MainWindow = mainWindow;
+        mainWindow.Show();
+        mainWindow.StartCompanionMode();
     }
 
     private void ApplyAccessibilityTheme()

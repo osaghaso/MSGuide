@@ -329,19 +329,26 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
             return new CameraTargetControlResult(
                 false, true, "The verified camera target changed before approval.");
 
-        var result = await Task.Run(
-            () => ActivateTarget(current, cancellationToken), cancellationToken);
-        if (result.Invoked && current.Kind == CameraRecoveryTargetKind.TeamsCameraButton)
+        var result = await DesktopAction.RunBounded((token, beginInvocation) =>
+        {
+            var action = ActivateTarget(current, token, beginInvocation);
+            return new(action.Invoked, action.OutcomeKnown, action.Detail);
+        }, cancellationToken);
+        if (result is { Invoked: true, OutcomeKnown: true } && !cancellationToken.IsCancellationRequested
+            && current.Kind == CameraRecoveryTargetKind.TeamsCameraButton)
         {
             lock (gate) teamsCameraEnabledAt = DateTimeOffset.UtcNow;
         }
-        return result;
+        return new(result.Invoked, result.OutcomeKnown, result.Detail);
     }
 
     public async Task<TeamsRestartResult> RestartTeamsAsync(
         WindowChoice window, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (DesktopAction.IsBusy)
+            return new(TeamsRestartFinding.Failed,
+                "A native action is still returning. Teams restart was not started.");
         if (!IsTeams(window))
             return new TeamsRestartResult(
                 TeamsRestartFinding.StaleOrMoved,
@@ -440,7 +447,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     }
 
     private static CameraTargetControlResult ActivateTarget(
-        TargetCache current, CancellationToken cancellationToken)
+        TargetCache current, CancellationToken cancellationToken, Func<bool> beginInvocation)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var permission = ReadPermission();
@@ -465,17 +472,25 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 return new(false, true, "The permission scope changed. Inspect settings and approve the new scope separately.");
         }
 
-        var raw = FindRawTarget(refreshed, expected, cancellationToken);
+        var raw = AutomationEvidence.FindUniqueTarget(
+            refreshed.Window, refreshed.Rect, expected.TargetId, expected.Label,
+            expected.AutomationId, cancellationToken);
         if (raw is null)
             return new CameraTargetControlResult(
                 false, true, "The exact accessible camera control could not be reacquired.");
 
         try
         {
+            if (raw.Current.IsPassword || raw.Current.IsOffscreen || !raw.Current.IsEnabled
+                || !refreshed.Window.Matches()
+                || !Native.GetWindowRect(refreshed.Window.Handle, out var finalRect)
+                || !refreshed.Rect.Same(finalRect))
+                return new(false, true, "The exact camera window or control changed before invocation.");
             if (raw.TryGetCurrentPattern(TogglePattern.Pattern, out var togglePattern)
                 && togglePattern is TogglePattern toggle
                 && toggle.Current.ToggleState == ToggleState.Off)
             {
+                if (!beginInvocation()) return new(false, true, "The camera action was cancelled before invocation.");
                 toggle.Toggle();
                 return new CameraTargetControlResult(
                     true, true, "The approved camera toggle action was invoked once.");
@@ -485,6 +500,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 && raw.TryGetCurrentPattern(InvokePattern.Pattern, out var invokePattern)
                 && invokePattern is InvokePattern invoke)
             {
+                if (!beginInvocation()) return new(false, true, "The camera action was cancelled before invocation.");
                 invoke.Invoke();
                 return new CameraTargetControlResult(
                     true, true, "The approved Teams camera-on action was invoked once.");
@@ -499,34 +515,6 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 true, false,
                 "The approved action returned an unknown outcome. MSGuide will not retry it.");
         }
-    }
-
-    private static AutomationElement? FindRawTarget(
-        ControlRead read, ElementInfo expected, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var root = AutomationElement.FromHandle(read.Window.Handle);
-        if (root.Current.ProcessId != (int)read.Window.ProcessId) return null;
-        Condition condition = string.IsNullOrWhiteSpace(expected.AutomationId)
-            ? new PropertyCondition(AutomationElement.NameProperty, expected.Label)
-            : new PropertyCondition(
-                AutomationElement.AutomationIdProperty, expected.AutomationId);
-        var candidates = root.FindAll(TreeScope.Descendants, condition);
-        AutomationElement? match = null;
-        for (int i = 0; i < candidates.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                if (!AutomationEvidence.MatchesTargetId(
-                    read.Window, read.Rect, candidates[i], expected.TargetId)) continue;
-                if (match is not null) return null;
-                match = candidates[i];
-            }
-            catch (Exception ex) when (
-                ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
-        }
-        return match;
     }
 
     private static bool IsTeams(WindowChoice window) =>

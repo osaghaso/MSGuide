@@ -75,7 +75,7 @@ internal sealed class DemoTaskSession
     private void EnsureWindow()
     {
         window.Dispatcher.VerifyAccess();
-        if (stopped || clock() >= expires || !identity.Matches()
+        if (DesktopAction.IsBusy || stopped || clock() >= expires || !identity.Matches()
             || !Native.GetWindowRect(identity.Handle, out var current) || !bounds.Same(current))
             throw new InvalidOperationException("Task stopped: approval expired or the scoped window moved, closed or changed.");
         nint foreground = foregroundWindow();

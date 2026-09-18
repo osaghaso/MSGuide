@@ -81,14 +81,71 @@ internal static class SelfTests
         Check(!Safety.Matches(good, "observation", "other"));
         Check(!Safety.Matches(good with { Mode = "unknown" }, "observation", "window"));
         Check(!Safety.Matches(good with { Status = "execute" }, "observation", "window"));
+        var workArea = new Native.RECT { Left = -1920, Top = 0, Right = 0, Bottom = 1040 };
+        var placed = CompanionPlacement.NearCursor(
+            new Native.POINT { X = -20, Y = 1020 }, workArea, 390, 154);
+        Check(placed.Left == -432 && placed.Top == 854 && placed.Right == -42 && placed.Bottom == 1008);
+        placed = CompanionPlacement.NearCursor(
+            new Native.POINT { X = -1910, Y = 10 }, workArea, 390, 154);
+        Check(placed.Left == -1888 && placed.Top == 22);
+        Check(CursorCompanionWindow.TaskText(
+            ["✓ 1. invoke “Open”", "✓ 2. select “Details”"],
+            "Thinking about action 3…") ==
+            "Thinking about action 3…\n✓ 1. invoke “Open”\n✓ 2. select “Details”");
         var element = new ElementInfo("button", "View logs", [0.1, 0.2, 0.3, 0.1]);
-        var targetInfo = new TargetInfo(element.Label, element.Box, 0.95);
+        var targetInfo = new TargetInfo(element.Label, element.Box, 0.95, Action: null);
         Check(Safety.ObservedTarget(targetInfo, [element]));
         Check(!Safety.ObservedTarget(targetInfo, [element with { IsEnabled = false, Targetable = false }]));
         Check(!Safety.ObservedTarget(targetInfo with { Label = "Unobserved" }, [element]));
         Check(!Safety.ObservedTarget(targetInfo with { Box = [0.2, 0.2, 0.3, 0.1] }, [element]));
         Check(!Safety.ObservedTarget(targetInfo with { Confidence = 0.79 }, [element]));
         Check(!Safety.Matches(good with { Status = "completed", Target = targetInfo }, "observation", "window"));
+        Check(AutomationEvidence.ActionName(true, true, true, true, "off") == "toggle");
+        Check(AutomationEvidence.ActionName(false, true, true, true, null) == "invoke");
+        Check(AutomationEvidence.ActionName(false, false, true, true, null) == "select");
+        Check(AutomationEvidence.ActionName(false, false, false, true, "collapsed") == "expand");
+        Check(AutomationEvidence.ActionName(false, false, false, true, "expanded") == "collapse");
+        Check(AutomationEvidence.ActionName(false, false, false, false, null) is null);
+        var actionableElement = element with { TargetId = "uia-action", Action = "invoke" };
+        var actionableTarget = targetInfo with { TargetId = "uia-action", Action = "invoke" };
+        Check(Safety.ObservedTarget(actionableTarget, [actionableElement]));
+        Check(!Safety.ObservedTarget(actionableTarget with { TargetId = "uia-other" }, [actionableElement]));
+        Check(!Safety.ObservedTarget(actionableTarget with { Action = "toggle" }, [actionableElement]));
+        Check(MainWindow.CanAutoExecuteScreenAction(true, true, actionableTarget, CameraRecoveryInteractionMode.Control));
+        Check(!MainWindow.CanAutoExecuteScreenAction(false, true, actionableTarget, CameraRecoveryInteractionMode.Control));
+        Check(!MainWindow.CanAutoExecuteScreenAction(true, false, actionableTarget, CameraRecoveryInteractionMode.Control));
+        Check(!MainWindow.CanAutoExecuteScreenAction(true, true, targetInfo, CameraRecoveryInteractionMode.Control));
+        Check(!MainWindow.CanAutoExecuteScreenAction(true, true, actionableTarget, CameraRecoveryInteractionMode.Guide));
+        Check(!Safety.ObservedTarget(actionableTarget, [actionableElement, actionableElement]));
+        Check(!Safety.ObservedTarget(actionableTarget, [actionableElement with { IsPassword = true }]));
+        Check(!Safety.ObservedTarget(actionableTarget, [actionableElement with { IsOffscreen = true }]));
+        string valueHash = AutomationEvidence.ValueDigest("");
+        var writable = actionableElement with
+        { Action = "set_value", IsReadOnly = false, ValueHash = valueHash, ValueLength = 0 };
+        var write = actionableTarget with { Action = "set_value", Value = "Synthetic", ValueHash = valueHash };
+        Check(Safety.ObservedTarget(write, [writable]));
+        Check(Safety.ObservedTarget(write with { Value = "" }, [writable]));
+        Check(!Safety.ObservedTarget(write, [writable with { IsReadOnly = true }]));
+        Check(!Safety.ObservedTarget(write, [writable with { ValueHash = AutomationEvidence.ValueDigest("changed") }]));
+        Check(!Safety.ObservedTarget(write with { Value = new string('x', 1001) }, [writable]));
+        Check(!Safety.ObservedTarget(write with { Value = "\0" }, [writable]));
+        var scrolling = actionableElement with { Action = "scroll", ScrollDirections = ["down"] };
+        var scroll = actionableTarget with { Action = "scroll", ScrollDirection = "down" };
+        Check(Safety.ObservedTarget(scroll, [scrolling]));
+        Check(!Safety.ObservedTarget(scroll with { ScrollDirection = "left" }, [scrolling]));
+        Check(!Safety.ObservedTarget(scroll with { Value = "unexpected" }, [scrolling]));
+        Check(AutomationEvidence.ScrollDirections(-1, 0).SequenceEqual(["down"]));
+        Check(AutomationEvidence.ScrollDirections(100, 100).SequenceEqual(["left", "up"]));
+        Check(AutomationEvidence.ScrollDirections(double.NaN, -1).Length == 0);
+        Check(Safety.GuidanceBudget(now, now) == TimeSpan.FromSeconds(54));
+        Check(Safety.GuidanceBudget(now.AddSeconds(-53.5), now) == TimeSpan.FromMilliseconds(500));
+        Check(Safety.GuidanceBudget(now.AddSeconds(-54), now) == TimeSpan.Zero);
+        Check(MainWindow.PreserveScreenActionApproval(1, 1, true,
+            CameraRecoveryInteractionMode.Control, actionableTarget));
+        Check(!MainWindow.PreserveScreenActionApproval(1, 1, true,
+            CameraRecoveryInteractionMode.Guide, actionableTarget));
+        Check(!MainWindow.PreserveScreenActionApproval(2, 1, true,
+            CameraRecoveryInteractionMode.Control, actionableTarget));
         var identity = new WindowChoice(new nint(0x1234), 42, "Original title", "Chrome_WidgetWin_1");
         Check(identity.SameIdentity(42, "Chrome_WidgetWin_1"));
         Check(!identity.SameIdentity(43, "Chrome_WidgetWin_1"));

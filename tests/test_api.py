@@ -8,7 +8,7 @@ import secrets
 import pytest
 from tests.local_client import TestClient
 from src.copilot_provider import CopilotProviderFailure
-from src.main import GUIDANCE_TIMEOUT_SECONDS, Config, LocalBoundary, create_app, now
+from src.main import GUIDANCE_TIMEOUT_SECONDS, Config, LocalBoundary, _copilot_context, create_app, now
 
 
 @pytest.fixture
@@ -18,6 +18,7 @@ def client(monkeypatch):
     monkeypatch.setenv("MSGUIDE_MODE", "demo")
     monkeypatch.setenv("MSGUIDE_GUIDANCE_PROVIDER", "demo")
     monkeypatch.delenv("MSGUIDE_ENABLE_AUDIT", raising=False)
+    monkeypatch.delenv("MSGUIDE_DIAGNOSTIC_LOG", raising=False)
     with TestClient(create_app(), base_url="http://localhost", headers={"Authorization": f"Bearer {token}"}) as c:
         yield c
 
@@ -49,6 +50,31 @@ def test_health_session(client):
     assert "expiresAt" in r
     s = client.app.state.sessions[r["sessionId"]]
     assert s.owner == "local" and 3590 < (s.expires_at - now()).total_seconds() <= 3600
+
+
+def test_copilot_allowlist_uses_local_unique_ids():
+    from src.models import Observation
+
+    observed = Observation.model_validate({
+        "id": "obs-1",
+        "windowId": "window-1",
+        "application": "Public browser",
+        "capturedAt": now().isoformat(),
+        "width": 800,
+        "height": 600,
+        "ocrText": "",
+        "elements": [{
+            "role": "button",
+            "label": "Open",
+            "box": [0.1, 0.2, 0.3, 0.1],
+            "confidence": 0.9,
+            "targetId": "uia-private-stable-id",
+            "action": "invoke", "isEnabled": True, "isOffscreen": False, "targetable": True,
+        }],
+    })
+    context = _copilot_context(observed)
+
+    assert context["targets"] == [{"id": "element-0", "elementIndex": 0}]
 
 
 @pytest.mark.parametrize("auth", ["", "Bearer", "Bearer ", "Basic abc", "Bearer wrong", "Bearer a b", "Bearer\tbad", "Bearer  bad"])
@@ -276,6 +302,36 @@ def test_audit_privacy(client, monkeypatch, caplog):
         assert r.status_code == 422 and "private-" not in r.text
 
 
+def test_local_diagnostic_log_is_correlated_and_content_free(client, monkeypatch, tmp_path):
+        log = tmp_path / "backend.log"
+        monkeypatch.setenv("MSGUIDE_DIAGNOSTIC_LOG", str(log))
+
+        async def broken(prompt, observation):
+            raise RuntimeError("private-provider-never-log")
+
+        with TestClient(
+            create_app(
+                Config(token=client.headers["authorization"].split()[1]),
+                guidance_provider=broken,
+            ),
+            base_url="http://localhost",
+            headers=dict(client.headers),
+        ) as c:
+            body = evidence(c, text="private-screen-never-log")
+            body["prompt"] = "private-prompt-never-log"
+            response = c.post("/v1/guidance", json=body)
+
+        entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        guidance_entries = [entry for entry in entries if entry["event"].startswith("guidance_")]
+        assert response.status_code == 502
+        assert response.headers["x-msguide-correlation-id"]
+        assert [entry["event"] for entry in guidance_entries] == ["guidance_started", "guidance_failed"]
+        assert guidance_entries[0]["correlationId"] == guidance_entries[1]["correlationId"]
+        assert guidance_entries[1]["errorCode"] == "guidance-unexpected"
+        assert guidance_entries[1]["errorType"] == "RuntimeError"
+        assert "private-" not in log.read_text(encoding="utf-8")
+
+
 def test_bounded_isolated_state(client):
     config = Config(token=client.headers["authorization"].split()[1], max_records=1)
     with TestClient(create_app(config), base_url="http://localhost", headers=dict(client.headers)) as c:
@@ -292,18 +348,22 @@ def test_provider_validation(client):
         assert c.post("/v1/guidance", json=evidence(c)).status_code == 502
 
 
-def test_guidance_route_has_outer_timeout_headroom(client, monkeypatch):
+def test_guidance_route_uses_remaining_freshness(client, monkeypatch):
+    import src.main as main
     observed = []
-    original = asyncio.wait_for
+    original = main._guidance_connected
 
-    async def capture_timeout(awaitable, timeout):
+    async def capture_timeout(awaitable, request, timeout):
         observed.append(timeout)
-        return await original(awaitable, timeout)
+        return await original(awaitable, request, timeout)
 
-    monkeypatch.setattr("src.main.asyncio.wait_for", capture_timeout)
+    monkeypatch.setattr(main, "_guidance_connected", capture_timeout)
     assert client.post("/v1/guidance", json=evidence(client)).status_code == 200
-    assert observed == [GUIDANCE_TIMEOUT_SECONDS]
-    assert GUIDANCE_TIMEOUT_SECONDS == 50.0
+    body = evidence(client)
+    body["observation"]["capturedAt"] = (now() - timedelta(seconds=20)).isoformat()
+    assert client.post("/v1/guidance", json=body).status_code == 200
+    assert 51 < observed[0] <= GUIDANCE_TIMEOUT_SECONDS == 52
+    assert 31 < observed[1] <= 32
 
 
 def test_provider_timeout_maps_to_gateway_timeout(client):
@@ -321,6 +381,28 @@ def test_provider_timeout_maps_to_gateway_timeout(client):
         response = c.post("/v1/guidance", json=evidence(c))
         assert response.status_code == 504
         assert response.json() == {"detail": "Guidance timed out"}
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["not_started", "startup", "invalid_context", "invalid_result", "runtime"],
+)
+def test_provider_failure_exposes_only_sanitized_code(client, code):
+    async def failed(prompt, observation):
+        raise CopilotProviderFailure(code, "private provider detail")
+
+    with TestClient(
+        create_app(
+            Config(token=client.headers["authorization"].split()[1]),
+            guidance_provider=failed,
+        ),
+        base_url="http://localhost",
+        headers=dict(client.headers),
+    ) as c:
+        response = c.post("/v1/guidance", json=evidence(c))
+        assert response.status_code == 502
+        assert response.headers["x-msguide-error-code"] == f"provider-{code}"
+        assert "private" not in response.text
 
 
 def test_guidance_still_rejects_observation_that_ages_out(client, monkeypatch):
@@ -391,4 +473,172 @@ def test_provider_error_redacted(client):
         raise RuntimeError("private provider data")
     with TestClient(create_app(Config(token=client.headers["authorization"].split()[1]), guidance_provider=broken), base_url="http://localhost", headers=dict(client.headers)) as c:
         r = c.post("/v1/guidance", json=evidence(c))
-        assert r.status_code == 502 and "private" not in r.text
+        assert r.status_code == 502
+        assert r.headers["x-msguide-error-code"] == "guidance-unexpected"
+        assert r.headers["x-msguide-error-type"] == "RuntimeError"
+        assert "private" not in r.text
+
+
+def test_allowlist_excludes_observation_only_and_unsafe_controls():
+    from src.models import Observation
+    from tests.test_copilot_provider import observation
+    observed = observation()
+    actionable = observed.elements[0]
+    observed.elements = [
+        actionable.model_copy(update={"targetId": "uia-good"}),
+        actionable.model_copy(update={"targetId": "uia-text", "role": "text", "action": None}),
+        actionable.model_copy(update={"targetId": "uia-readonly", "action": "set_value", "isReadOnly": True}),
+        actionable.model_copy(update={"targetId": "uia-hidden", "isOffscreen": True}),
+        actionable.model_copy(update={"targetId": "uia-disabled", "isEnabled": False}),
+        actionable.model_copy(update={"targetId": "uia-password", "isPassword": True}),
+    ]
+    observed = Observation.model_validate(observed.model_dump())
+    assert _copilot_context(observed)["targets"] == [{"id": "element-0", "elementIndex": 0}]
+    assert _copilot_context(observed)["stepId"] == observed.id
+    assert _copilot_context(observed.model_copy(update={"automationComplete": False}))["targets"] == []
+
+
+def test_guidance_deadline_cancels_owned_provider_work(client, monkeypatch):
+    cancelled = []
+
+    async def slow(prompt, observation):
+        try:
+            await asyncio.sleep(30)
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr("src.main.GUIDANCE_TIMEOUT_SECONDS", 0.03)
+    with TestClient(create_app(Config(token="local-test"), guidance_provider=slow),
+                    headers={"Authorization": "Bearer local-test"}) as c:
+        response = c.post("/v1/guidance", json=evidence(c))
+        assert response.status_code == 504 and cancelled == [True]
+        assert not c.app.state.runner.jobs
+
+
+def test_insufficient_freshness_never_starts_provider(client):
+    async def forbidden(prompt, observation):
+        pytest.fail("Inference started without freshness headroom")
+
+    with TestClient(create_app(Config(token="local-test"), guidance_provider=forbidden),
+                    headers={"Authorization": "Bearer local-test"}) as c:
+        body = evidence(c)
+        body["observation"]["capturedAt"] = (now() - timedelta(seconds=53)).isoformat()
+        assert c.post("/v1/guidance", json=body).status_code == 504
+        body["observation"]["capturedAt"] = (now() - timedelta(seconds=60)).isoformat()
+        assert c.post("/v1/guidance", json=body).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_http_disconnect_aborts_sdk_work_rejects_late_callback_and_releases_lock(tmp_path):
+    import httpx
+    from types import SimpleNamespace
+    from tests.test_copilot_provider import provider, observation, valid_output
+
+    model, runtime = provider(tmp_path, None, delay=30)
+    app = create_app(Config(token="local-test"), guidance_provider=model)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost",
+                                     headers={"Authorization": "Bearer local-test"}) as client:
+            sid = (await client.post("/v1/sessions")).json()["sessionId"]
+            body = {"sessionId": sid, "prompt": "Synthetic request", "consent": True,
+                    "observation": observation().model_dump(mode="json")}
+            messages = asyncio.Queue()
+            await messages.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
+            responses = []
+
+            async def send(message):
+                responses.append(message)
+
+            scope = {
+                "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                "method": "POST", "scheme": "http", "path": "/v1/guidance",
+                "raw_path": b"/v1/guidance", "query_string": b"", "root_path": "",
+                "headers": [(b"host", b"localhost"), (b"authorization", b"Bearer local-test"),
+                            (b"content-type", b"application/json")],
+                "client": ("127.0.0.1", 40000), "server": ("localhost", 80),
+            }
+            request = asyncio.create_task(app(scope, messages.get, send))
+            async with asyncio.timeout(1):
+                while not runtime.sessions or runtime.sessions[0].sent is None:
+                    await asyncio.sleep(0)
+            await messages.put({"type": "http.disconnect"})
+            await asyncio.wait_for(request, 1)
+            await model._cleanup_task
+            first = runtime.sessions[0]
+            assert first.aborted and first.disconnected and not first.agent_active
+            late = await first.options["tools"][0].handler(SimpleNamespace(arguments=valid_output()))
+            assert late.result_type == "rejected"
+            assert responses[0]["status"] == 499
+            runtime.delay, runtime.output = 0, valid_output()
+            response = await asyncio.wait_for(client.post("/v1/guidance", json=body), 1)
+            assert response.status_code == 200 and response.json()["status"] == "next_step"
+            assert not app.state.runner.jobs
+
+
+def test_task_context_echo_bounds_and_content_free_diagnostics(client, monkeypatch, tmp_path):
+    from uuid import uuid4
+    log = tmp_path / "task-diagnostics.log"
+    monkeypatch.setenv("MSGUIDE_DIAGNOSTIC_LOG", str(log))
+    seen = []
+
+    async def fake(prompt, observation, *, task):
+        seen.append(task)
+        return {"status": "needs_input", "instruction": "Private-model-prose",
+                "remainingWork": "Private-remaining-work", "mode": "model"}
+
+    with TestClient(create_app(Config(token="local-test"), guidance_provider=fake),
+                    headers={"Authorization": "Bearer local-test"}) as c:
+        body = evidence(c)
+        body["task"] = {
+            "taskId": str(uuid4()), "step": 2, "status": "running",
+            "remainingWork": "Private-checkpoint", "userInput": "Private-answer",
+            "history": [{"step": 1, "observationId": "previous", "afterObservationId": "current",
+                         "targetId": "uia-old", "label": "Private-label",
+                         "action": "invoke", "outcome": "screen_changed"}],
+        }
+        response = c.post("/v1/guidance", json=body)
+        assert response.status_code == 200
+        assert response.json()["taskId"] == body["task"]["taskId"]
+        assert response.json()["step"] == 2 and response.json()["status"] == "needs_input"
+        assert seen[0].history[0].outcome == "screen_changed" and seen[0].userInput == "Private-answer"
+        body["task"]["history"] *= 17
+        assert c.post("/v1/guidance", json=body).status_code == 422
+    text = log.read_text(encoding="utf-8")
+    assert "Private-" not in text
+    entries = [json.loads(line) for line in text.splitlines() if '"guidance_' in line]
+    assert len(entries) == 2
+    assert all(entry["taskId"] == seen[0].taskId and entry["step"] == 2 for entry in entries)
+
+
+@pytest.mark.parametrize("unsafe", ["action", "read_only", "password", "offscreen", "value", "direction"])
+def test_route_revalidates_semantic_action_inputs(client, unsafe):
+    async def forged(prompt, observation):
+        element = observation.elements[0]
+        target = {
+            "label": element.label, "box": element.box, "confidence": element.confidence,
+            "targetId": element.targetId, "action": "set_value", "value": "Synthetic text",
+            "valueHash": "0" * 64,
+        }
+        if unsafe == "action":
+            target.update(action="invoke", value=None)
+        if unsafe == "value":
+            target["value"] = "x" * 1001
+        if unsafe == "direction":
+            target.update(action="scroll", value=None, scrollDirection="left")
+        return {"status": "next_step", "instruction": "Synthetic", "target": target}
+
+    with TestClient(create_app(Config(token="local-test"), guidance_provider=forged),
+                    headers={"Authorization": "Bearer local-test"}) as c:
+        body = evidence(c)
+        element = body["observation"]["elements"][0]
+        element.update(targetId="uia-input", action="set_value", isEnabled=True, isOffscreen=False,
+                       targetable=True, isPassword=False, isReadOnly=False, valueHash="0" * 64, valueLength=0)
+        if unsafe == "read_only":
+            element["isReadOnly"] = True
+        if unsafe == "password":
+            element["isPassword"] = True
+        if unsafe == "offscreen":
+            element["isOffscreen"] = True
+        if unsafe == "direction":
+            element.update(action="scroll", scrollDirections=["down"])
+        assert c.post("/v1/guidance", json=body).status_code == 502

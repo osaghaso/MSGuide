@@ -77,6 +77,71 @@ internal static class AutomationEvidence
         };
     }
 
+    internal static string ValueDigest(string value) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    internal sealed record ActionMetadata(string? Name, bool? IsReadOnly = null,
+        string? ValueHash = null, int? ValueLength = null, bool? IsSelected = null,
+        string[]? ScrollDirections = null, double? HorizontalScrollPercent = null,
+        double? VerticalScrollPercent = null);
+
+    internal static ActionMetadata ReadAction(AutomationElement element)
+    {
+        var current = element.Current;
+        if (current.IsPassword || current.IsOffscreen || !current.IsEnabled) return new(null);
+        if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePattern)
+            && valuePattern is ValuePattern value && !value.Current.IsReadOnly)
+        {
+            string text = value.Current.Value;
+            // Full-field replacement only. Large/document editors need a dedicated adapter.
+            return text.Length <= 1000
+                ? new("set_value", false, ValueDigest(text), text.Length)
+                : new(null);
+        }
+        bool toggle = element.TryGetCurrentPattern(TogglePattern.Pattern, out _);
+        bool invoke = element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+        bool select = element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selection);
+        bool expandable = element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var pattern);
+        string? state = pattern is ExpandCollapsePattern expand
+            ? expand.Current.ExpandCollapseState.ToString().ToLowerInvariant()
+            : null;
+        string? action = ActionName(toggle, invoke, select, expandable, state);
+        if (action is not null)
+            return new(action, IsSelected: selection is SelectionItemPattern item ? item.Current.IsSelected : null);
+        if (element.TryGetCurrentPattern(ScrollPattern.Pattern, out var scrollPattern)
+            && scrollPattern is ScrollPattern scroll)
+        {
+            double horizontal = scroll.Current.HorizontalScrollPercent;
+            double vertical = scroll.Current.VerticalScrollPercent;
+            var directions = ScrollDirections(horizontal, vertical);
+            if (directions.Length > 0)
+                return new("scroll", ScrollDirections: directions,
+                    HorizontalScrollPercent: horizontal, VerticalScrollPercent: vertical);
+        }
+        return new(null);
+    }
+
+    internal static string? Action(AutomationElement element) => ReadAction(element).Name;
+
+    internal static string[] ScrollDirections(double horizontal, double vertical)
+    {
+        var directions = new List<string>(4);
+        if (horizontal is > 0 and <= 100) directions.Add("left");
+        if (horizontal is >= 0 and < 100) directions.Add("right");
+        if (vertical is > 0 and <= 100) directions.Add("up");
+        if (vertical is >= 0 and < 100) directions.Add("down");
+        return directions.ToArray();
+    }
+
+    internal static string? ActionName(
+        bool toggle, bool invoke, bool select, bool expandable, string? expandState) =>
+        toggle ? "toggle"
+        : invoke ? "invoke"
+        : select ? "select"
+        : expandable && expandState == "collapsed" ? "expand"
+        : expandable && expandState == "expanded" ? "collapse"
+        : null;
+
     internal static bool MatchesTargetId(
         WindowChoice window, Native.RECT rect, AutomationElement element, string expected)
     {
@@ -97,6 +162,49 @@ internal static class AutomationEvidence
         return string.Equals(TargetId(
             window, role, label, box, automationId, Bounded(value.FrameworkId, 64),
             value.ProcessId, runtimeId), expected, StringComparison.Ordinal);
+    }
+
+    internal static AutomationElement? FindUniqueTarget(
+        WindowChoice window, Native.RECT rect, string targetId, string label,
+        string? automationId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var root = AutomationElement.FromHandle(window.Handle);
+        if (root.Current.ProcessId != (int)window.ProcessId) return null;
+        var walker = TreeWalker.RawViewWalker;
+        var clock = Stopwatch.StartNew();
+        int visited = 0;
+        bool incomplete = false, duplicate = false;
+        AutomationElement? match = null;
+        void Walk(AutomationElement node, int depth)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (++visited > 800 || depth > 32 || clock.ElapsedMilliseconds >= 3000)
+            {
+                incomplete = true;
+                return;
+            }
+            var value = node.Current;
+            if (value.IsPassword || value.IsOffscreen) return;
+            bool candidate = string.IsNullOrWhiteSpace(automationId)
+                ? value.Name == label : value.AutomationId == automationId;
+            if (candidate && MatchesTargetId(window, rect, node, targetId))
+            {
+                if (match is not null) { duplicate = true; return; }
+                match = node;
+            }
+            var child = walker.GetFirstChild(node);
+            while (child is not null && !incomplete && !duplicate)
+            {
+                Walk(child, depth + 1);
+                if (incomplete || duplicate) break;
+                child = walker.GetNextSibling(child);
+            }
+        }
+        // Unlike FindAll, traversal has node/depth/time ceilings. Individual COM calls
+        // can still hang; the action caller contains one late native worker.
+        Walk(root, 0);
+        return incomplete || duplicate || clock.ElapsedMilliseconds >= 3000 ? null : match;
     }
 
     internal static AutomationProbeDiagnostic Probe(WindowChoice window, Native.RECT rect, CancellationToken ct)

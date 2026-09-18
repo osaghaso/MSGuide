@@ -161,7 +161,9 @@ public partial class MainWindow
             : "Mode is locked while recovery is active. Stop recovery to choose another mode.";
         CameraModeHint.Text = modeSelectionEnabled
             ? controlMode
-                ? "MSGuide asks for approval before making a supported change."
+                ? sessionAutomationApproved
+                    ? "Fix mode uses the launch grant for bounded screen tasks. Camera changes still require separate approval."
+                    : "MSGuide asks for approval before making a supported change."
                 : "You make changes; MSGuide guides you and checks results."
             : lockedModeHelp;
         string guideModeHelp = modeSelectionEnabled
@@ -450,11 +452,13 @@ public partial class MainWindow
     {
         if (CameraModeHint is null || cameraRecoveryBusy || !cameraRecovery.CanSelectMode)
             return;
+        if (loaded && screenTask?.Running == true) CancelWork(cancelCameraRecovery: false);
         bool endedRun = !cameraRecovery.CanStart;
         ResetCameraRecovery();
         if (loaded && endedRun)
             StatusText.Text = "Camera recovery reset for the selected mode · start when ready.";
         UpdateCameraRecoveryUi();
+        UpdateScreenActionUi();
     }
 
     private void CameraSwitchMode_Click(object sender, RoutedEventArgs e)

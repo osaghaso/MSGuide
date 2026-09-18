@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import sys
+import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from pydantic import ValidationError
 from starlette.datastructures import Headers
 
 from src import guidance
+from src import diagnostics
 from src.actions import ActionRunner, ActionStatus
 from src.camera_recovery import CameraRecoveryEngine, CameraRecoveryError
 from src.copilot_provider import (
@@ -35,12 +37,13 @@ from src.model_provider import ModelConfig, OpenAICompatibleProvider
 from src.models import (
     ActionRiskLevel, AssistRequest, ExecuteRequest, GuidanceRequest, GuidanceResponse,
     GuidanceResult, LogParameters, PreviewRequest, RequestType, SensitivityLevel,
-    WorkItemParameters,
+    WorkItemParameters, OBSERVATION_MAX_AGE_SECONDS, executable_element, guidance_seconds,
 )
 from src.policy import PolicyEngine
 from src.retrieval import RetrieverMock
 
-GUIDANCE_TIMEOUT_SECONDS = 50.0
+GUIDANCE_TIMEOUT_SECONDS = 52.0
+GUIDANCE_FRESHNESS_HEADROOM_SECONDS = 8.0
 
 
 def now():
@@ -131,6 +134,7 @@ class LocalBoundary:
             if not message.get("more_body", False):
                 break
         delivered = False
+        scope.setdefault("state", {})["body_bytes"] = len(body)
 
         async def replay():
             nonlocal delivered
@@ -181,17 +185,17 @@ def _classify_intent(prompt: str) -> RequestType:
 
 def fresh(captured_at):
     age = (now() - captured_at).total_seconds()
-    if age > 60 or age < -5:
+    if age >= OBSERVATION_MAX_AGE_SECONDS or age < -5:
         raise HTTPException(422, "Observation must be at most 60 seconds old and at most 5 seconds in the future")
 
 
 def _copilot_context(observation):
     targets = []
     for index, element in enumerate(observation.elements):
-        if element.confidence < 0.8 or element.isEnabled is False or element.isOffscreen is True:
+        if not observation.automationComplete or not executable_element(element):
             continue
         targets.append({
-            "id": element.targetId or f"element-{index}",
+            "id": f"element-{index}",
             "elementIndex": index,
         })
     citations = []
@@ -213,14 +217,40 @@ def _copilot_context(observation):
         })
     return {
         "observationId": observation.id,
-        "stepId": "screen-guidance",
+        "stepId": observation.id,
         "targets": targets,
         "citations": citations,
     }
 
 
+async def _guidance_connected(awaitable, request: Request, timeout: float):
+    async def disconnected():
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    work = asyncio.create_task(awaitable)
+    disconnect = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait({work, disconnect}, timeout=timeout,
+                                     return_when=asyncio.FIRST_COMPLETED)
+        if disconnect in done:
+            await disconnect
+            raise HTTPException(499, "Guidance request disconnected")
+        if work not in done:
+            raise TimeoutError
+        return await work
+    finally:
+        # The provider cancels its accepted callback and explicitly aborts owned SDK work.
+        # These are owned request tasks, not fire-and-forget work after an HTTP disconnect.
+        for pending in (work, disconnect):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(work, disconnect, return_exceptions=True)
+
+
 def create_app(config: Config | None = None, *, guidance_provider=None) -> FastAPI:
     config = config or Config.from_env()
+    diagnostics.configure(os.getenv("MSGUIDE_DIAGNOSTIC_LOG"))
     if config.mode != "demo":
         raise ValueError("Only local MSGUIDE_MODE=demo is supported")
     if config.guidance_provider not in {"demo", "openai-compatible", "copilot-sdk"}:
@@ -236,18 +266,19 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
     if config.guidance_provider == "copilot-sdk" and guidance_provider is None:
         base_directory = Path(os.getenv(
             "MSGUIDE_COPILOT_HOME",
-            str(Path(os.getenv("LOCALAPPDATA", Path.home())) / "MSGuide" / "copilot"),
+            str(Path.home() / ".copilot"),
         )).expanduser().resolve()
         configured_cli = os.getenv("COPILOT_CLI_PATH", "")
         provider = CopilotProvider(
             CopilotProviderConfig(
                 model=os.getenv("MSGUIDE_COPILOT_MODEL", "gpt-6-astra"),
                 base_directory=base_directory,
+                github_token=os.getenv("COPILOT_GITHUB_TOKEN") or None,
                 reasoning_effort=os.getenv(
-                    "MSGUIDE_COPILOT_REASONING_EFFORT", "xhigh"
+                    "MSGUIDE_COPILOT_REASONING_EFFORT", "low"
                 ),
                 context_tier=os.getenv(
-                    "MSGUIDE_COPILOT_CONTEXT_TIER", "long_context"
+                    "MSGUIDE_COPILOT_CONTEXT_TIER", "default"
                 ),
                 cli_path=Path(configured_cli).expanduser().resolve() if configured_cli else None,
                 agency_microsoft_learn=AgencyMicrosoftLearnConfig(
@@ -269,9 +300,11 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
     async def lifespan(app):
         if lifecycle_provider is not None:
             await lifecycle_provider.start()
+        diagnostics.record("backend_started", provider=config.guidance_provider)
         try:
             yield
         finally:
+            diagnostics.record("backend_stopping", provider=config.guidance_provider)
             await runner.close()
             if lifecycle_provider is not None:
                 await lifecycle_provider.close()
@@ -340,9 +373,24 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
             raise HTTPException(403, "Explicit capture consent is required")
         fresh(body.observation.capturedAt)
         correlation = str(uuid4())
+        diagnostic_token = diagnostics.bind(
+            correlation, body.task.taskId if body.task else None, body.task.step if body.task else None
+        )
+        started = time.monotonic()
+        stage = "request_validated"
+        diagnostics.record(
+            "guidance_started",
+            provider=config.guidance_provider,
+            bodyBytes=getattr(request.state, "body_bytes", None),
+            imageShared=body.observation.imageBase64 is not None,
+            elementCount=len(body.observation.elements),
+            imageWidth=body.observation.width,
+            imageHeight=body.observation.height,
+        )
         recovery = None
         try:
             if body.cameraRecovery is not None:
+                stage = "camera_recovery"
                 verification = body.cameraRecovery.verification
                 if verification is not None:
                     fresh(verification.capturedAt)
@@ -359,13 +407,22 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                         body.sessionId, body.observation, result.target):
                     raise CameraRecoveryError("Camera target no longer matches the observation")
             else:
+                stage = "provider_inference"
+                budget = min(GUIDANCE_TIMEOUT_SECONDS, guidance_seconds(
+                    body.observation.capturedAt, now(), GUIDANCE_FRESHNESS_HEADROOM_SECONDS
+                ))
+                if budget <= 0:
+                    raise TimeoutError
+                arguments = {"task": body.task} if body.task is not None else {}
                 result = GuidanceResult.model_validate(
-                    await asyncio.wait_for(
-                        provider(body.prompt, body.observation),
-                        timeout=GUIDANCE_TIMEOUT_SECONDS,
+                    await _guidance_connected(
+                        provider(body.prompt, body.observation, **arguments), request, budget,
                     )
                 )
+                if result.mode == "model" and result.status == "completed":
+                    result = result.model_copy(update={"status": "completion_candidate"})
                 if result.target is not None:
+                    stage = "target_validation"
                     matches = []
                     for element in body.observation.elements:
                         if result.target.targetId is not None and element.targetId != result.target.targetId:
@@ -389,25 +446,125 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                                  or element.isOffscreen == result.target.isOffscreen)
                             and (result.target.toggleState is None
                                  or element.toggleState == result.target.toggleState)
+                            and result.target.action == element.action
+                            and result.target.valueHash == element.valueHash
+                            and (result.target.action is None
+                                 or body.observation.automationComplete and executable_element(element))
+                            and (result.target.scrollDirection is None
+                                 or result.target.scrollDirection in element.scrollDirections)
                         )
                     if matches != [True]:
                         raise ValueError("Unsupported target")
+            stage = "freshness_validation"
             fresh(body.observation.capturedAt)
+            diagnostics.record(
+                "guidance_completed",
+                status=result.status,
+                targetSelected=result.target is not None,
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
+        except asyncio.CancelledError:
+            diagnostics.record("guidance_cancelled", stage=stage,
+                               elapsedMs=round((time.monotonic() - started) * 1000))
+            raise
         except asyncio.TimeoutError:
-            raise HTTPException(504, "Guidance timed out") from None
+            diagnostics.record(
+                "guidance_failed",
+                stage=stage,
+                errorCode="timeout",
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
+            raise HTTPException(
+                504,
+                "Guidance timed out",
+                headers={"X-MSGuide-Correlation-ID": correlation},
+            ) from None
         except CopilotProviderFailure as exc:
+            diagnostics.record(
+                "guidance_failed",
+                stage=stage,
+                errorCode=f"provider-{exc.code}",
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
+            print(
+                f"MSGuide Copilot provider failure: {exc.code}",
+                file=sys.stderr,
+                flush=True,
+            )
             if exc.code == "timeout":
-                raise HTTPException(504, "Guidance timed out") from None
-            raise HTTPException(502, "Guidance provider failed") from None
+                raise HTTPException(
+                    504,
+                    "Guidance timed out",
+                    headers={"X-MSGuide-Correlation-ID": correlation},
+                ) from None
+            raise HTTPException(
+                502,
+                "Guidance provider failed",
+                headers={
+                    "X-MSGuide-Error-Code": f"provider-{exc.code}",
+                    "X-MSGuide-Correlation-ID": correlation,
+                },
+            ) from None
         except CameraRecoveryError as exc:
+            diagnostics.record(
+                "guidance_failed",
+                stage=stage,
+                errorCode="camera-recovery",
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
             raise HTTPException(422, str(exc)) from None
         except (ValidationError, ValueError):
-            raise HTTPException(502, "Invalid guidance result") from None
-        except HTTPException:
+            diagnostics.record(
+                "guidance_failed",
+                stage=stage,
+                errorCode="guidance-invalid-result",
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
+            raise HTTPException(
+                502,
+                "Invalid guidance result",
+                headers={
+                    "X-MSGuide-Error-Code": "guidance-invalid-result",
+                    "X-MSGuide-Correlation-ID": correlation,
+                },
+            ) from None
+        except HTTPException as exc:
+            diagnostics.record(
+                "guidance_failed",
+                stage=stage,
+                errorCode="http-error",
+                status=exc.status_code,
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
             raise
-        except Exception:
+        except Exception as exc:
             # Provider errors can contain screen text or credentials. Never log or reflect them.
-            raise HTTPException(502, "Guidance provider failed") from None
+            exception_type = type(exc).__name__
+            if not exception_type.isascii() or not exception_type.isidentifier():
+                exception_type = "Unknown"
+            print(
+                f"MSGuide guidance failure: {exception_type}",
+                file=sys.stderr,
+                flush=True,
+            )
+            diagnostics.record(
+                "guidance_failed",
+                stage=stage,
+                errorCode="guidance-unexpected",
+                errorType=exception_type,
+                elapsedMs=round((time.monotonic() - started) * 1000),
+            )
+            raise HTTPException(
+                502,
+                "Guidance provider failed",
+                headers={
+                    "X-MSGuide-Error-Code": "guidance-unexpected",
+                    "X-MSGuide-Error-Type": exception_type,
+                    "X-MSGuide-Correlation-ID": correlation,
+                },
+            ) from None
+        finally:
+            diagnostics.reset(diagnostic_token)
         owned(sessions, body.sessionId, request.state.owner)
         event(correlation, "guidance_" + result.status)
         payload = {
@@ -420,6 +577,10 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
         }
         if recovery is not None:
             payload["cameraRecovery"] = recovery
+        if result.remainingWork is not None:
+            payload["remainingWork"] = result.remainingWork
+        if body.task is not None:
+            payload.update(taskId=body.task.taskId, step=body.task.step)
         return GuidanceResponse(**payload, correlationId=correlation,
                                 observationId=body.observation.id, windowId=body.observation.windowId)
 

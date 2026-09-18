@@ -37,8 +37,20 @@ def observation(**changes):
     return {"id": "obs-1", "windowId": "window-1", "application": "Public sample",
             "capturedAt": now().isoformat(), "width": 2, "height": 2, "ocrText": "public test",
             "elements": [{"role": "button", "label": "First", "box": [0.1, 0.2, 0.3, 0.1], "confidence": 0.9},
-                         {"role": "button", "label": "Second", "box": [0.5, 0.6, 0.2, 0.1], "confidence": 0.8}],
+                         {"role": "button", "label": "Second", "box": [0.5, 0.6, 0.2, 0.1],
+                          "confidence": 0.8, "processId": 42, "targetId": "uia-second",
+                          "automationId": "second-button", "frameworkId": "WPF",
+                          "isEnabled": True, "isOffscreen": False, "targetable": True,
+                          "isPassword": False, "action": "invoke"}],
             **changes}
+
+
+def expected_target(element):
+    return {key: element.get(key) for key in (
+        "label", "box", "confidence", "processId", "targetId", "automationId",
+        "frameworkId", "isEnabled", "isOffscreen", "toggleState", "action",
+        "value", "scrollDirection", "valueHash",
+    )}
 
 
 def approved(**changes):
@@ -145,7 +157,7 @@ def test_grounding_image_and_transport_settings(auth, monkeypatch, caplog):
         assert response.status_code == 200, response.text
         data = response.json()
         element = observation()["elements"][1]
-        assert data["target"] == {k: element[k] for k in ("label", "box", "confidence")}
+        assert data["target"] == expected_target(element)
         assert data["mode"] == "model" and data["citations"] == []
         assert data["observationId"] == "obs-1" and data["windowId"] == "window-1"
         assert not client.app.state.runner.jobs
@@ -242,7 +254,7 @@ def test_low_confidence_and_completion_suggestion():
             assert response.status_code == 200
             data = response.json()
             assert data["target"] is None and data["citations"] == [] and data["mode"] == "model"
-            assert data["status"] == ("clarification" if status == "completed" else status)
+            assert data["status"] == ("completion_candidate" if status == "completed" else status)
             if status == "completed":
                 assert "Suggested completion only" in data["instruction"]
 
@@ -256,7 +268,7 @@ def test_inert_message_metadata_is_accepted():
 def test_uia_only_exact_target_and_confidence():
     with model_client(lambda req: httpx.Response(200, json=reply())) as client:
         result = request(client).json()
-        assert result["target"] == {"label": "Second", "box": [0.5, 0.6, 0.2, 0.1], "confidence": 0.8}
+        assert result["target"] == expected_target(observation()["elements"][1])
         assert result["mode"] == "model" and result["citations"] == []
         obs = observation()
         obs["elements"][1]["confidence"] = 0.799

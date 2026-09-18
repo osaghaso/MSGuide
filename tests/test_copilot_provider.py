@@ -6,6 +6,8 @@ from io import BytesIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 
@@ -20,7 +22,7 @@ from src.copilot_provider import (
     CopilotProviderFailure,
 )
 from src.main import now
-from src.models import Observation
+from src.models import Observation, TaskProgress, TaskStep
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +53,14 @@ def observation(image=False):
                     "label": "Continue",
                     "box": [0.1, 0.2, 0.3, 0.1],
                     "confidence": 0.9,
+                    "automationId": "continue-button",
+                    "frameworkId": "WPF",
+                    "isEnabled": True,
+                    "isOffscreen": False,
+                    "isPassword": False,
+                    "targetable": True,
+                    "targetId": "uia-continue",
+                    "action": "invoke",
                 }
             ],
             "imageBase64": image_base64,
@@ -76,34 +86,59 @@ def approved_context(obs):
 
 
 class FakeSession:
-    def __init__(self, options, output, delay=0):
+    def __init__(self, options, output, delay=0, fail_after_output=False,
+                 abort_delay=0, disconnect_delay=0):
         self.options = options
         self.output = output
         self.delay = delay
+        self.fail_after_output = fail_after_output
         self.sent = None
         self.disconnected = False
+        self.aborted = False
+        self.agent_active = False
+        self.abort_delay, self.disconnect_delay = abort_delay, disconnect_delay
+        self.sent_timeout = None
 
-    async def send_and_wait(self, prompt, *, attachments):
+    async def send_and_wait(self, prompt, *, attachments, timeout=60):
         self.sent = (prompt, attachments)
+        self.sent_timeout = timeout
+        self.agent_active = True
         if self.delay:
             await asyncio.sleep(self.delay)
-        if self.output is not None:
-            invocation = SimpleNamespace(arguments=self.output)
+        output = self.output(json.loads(prompt)) if callable(self.output) else self.output
+        outputs = output if isinstance(output, list) else [output]
+        for output in outputs:
+            if output is None:
+                continue
+            invocation = SimpleNamespace(arguments=output)
             await self.options["tools"][0].handler(invocation)
+        if self.fail_after_output:
+            raise RuntimeError("private post-guidance runtime failure")
+        self.agent_active = False
+
+    async def abort(self):
+        await asyncio.sleep(self.abort_delay)
+        self.aborted = True
+        self.agent_active = False
 
     async def disconnect(self):
+        await asyncio.sleep(self.disconnect_delay)
         self.disconnected = True
 
 
 class FakeClient:
-    def __init__(self, output, delay=0, fail_start=False, **kwargs):
+    def __init__(self, output, delay=0, fail_start=False, fail_after_output=False,
+                 create_delay=0, abort_delay=0, disconnect_delay=0, **kwargs):
         self.output = output
         self.delay = delay
         self.fail_start = fail_start
+        self.fail_after_output = fail_after_output
         self.kwargs = kwargs
         self.started = 0
         self.stopped = 0
         self.sessions = []
+        self.create_delay = create_delay
+        self.abort_delay, self.disconnect_delay = abort_delay, disconnect_delay
 
     async def start(self):
         self.started += 1
@@ -112,9 +147,13 @@ class FakeClient:
 
     async def stop(self):
         self.stopped += 1
+        for session in self.sessions:
+            session.agent_active = False
 
     async def create_session(self, **options):
-        session = FakeSession(options, self.output, self.delay)
+        await asyncio.sleep(self.create_delay)
+        session = FakeSession(options, self.output, self.delay, self.fail_after_output,
+                              self.abort_delay, self.disconnect_delay)
         self.sessions.append(session)
         return session
 
@@ -137,7 +176,7 @@ def provider(tmp_path, output, **client_changes):
 
 def test_inference_timeout_is_bounded_for_fresh_observations(tmp_path):
     config = CopilotProviderConfig(model="gpt-6-astra", base_directory=tmp_path)
-    assert config.timeout_seconds == COPILOT_INFERENCE_TIMEOUT_SECONDS == 45.0
+    assert config.timeout_seconds == COPILOT_INFERENCE_TIMEOUT_SECONDS == 50.0
     with pytest.raises(ValueError):
         CopilotProviderConfig(
             model="gpt-6-astra",
@@ -146,12 +185,34 @@ def test_inference_timeout_is_bounded_for_fresh_observations(tmp_path):
         ).validate()
 
 
+def test_explicit_github_token_is_passed_to_runtime_client(tmp_path):
+    clients = []
+
+    def factory(**kwargs):
+        clients.append(FakeClient(None, **kwargs))
+        return clients[0]
+
+    CopilotProvider(
+        CopilotProviderConfig(
+            model="gpt-6-astra",
+            base_directory=tmp_path,
+            github_token="github_pat_test",
+        ),
+        approved_context,
+        client_factory=factory,
+    )
+
+    assert clients[0].kwargs["github_token"] == "github_pat_test"
+    assert clients[0].kwargs["mode"] == "empty"
+
+
 @pytest.mark.asyncio
 async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     output = {
         "observationId": "obs-1",
         "stepId": "step-2",
         "targetId": "continue",
+        "status": "next_step",
         "instruction": "Select Continue.",
         "citationIds": ["learn-1"],
     }
@@ -166,9 +227,10 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     assert all(session.disconnected for session in client.sessions)
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
     assert first.status == "next_step" and first.target.label == "Continue"
-    assert first.target.targetId is None
+    assert first.target.targetId == "uia-continue"
+    assert first.target.action == "invoke"
     assert first.citations[0].source == "https://learn.microsoft.com/example"
-    assert client.kwargs["mode"] == "empty"
+    assert client.kwargs["mode"] == "copilot-cli"
     options = client.sessions[0].options
     assert list(options["available_tools"]) == ["custom:submit_guidance"]
     assert options["enable_session_store"] is False
@@ -180,6 +242,7 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     body = json.loads(payload)
     assert body["untrustedObservation"]["ocrText"] == "untrusted screen text"
     assert "imageBase64" not in payload and "box" not in body["serverApproved"]["targets"][0]
+    assert body["serverApproved"]["targets"][0]["action"] == "invoke"
     assert attachments == [
         {
             "type": "blob",
@@ -189,6 +252,30 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
         }
     ]
     assert client.sessions[1].sent[1] == []
+    assert all(0 < session.sent_timeout <= 50 for session in client.sessions)
+    assert all(session.aborted and not session.agent_active for session in client.sessions)
+
+
+@pytest.mark.asyncio
+async def test_accepted_guidance_survives_later_session_failure(tmp_path):
+    output = {
+        "observationId": "obs-1",
+        "stepId": "step-2",
+        "targetId": None,
+        "status": "needs_input",
+        "instruction": "The public repository page is visible.",
+        "citationIds": [],
+    }
+    model, client = provider(tmp_path, output, fail_after_output=True)
+    await model.start()
+
+    result = await model("Explain this page", observation(image=True))
+
+    assert result.status == "needs_input"
+    assert result.instruction == "The public repository page is visible."
+    await model._cleanup_task
+    assert client.sessions[0].disconnected and client.sessions[0].aborted
+    await model.close()
 
 
 @pytest.mark.asyncio
@@ -204,11 +291,12 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
         {"instruction": "Visit https://evil.invalid"},
     ],
 )
-async def test_invalid_or_unapproved_tool_result_fails_closed(tmp_path, changes):
+async def test_invalid_or_unapproved_tool_result_fails_explicitly(tmp_path, changes):
     output = {
         "observationId": "obs-1",
         "stepId": "step-2",
         "targetId": None,
+        "status": "needs_input",
         "instruction": "Ask the user to verify the visible screen.",
         "citationIds": [],
         **changes,
@@ -222,11 +310,40 @@ async def test_invalid_or_unapproved_tool_result_fails_closed(tmp_path, changes)
 
 
 @pytest.mark.asyncio
+async def test_rejected_submission_can_be_corrected_with_approved_target(tmp_path):
+    invalid = {
+        "observationId": "obs-1",
+        "stepId": "step-2",
+        "targetId": "invented",
+        "status": "next_step",
+        "instruction": "Select the invented control.",
+        "citationIds": [],
+    }
+    corrected = {
+        "observationId": "obs-1",
+        "stepId": "step-2",
+        "targetId": "continue",
+        "status": "next_step",
+        "instruction": "Select Continue.",
+        "citationIds": [],
+    }
+    model, client = provider(tmp_path, [invalid, corrected])
+    await model.start()
+    result = await model("Help me", observation())
+    await model.close()
+
+    assert result.target is not None
+    assert result.target.label == "Continue"
+    assert client.sessions[0].options["tools"][0].is_terminal is False
+
+
+@pytest.mark.asyncio
 async def test_selected_target_preserves_observation_identity(tmp_path):
     output = {
         "observationId": "obs-1",
         "stepId": "step-2",
         "targetId": "continue",
+        "status": "next_step",
         "instruction": "Select Continue.",
         "citationIds": [],
     }
@@ -239,6 +356,35 @@ async def test_selected_target_preserves_observation_identity(tmp_path):
 
     assert result.target is not None
     assert result.target.targetId == "uia-observation-target"
+    assert result.target.automationId == "continue-button"
+    assert result.target.frameworkId == "WPF"
+    assert result.target.isEnabled is True
+    assert result.target.isOffscreen is False
+
+
+@pytest.mark.asyncio
+async def test_blank_optional_uia_metadata_is_treated_as_absent(tmp_path):
+    output = {
+        "observationId": "obs-1",
+        "stepId": "step-2",
+        "targetId": "continue",
+        "status": "next_step",
+        "instruction": "Select Continue.",
+        "citationIds": [],
+    }
+    observed = observation()
+    observed.elements[0].automationId = ""
+    observed.elements[0].frameworkId = ""
+    model, _ = provider(tmp_path, output)
+
+    await model.start()
+    result = await model("Help me", observed)
+    await model.close()
+
+    assert result.target is not None
+    assert result.target.automationId is None
+    assert result.target.frameworkId is None
+    assert result.target.action == "invoke"
 
 
 @pytest.mark.asyncio
@@ -263,7 +409,8 @@ async def test_timeout_disconnects_without_fallback(tmp_path):
     with pytest.raises(CopilotProviderFailure) as failure:
         await model("help", observation())
     assert failure.value.code == "timeout"
-    assert client.sessions[0].disconnected
+    await model._cleanup_task
+    assert client.sessions[0].disconnected and client.sessions[0].aborted
     await model.close()
 
 
@@ -277,7 +424,9 @@ async def test_caller_cancellation_disconnects_session(tmp_path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert client.sessions[0].disconnected
+    await model._cleanup_task
+    assert client.sessions[0].disconnected and client.sessions[0].aborted
+    assert not client.sessions[0].agent_active
     await model.close()
 
 
@@ -287,6 +436,7 @@ async def test_agency_mcp_is_opt_in_exact_and_read_only(tmp_path):
         "observationId": "obs-1",
         "stepId": "step-2",
         "targetId": None,
+        "status": "needs_input",
         "instruction": "Verify the visible Microsoft setting.",
         "citationIds": ["learn-1"],
     }
@@ -435,3 +585,234 @@ def test_local_cli_path_must_be_an_absolute_existing_file(tmp_path, kind):
         CopilotProviderConfig(
             model="gpt-5", base_directory=tmp_path, cli_path=cli_path
         ).validate()
+
+
+def valid_output(**changes):
+    return {
+        "observationId": "obs-1", "stepId": "step-2", "targetId": "continue",
+        "status": "next_step", "instruction": "Select Continue.", "citationIds": [],
+        **changes,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["blocked", "needs_input", "completion_candidate"])
+async def test_explicit_non_action_outcomes_are_not_completion(tmp_path, status):
+    model, client = provider(tmp_path, valid_output(
+        status=status, targetId=None, remainingWork="Review the requested outcome."
+    ))
+    async with model:
+        result = await model("help", observation())
+        assert result.status == status and result.target is None
+        assert result.remainingWork == "Review the requested outcome."
+        assert result.status != "completed"
+    assert client.sessions[0].aborted
+
+
+@pytest.mark.asyncio
+async def test_task_history_and_step_binding_survive_isolated_sessions(tmp_path):
+    model, client = provider(tmp_path, lambda body: valid_output(
+        observationId=body["serverApproved"]["observationId"],
+        stepId=body["serverApproved"]["stepId"],
+        remainingWork="Open the next page.",
+    ))
+    task_id = str(uuid4())
+    progress = TaskProgress(taskId=task_id, step=1)
+    async with model:
+        first = await model("Original goal", observation(), task=progress)
+        progress = TaskProgress(
+            taskId=task_id, step=2, remainingWork=first.remainingWork,
+            userInput="Keep the original goal.",
+            history=[TaskStep(step=1, observationId="obs-1", afterObservationId="obs-2",
+                              targetId="uia-continue", label="Continue", action="invoke",
+                              outcome="screen_changed")],
+        )
+        second = observation().model_copy(update={"id": "obs-2", "ocrText": "New page"})
+        await model("Original goal", second, task=progress)
+    payloads = [json.loads(session.sent[0]) for session in client.sessions]
+    assert payloads[0]["serverApproved"]["stepId"] != payloads[1]["serverApproved"]["stepId"]
+    assert payloads[1]["request"] == "Original goal"
+    assert payloads[1]["untrustedTask"] == progress.model_dump(mode="json")
+    assert payloads[1]["untrustedObservation"]["ocrText"] == "New page"
+    assert payloads[1]["serverApproved"]["observationId"] == "obs-2"
+    assert all(not session.agent_active for session in client.sessions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [
+    {"action": None}, {"targetId": None}, {"targetable": False},
+    {"isEnabled": False}, {"isOffscreen": True}, {"isPassword": True},
+    {"confidence": 0.79},
+])
+async def test_non_actionable_targets_rejected_even_by_custom_context(tmp_path, changes):
+    observed = observation()
+    observed.elements[0] = observed.elements[0].model_copy(update=changes)
+    model, client = provider(tmp_path, valid_output())
+    async with model:
+        with pytest.raises(CopilotProviderFailure) as failure:
+            await model("help", observed)
+        assert failure.value.code == "invalid_context"
+    assert not client.sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,element_changes,inputs", [
+    ("set_value", {"isReadOnly": False, "valueHash": "0" * 64, "valueLength": 0}, {"value": "Synthetic text"}),
+    ("set_value", {"isReadOnly": False, "valueHash": "0" * 64, "valueLength": 0}, {"value": ""}),
+    ("scroll", {"scrollDirections": ["down"], "verticalScrollPercent": 0.0}, {"scrollDirection": "down"}),
+])
+async def test_semantic_inputs_bound_to_current_capabilities(tmp_path, action, element_changes, inputs):
+    observed = observation()
+    observed.elements[0] = observed.elements[0].model_copy(update={"action": action, **element_changes})
+    model, _ = provider(tmp_path, valid_output(**inputs))
+    async with model:
+        result = await model("Perform this synthetic step", observed)
+    assert result.target.action == action
+    assert result.target.value == inputs.get("value")
+    assert result.target.scrollDirection == inputs.get("scrollDirection")
+    assert result.target.valueHash == element_changes.get("valueHash")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,changes,inputs", [
+    ("set_value", {}, {}),
+    ("set_value", {}, {"value": "x" * 1001}),
+    ("set_value", {}, {"value": "\x00"}),
+    ("set_value", {"isReadOnly": True}, {"value": "text"}),
+    ("set_value", {"isPassword": True}, {"value": "text"}),
+    ("scroll", {}, {"scrollDirection": "left"}),
+    ("scroll", {}, {"scrollDirection": "down", "value": "text"}),
+    ("invoke", {}, {"value": "text"}),
+])
+async def test_semantic_input_mismatch_never_returns_an_action(tmp_path, action, changes, inputs):
+    observed = observation()
+    observed.elements[0] = observed.elements[0].model_copy(update={
+        "action": action, "isReadOnly": False, "valueHash": "0" * 64, "valueLength": 0,
+        "scrollDirections": ["down"], **changes,
+    })
+    model, _ = provider(tmp_path, valid_output(**inputs))
+    async with model:
+        with pytest.raises(CopilotProviderFailure) as failure:
+            await model("help", observed)
+        assert failure.value.code in {"invalid_context", "invalid_result"}
+
+
+@pytest.mark.asyncio
+async def test_remaining_freshness_includes_setup_and_explicit_sdk_timeout(tmp_path):
+    model, client = provider(tmp_path, None, create_delay=0.05, delay=5)
+    observed = observation().model_copy(update={"capturedAt": now() - timedelta(seconds=49.7)})
+    async with model:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(CopilotProviderFailure) as failure:
+            await model("help", observed)
+        assert failure.value.code == "timeout"
+        assert asyncio.get_running_loop().time() - started < 0.8
+        await model._cleanup_task
+        assert 0 < client.sessions[0].sent_timeout < 0.28
+        assert client.sessions[0].aborted and not client.sessions[0].agent_active
+    assert client.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_no_inference_when_freshness_has_no_headroom(tmp_path):
+    model, client = provider(tmp_path, valid_output())
+    async with model:
+        observed = observation().model_copy(update={"capturedAt": now() - timedelta(seconds=51)})
+        with pytest.raises(CopilotProviderFailure) as failure:
+            await model("help", observed)
+        assert failure.value.code == "timeout"
+        assert not client.sessions
+
+
+@pytest.mark.asyncio
+async def test_accepted_result_does_not_wait_for_slow_teardown_and_cleanup_is_single_slot(tmp_path):
+    model, client = provider(tmp_path, valid_output(), disconnect_delay=0.35)
+    async with model:
+        started = asyncio.get_running_loop().time()
+        result = await model("help", observation())
+        elapsed = asyncio.get_running_loop().time() - started
+        assert result.status == "next_step" and elapsed < 0.2
+        assert not client.sessions[0].disconnected
+        next_call = asyncio.create_task(model("next", observation()))
+        await asyncio.sleep(0.03)
+        assert len(client.sessions) == 1  # No accumulating detached sessions.
+        await next_call
+    assert len(client.sessions) == 2
+    assert all(session.aborted and session.disconnected for session in client.sessions)
+    assert not model._owned_cleanup
+
+
+@pytest.mark.asyncio
+async def test_cleanup_timeout_is_bounded_and_prevents_more_owned_work(tmp_path):
+    model, client = provider(tmp_path, valid_output(), abort_delay=5, disconnect_delay=5)
+    object.__setattr__(model.config, "shutdown_timeout_seconds", 0.1)
+    await model.start()
+    result = await model("help", observation())
+    assert result.status == "next_step"
+    await asyncio.wait_for(model._cleanup_task, 0.5)
+    with pytest.raises(CopilotProviderFailure) as failure:
+        await model("next", observation())
+    assert failure.value.code == "runtime" and len(client.sessions) == 1
+    await model.close()
+    assert not client.sessions[0].agent_active
+
+
+@pytest.mark.asyncio
+async def test_cancelled_turn_rejects_late_callbacks_and_does_not_block_next_turn(tmp_path):
+    model, client = provider(tmp_path, None, delay=30)
+    async with model:
+        old = asyncio.create_task(model("old", observation()))
+        while not client.sessions or client.sessions[0].sent is None:
+            await asyncio.sleep(0)
+        old.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old
+        rejected = await client.sessions[0].options["tools"][0].handler(
+            SimpleNamespace(arguments=valid_output())
+        )
+        assert rejected.result_type == "rejected"
+        client.output, client.delay = valid_output(), 0
+        result = await asyncio.wait_for(model("next", observation()), 0.5)
+        assert result.status == "next_step"
+        assert client.sessions[0].aborted and not client.sessions[0].agent_active
+
+
+@pytest.mark.asyncio
+async def test_only_one_correction_is_accepted(tmp_path):
+    model, _ = provider(tmp_path, [
+        valid_output(targetId="invented"), valid_output(stepId="wrong"), valid_output()
+    ])
+    async with model:
+        with pytest.raises(CopilotProviderFailure) as failure:
+            await model("help", observation())
+        assert failure.value.code == "invalid_result"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_call_waiting_for_retirement_without_starting_another_session(tmp_path):
+    model, client = provider(tmp_path, valid_output(), disconnect_delay=0.15)
+    await model.start()
+    await model("first", observation())
+    waiting = asyncio.create_task(model("next", observation()))
+    await asyncio.sleep(0.01)
+    await asyncio.wait_for(model.close(), 0.5)
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert len(client.sessions) == 1 and client.stopped == 1
+    assert not client.sessions[0].agent_active
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_session_creation_stops_owned_runtime(tmp_path):
+    model, client = provider(tmp_path, valid_output(), create_delay=1)
+    await model.start()
+    request = asyncio.create_task(model("help", observation()))
+    await asyncio.sleep(0.01)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await asyncio.wait_for(model._cleanup_task, 0.5)
+    assert client.stopped == 1 and not model._started
+    with pytest.raises(CopilotProviderFailure):
+        await model("next", observation())
+    await model.close()

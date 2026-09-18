@@ -66,14 +66,19 @@ public partial class MainWindow
         if (!CameraRecoverySession.IsCameraHelpIntent(prompt))
         {
             promptRequestActive = false;
-            ResetCameraRecovery();
-            UpdateCameraRecoveryUi();
-            UseScreenContextButton.Visibility = Visibility.Visible;
-            StatusText.Text = "Additional context needed. No action has been taken.";
-            ShowPromptFeedback("I don't have an automated fix for this request yet. Use screen context to choose a window and approve what is shared for guidance.");
+            OpenScreenContext();
+            if (CanAutoCapture(sessionScreenContextApproved, WindowPicker.SelectedItem as WindowChoice))
+            {
+                ShowPromptFeedback("Capturing the invoked app under this Copilot session grant.");
+                await CaptureAndGuideAsync();
+                return;
+            }
+            ShowPromptFeedback("Choose the app you were using, capture it, and approve the context. Copilot launch sessions can execute a bounded sequence of freshly grounded actions.");
             return;
         }
 
+        companion.ShowResponse("Open Details to use the guided Teams camera recovery workflow.");
+        ShowDetailsNearCursor();
         promptRequestActive = true;
         await StartCameraRecoveryAsync(fromPrompt: true);
     }

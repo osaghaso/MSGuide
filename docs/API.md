@@ -41,17 +41,58 @@ Session creation returns `sessionId` and `expiresAt`. Guidance requires:
 | `observation.ocrText` | Required text, at most 16000 characters; desktop supplies UIA names, not pixel OCR. |
 | `observation.elements` | Required list, at most 200 entries: `role`, `label`, `box`, `confidence`; optional strict evidence is described below. |
 | `observation.imageBase64` | Optional raw canonical base64 PNG, not a data-URL string. Omit unless pixel sharing was approved. |
+| `observation.automationComplete` | Strict boolean; an incomplete controls inspection cannot authorize generic execution. |
 | `cameraRecovery` | Optional deterministic Teams camera-recovery request. Omit for legacy/demo guidance. |
+| `task` | Optional bounded generic continuation context; mutually exclusive with `cameraRecovery`. Not execution authority or a server job. |
 
 Boxes are normalized `[x, y, width, height]`, nonempty and entirely inside `[0,1]`. Labels are 1–256 characters, roles 1–64; element confidence is 0–1. PNGs must be single-frame, no more than 1600 pixels per side, match the declared dimensions, and fit within 2,000,000 bytes before and after sanitization (base64 cap 2,666,668 characters). Pillow verifies and re-encodes pixels without metadata. This is not pixel redaction.
 
 Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `processId`, `isEnabled`, `isOffscreen`, and `toggleState` (`off`, `on`, or `indeterminate`); the observation may provide `rootProcessId` and strict `teamsCameraSessionState` (`notInitialized`, `active`, `reinitializing`, `reinitialized`, or `unknown`). Strings, integers, and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. A tree remains rooted to the selected `windowId`, but descendant `processId` is evidence only and is not required to equal `rootProcessId`: New Teams WebView and Settings provider elements can belong to a different process than their top-level HWND. These fields are never authority.
 
-Guidance returns `instruction`, `status` (`next_step`, `clarification`, `completed`), optional `target`, `citations`, `mode`, `correlationId`, and echoed `observationId`/`windowId`. A target is allowed only for `next_step`, must have confidence at least 0.8, and must match an observed label/box with sufficient confidence. The client checks freshness and correspondence again before displaying an outline.
+Elements can declare `action` (`invoke`, `toggle`, `select`, `expand`, `collapse`,
+`set_value`, `scroll`), `targetable`, `isPassword`, `isReadOnly`, `valueHash`,
+`valueLength`, `isSelected`, `scrollDirections`, and horizontal/vertical scroll
+percentages. Executable targets require a stable ID, enabled/targetable true,
+offscreen false, and confidence at least 0.8. Writable value targets additionally
+require non-password/read-only-false evidence and a SHA-256 value digest/length
+(at most 1000); raw existing field values are not transmitted. Scroll directions
+come from supported current UIA state. Non-actionable text remains observation
+context, never an executable target.
+
+Guidance returns `instruction`, `status` (`next_step`, `clarification`, `needs_input`,
+`blocked`, `completion_candidate`, or deterministic `completed`), optional `target`
+and `remainingWork`, citations, mode, correlation ID, and observation/window IDs.
+A target is allowed only for `next_step` and must match fresh observed
+identity/label/box/state/action evidence. `set_value` requires an explicit `value`
+of 0-1000 characters and the same `valueHash`; `scroll` requires one allowlisted
+`scrollDirection`. Other actions forbid these inputs. The desktop checks the
+exact control and input again immediately before invoking.
+
+`task` contains a UUID `taskId`, strictly increasing decision `step` (1-10000),
+local status, at most 16 ordered prior history entries, and `remainingWork` /
+`userInput` strings of at most 1000 characters each. Each entry binds a step,
+before/optional-after observation ID, target ID, label, action, and outcome
+(`effect_observed`, `screen_changed`, `no_progress`, `unknown`, `not_invoked`).
+The server echoes `taskId` and `step` separately in its response. Providers receive
+this as untrusted context, not a claim of success or authority to reuse a target.
+The desktop owns the bounded in-memory task and its verification/continuation UI.
 
 Camera targets additionally return an opaque `targetId` plus the observed process, automation, framework, enabled, offscreen, and toggle evidence. A supplied capture-local ID is echoed; otherwise the server generates one. In both cases the server binds it to the session, observation identity/time, element index, box, label, and state before returning it. A moved or mismatched target is invalid. Older non-camera providers may continue to return targets without these additive fields.
 
-The default provider uses only MSGuide Demo UIA evidence; valid images are accepted but ignored. Other applications or ambiguous targets produce clarification. The optional model selects a UIA index; it cannot invent target coordinates or return tools/citations. Its completion output is downgraded to clarification for user verification. Guidance times out after ten seconds; invalid/provider-failed results are not silently replaced with demo output.
+The default provider uses MSGuide Demo UIA evidence; images are accepted but
+ignored. Copilot selects allowlisted target/citation IDs; the OpenAI-compatible
+provider selects a UIA index. Neither invents coordinates or executes desktop
+tools. Model completion becomes `completion_candidate`, not verified completion;
+the generic desktop loop displays `review_required`, unlike the dedicated local
+camera/demo verifiers. Invalid/absent provider results fail explicitly.
+
+Evidence still expires at 60 seconds. SDK/API/desktop waits are capped at 50/52/54
+seconds and shortened by evidence age, reserving 10/8/6 seconds respectively.
+The OpenAI-compatible provider retains its tighter ten-second cap. Old evidence
+with insufficient headroom fails before inference; results are freshness-checked
+again. HTTP disconnect cancels owned provider work. Copilot explicitly aborts
+before bounded detach; cancelling the SDK wait alone is not sufficient. There
+are no automatic guidance resends or unknown-action retries.
 
 ## Deterministic Teams camera recovery
 
@@ -143,6 +184,10 @@ Preview accepts `{tool, parameters}`. `view_logs` accepts optional `application`
 
 Confirm returns `grantToken`, `expiresIn`, `expiresAt`, and `mock`. Execute accepts only `{grantToken}` and uses the stored preview parameters. Grants cannot be replayed. Job states are `pending`, `running`, `success`, `failed`, or `cancelled`; results explicitly indicate simulation. Job records expire after ten minutes; at most 16 mock jobs may be active.
 
+These 250 ms mock jobs do not invoke UIA and are not generic desktop task
+records. No server queue/executor was added; desktop progress travels on the
+optional guidance `task` contract only.
+
 `MSGUIDE_ENABLE_AUDIT=true` enables the audit route with the same local bearer boundary, not administrator RBAC. `limit` is 1–1000 (default 100); `count` is the current buffer size, while `events` contains the requested tail. Only correlation ID, timestamp, and outcome are recorded. All state is volatile and bounded; restart clears it.
 
 ## Common failures
@@ -156,6 +201,7 @@ Confirm returns `grantToken`, `expiresIn`, `expiresAt`, and `mock`. Execute acce
 | 409 | Already confirmed/consumed preview or grant. |
 | 422 | Invalid request, stale observation, or invalid image. |
 | 429 | Local state capacity or active mock-job limit reached. |
+| 499 | Guidance client disconnected; owned inference was cancelled. |
 | 502 / 504 | Invalid/failed provider result or guidance timeout. |
 
 Capture again and explicitly approve after a desktop error; there is no automatic resend. See [validation](VALIDATION.md) for tests and [model setup](MODEL_SETUP.md) for opt-in remote processing.
