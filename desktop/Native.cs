@@ -40,6 +40,7 @@ public static class Native
     [DllImport("user32.dll")] public static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll")] public static extern nint GetShellWindow();
     [DllImport("user32.dll")] public static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(nint hwnd);
     [DllImport("user32.dll")] public static extern nint WindowFromPoint(POINT point);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern nint SendMessage(nint hwnd, int message, nint wParam, nint lParam);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint hwnd, out uint processId);

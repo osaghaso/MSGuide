@@ -37,7 +37,7 @@ from src.model_provider import ModelConfig, OpenAICompatibleProvider
 from src.models import (
     ActionRiskLevel, AssistRequest, ExecuteRequest, GuidanceRequest, GuidanceResponse,
     GuidanceResult, LogParameters, PreviewRequest, RequestType, SensitivityLevel,
-    WorkItemParameters, OBSERVATION_MAX_AGE_SECONDS, executable_element, guidance_seconds,
+    WorkItemParameters, OBSERVATION_MAX_AGE_SECONDS, executable_element, guidance_seconds, validate_plan,
 )
 from src.policy import PolicyEngine
 from src.retrieval import RetrieverMock
@@ -298,21 +298,35 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
 
     @asynccontextmanager
     async def lifespan(app):
-        if lifecycle_provider is not None:
-            await lifecycle_provider.start()
-        diagnostics.record("backend_started", provider=config.guidance_provider)
+        diagnostics.record("backend_starting", provider=config.guidance_provider)
+        failed = False
         try:
+            if lifecycle_provider is not None:
+                await lifecycle_provider.start()
+            diagnostics.record("backend_started", provider=config.guidance_provider)
             yield
+        except BaseException:
+            failed = True
+            raise
         finally:
             diagnostics.record("backend_stopping", provider=config.guidance_provider)
-            await runner.close()
-            if lifecycle_provider is not None:
-                await lifecycle_provider.close()
-            sessions.clear()
-            previews.clear()
-            grants.clear()
-            audit.clear()
-            camera_recovery.clear()
+            try:
+                await runner.close()
+            finally:
+                try:
+                    if lifecycle_provider is not None:
+                        try:
+                            await lifecycle_provider.close()
+                        except CopilotProviderFailure as exc:
+                            diagnostics.record("backend_cleanup_failed", errorCode=exc.code)
+                            if not failed:
+                                raise
+                finally:
+                    sessions.clear()
+                    previews.clear()
+                    grants.clear()
+                    audit.clear()
+                    camera_recovery.clear()
 
     app = FastAPI(title="MSGuide local demo", version="0.2.0", lifespan=lifespan)
     app.add_middleware(LocalBoundary, config=config)
@@ -414,6 +428,8 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                 if budget <= 0:
                     raise TimeoutError
                 arguments = {"task": body.task} if body.task is not None else {}
+                if body.planSegments:
+                    arguments["plan"] = True
                 result = GuidanceResult.model_validate(
                     await _guidance_connected(
                         provider(body.prompt, body.observation, **arguments), request, budget,
@@ -421,6 +437,11 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                 )
                 if result.mode == "model" and result.status == "completed":
                     result = result.model_copy(update={"status": "completion_candidate"})
+                if body.planSegments and result.plan is None:
+                    raise ValueError("The provider did not return the requested plan segment")
+                if result.plan is not None:
+                    stage = "plan_validation"
+                    validate_plan(result.plan, body.observation)
                 if result.target is not None:
                     stage = "target_validation"
                     matches = []
@@ -440,6 +461,10 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                                  or element.automationId == result.target.automationId)
                             and (result.target.frameworkId is None
                                  or element.frameworkId == result.target.frameworkId)
+                            and (result.target.controlId is None
+                                 or element.controlId == result.target.controlId)
+                            and (result.target.isSelected is None
+                                 or element.isSelected == result.target.isSelected)
                             and (result.target.isEnabled is None
                                  or element.isEnabled == result.target.isEnabled)
                             and (result.target.isOffscreen is None
@@ -461,6 +486,9 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
                 "guidance_completed",
                 status=result.status,
                 targetSelected=result.target is not None,
+                planId=result.plan.planId if result.plan else None,
+                planSteps=len(result.plan.steps) if result.plan else 0,
+                boundary=result.plan.boundary.kind if result.plan else None,
                 elapsedMs=round((time.monotonic() - started) * 1000),
             )
         except asyncio.CancelledError:
@@ -579,6 +607,8 @@ def create_app(config: Config | None = None, *, guidance_provider=None) -> FastA
             payload["cameraRecovery"] = recovery
         if result.remainingWork is not None:
             payload["remainingWork"] = result.remainingWork
+        if result.plan is not None:
+            payload["plan"] = result.plan
         if body.task is not None:
             payload.update(taskId=body.task.taskId, step=body.task.step)
         return GuidanceResponse(**payload, correlationId=correlation,

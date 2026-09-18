@@ -14,20 +14,22 @@ public partial class MainWindow
     {
         if (MicButton is null || AddVoiceButton is null) return;
         bool hasDraft = !string.IsNullOrWhiteSpace(PromptBox.Text);
-        MicButton.Content = speech.Finishing ? "Transcribing..."
+        MicButton.Content = speech.Stopping ? "Stopping microphone..."
+            : speech.Finishing ? "Transcribing..."
             : speech.Listening ? "Stop & transcribe"
             : hasDraft ? "New voice question" : "Start microphone";
         System.Windows.Automation.AutomationProperties.SetName(MicButton,
             speech.Listening ? "Stop recording and transcribe"
             : "Record a new voice question; replace the draft only after recognition succeeds");
-        MicButton.IsEnabled = !speech.Finishing && !speech.InputStopUnconfirmed
+        MicButton.IsEnabled = !speech.Finishing && !speech.Stopping && !speech.InputStopUnconfirmed
             && MicrophonePicker.SelectedItem is MicrophoneChoice;
-        AddVoiceButton.Visibility = hasDraft && !speech.Listening && !speech.Finishing
+        AddVoiceButton.Visibility = hasDraft && !speech.Busy
             ? Visibility.Visible : Visibility.Collapsed;
-        AddVoiceButton.IsEnabled = !speech.InputStopUnconfirmed && MicrophonePicker.SelectedItem is MicrophoneChoice;
+        AddVoiceButton.IsEnabled = !speech.Busy && MicrophonePicker.SelectedItem is MicrophoneChoice;
         MicrophoneStateText.Text = speech.InputStopUnconfirmed ? "MIC STATUS UNKNOWN"
+            : speech.Stopping ? "MIC STOPPING"
             : speech.Finishing ? "TRANSCRIBING" : speech.Listening ? "MIC ON" : "MIC OFF";
-        MicrophonePicker.IsEnabled = !speech.Listening && !speech.Finishing && !speech.InputStopUnconfirmed;
+        MicrophonePicker.IsEnabled = !speech.Busy;
         RefreshMicrophonesButton.IsEnabled = MicrophonePicker.IsEnabled;
         StopAudioButton.Content = speech.Finishing ? "Cancel transcription" : "Stop audio";
         System.Windows.Automation.AutomationProperties.SetName(StopAudioButton,
@@ -37,7 +39,7 @@ public partial class MainWindow
 
     private void StartVoiceDraft(bool append)
     {
-        if (speech.Listening || speech.Finishing || speech.InputStopUnconfirmed)
+        if (speech.Busy)
         {
             ShowPromptFeedback("Stop the current recording or transcription before starting another.");
             return;
@@ -75,7 +77,7 @@ public partial class MainWindow
             var choices = MicrophoneChoice.Enumerate();
             MicrophonePicker.ItemsSource = choices;
             MicrophonePicker.SelectedItem = choices.FirstOrDefault(choice => choice == previous);
-            MicButton.IsEnabled = !speech.InputStopUnconfirmed && MicrophonePicker.SelectedItem is MicrophoneChoice;
+            MicButton.IsEnabled = !speech.Busy && MicrophonePicker.SelectedItem is MicrophoneChoice;
             if (!MicButton.IsEnabled)
             {
                 SpeechText.Text = "The previously selected microphone is unavailable. Choose an input before recording.";
@@ -91,7 +93,7 @@ public partial class MainWindow
 
     private void RefreshMicrophones_Click(object sender, RoutedEventArgs e)
     {
-        if (speech.Listening || speech.Finishing)
+        if (speech.Busy)
         {
             ShowPromptFeedback("Stop dictation before refreshing microphone devices.");
             return;
@@ -102,8 +104,15 @@ public partial class MainWindow
     private void MicrophonePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!loaded || MicrophonePicker.SelectedItem is not MicrophoneChoice input) return;
+        if (speech.Busy)
+        {
+            if (input != speech.Input) MicrophonePicker.SelectedItem = speech.Input;
+            ShowPromptFeedback(speech.Status);
+            UpdateSpeechControls();
+            return;
+        }
         speech.SelectInput(input);
-        MicButton.IsEnabled = true;
+        UpdateSpeechControls();
     }
 
     private void ApplyTranscript(string text)
@@ -123,6 +132,11 @@ public partial class MainWindow
     private void MicrophoneSettings_Click(object sender, RoutedEventArgs e)
     {
         speech.Stop();
+        if (speech.Busy)
+        {
+            ShowPromptFeedback("Wait for confirmed microphone closure before changing audio input settings.");
+            return;
+        }
         try
         {
             using var launched = Process.Start(new ProcessStartInfo("ms-settings:sound") { UseShellExecute = true });

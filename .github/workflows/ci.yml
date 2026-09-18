@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      MSGUIDE_GUIDANCE_PROVIDER: demo
+      MSGUIDE_SESSION_SCREEN_CONTEXT: "0"
+      MSGUIDE_SESSION_AUTOMATION: "0"
+      MSGUIDE_WHISPER_SYNTHETIC_TEST: "0"
+      MSGUIDE_SPEECH_SYNTHETIC_TEST: "0"
+      MSGUIDE_DIAGNOSTIC_LOG: ""
+      MSGUIDE_DESKTOP_LOG: ""
+      PYTHONUTF8: "1"
+      DOTNET_NOLOGO: "true"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          clean: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+          pip-version: "26.2.1"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            requirements-dev.lock.txt
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            desktop\packages.lock.json
+            desktop\CaptureProbe\packages.lock.json
+      - name: Install hash-locked Python dependencies
+        run: |
+          python -m venv --without-pip .venv &&
+            python -m pip --python .venv install --require-hashes --only-binary=:all: -r requirements-dev.lock.txt &&
+            python -m pip --python .venv check
+      - name: Backend and dependency-contract regressions
+        run: .\.venv\Scripts\python -m pytest -q -p no:cacheprovider
+      - name: Restore locked .NET dependencies
+        run: dotnet restore .\desktop\CaptureProbe\MSGuide.CaptureProbe.csproj --locked-mode --verbosity minimal
+      - name: Build desktop and diagnostic probe
+        run: dotnet build .\desktop\CaptureProbe\MSGuide.CaptureProbe.csproj --configuration Release --no-restore --nologo --verbosity minimal
+      - name: Desktop synthetic self-tests
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'msguide-self-test.json'
+          $process = Start-Process -FilePath .\desktop\bin\Release\net10.0-windows10.0.19041.0\MSGuide.Desktop.exe `
+            -ArgumentList '--self-test', '--test-results', "`"$report`"" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Desktop self-test failed: $($process.ExitCode)" }
+          $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          if ($result.passed -ne $true) { throw 'Desktop self-test report did not pass.' }
+          Get-Content -LiteralPath $report

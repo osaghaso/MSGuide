@@ -91,7 +91,7 @@ internal static class WhisperTests
             Check(pcm.Length == 64000, "normal Stop drains final recorder bytes");
             return Task.FromResult<IReadOnlyList<WhisperSegment>>([new("test result", 0.8f)]);
         });
-        recognizer.InputEnded += () => ended++;
+        recognizer.InputStopped += error => { Check(error is null, "input stop acknowledged"); ended++; };
         recognizer.Recognized += (_, _) => recognized++;
         recognizer.Completed += error =>
         {
@@ -156,7 +156,7 @@ internal static class WhisperTests
             unexpected++;
             return Task.FromResult<IReadOnlyList<WhisperSegment>>([]);
         });
-        reentrant.InputEnded += reentrant.Cancel;
+        reentrant.InputStopped += _ => reentrant.Cancel();
         reentrant.Completed += _ => unexpected++;
         reentrant.Start();
         reentrantInput.Emit(CreateTone(0.02f, 1));
@@ -165,19 +165,22 @@ internal static class WhisperTests
         Check(reentrantInput.Disposed && unexpected == 0, "reentrant InputEnded cancellation prevents inference");
 
         var stalledInput = new MemoryWaveIn { NotifyStopped = false };
-        Exception? stopError = null;
+        var stopFailure = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
         int stalledInferences = 0;
         using var stalled = new WhisperDictationRecognizer(() => stalledInput, (_, _) =>
         {
             stalledInferences++;
             return Task.FromResult<IReadOnlyList<WhisperSegment>>([]);
         });
-        stalled.Completed += error => stopError = error;
+        stalled.InputStopped += error => { if (error is not null) stopFailure.TrySetResult(error); };
         stalled.Start();
         stalled.Finish();
-        await stalled.Cleanup.WaitAsync(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
-        Check(stalledInput.Disposed && stopError is not null && stalledInferences == 0,
-            "missing stop callback has bounded cleanup and an explicit error without inference");
+        var stopError = await stopFailure.Task.WaitAsync(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+        Check(stalledInput.Active && !stalledInput.Disposed && stopError is MicrophoneStopUnconfirmedException
+            && stalledInferences == 0, "missing stop acknowledgement retains hardware uncertainty without inference");
+        stalledInput.AcknowledgeStopped();
+        await stalled.Cleanup.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+        Check(stalledInput.Disposed && stalledInferences == 0, "late stop cannot revive timed-out inference");
 
         using var releaseStop = new ManualResetEventSlim();
         var blockedInput = new MemoryWaveIn { BlockStop = releaseStop };
@@ -188,8 +191,11 @@ internal static class WhisperTests
             blockedInference++;
             return Task.FromResult<IReadOnlyList<WhisperSegment>>([]);
         });
-        blocked.Completed += error => reported.TrySetResult(error);
-        blocked.InputEnded += () => blockedInputEnded++;
+        blocked.InputStopped += error =>
+        {
+            if (error is null) blockedInputEnded++;
+            else reported.TrySetResult(error);
+        };
         blocked.Start();
         blocked.Finish();
         try
@@ -301,24 +307,30 @@ internal static class WhisperTests
         return pcm;
     }
 
-    private sealed class MemoryWaveIn : IWaveIn
+    internal sealed class MemoryWaveIn : IWaveIn
     {
         public WaveFormat WaveFormat { get; set; } = new(16000, 16, 1);
         public event EventHandler<WaveInEventArgs>? DataAvailable;
         public event EventHandler<StoppedEventArgs>? RecordingStopped;
         internal int Stops { get; private set; }
         internal bool Disposed { get; private set; }
+        internal bool Active { get; private set; }
         internal byte[]? FinalPcm { get; init; }
         internal bool NotifyStopped { get; init; } = true;
         internal ManualResetEventSlim? BlockStop { get; init; }
-        public void StartRecording() { }
+        public void StartRecording() => Active = true;
         internal void Emit(byte[] pcm) => DataAvailable?.Invoke(this, new WaveInEventArgs(pcm, pcm.Length));
         public void StopRecording()
         {
             Stops++;
             BlockStop?.Wait();
             if (FinalPcm is not null) Emit(FinalPcm);
-            if (NotifyStopped) RecordingStopped?.Invoke(this, new StoppedEventArgs());
+            if (NotifyStopped) AcknowledgeStopped();
+        }
+        internal void AcknowledgeStopped()
+        {
+            Active = false;
+            RecordingStopped?.Invoke(this, new StoppedEventArgs());
         }
         public void Dispose() => Disposed = true;
     }

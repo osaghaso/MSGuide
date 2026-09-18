@@ -21,6 +21,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
     private Phase phase;
     private Task? worker;
     private bool cancellationDisposed;
+    private bool inputClosed, stopFailureReported;
     private int stopRequested;
 
     public string CultureName => "en-US";
@@ -32,7 +33,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
     public event Action<string>? SignalProblem;
     public event Action? Rejected;
     public event Action<Exception?>? Completed;
-    public event Action? InputEnded;
+    public event Action<Exception?>? InputStopped;
 
     internal WhisperDictationRecognizer(int deviceNumber = -1, string? expectedDeviceName = null)
     {
@@ -92,6 +93,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
                 phase = Phase.Cancelled;
                 buffer.Clear();
                 CloseRecorder();
+                ReportInputStopped(null);
                 DisposeCancellation();
                 throw;
             }
@@ -153,7 +155,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
         if (Interlocked.Exchange(ref stopRequested, 1) != 0) return;
         lock (gate)
         {
-            stopDeadline = new System.Threading.Timer(_ => recordingStopped.TrySetResult(
+            stopDeadline = new System.Threading.Timer(_ => ReportInputStopped(
                 new MicrophoneStopUnconfirmedException()),
                 null, TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan);
         }
@@ -163,7 +165,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
             {
                 lock (recorderGate) recorder?.StopRecording();
             }
-            catch (Exception error) { recordingStopped.TrySetResult(error); }
+            catch (Exception) { ReportInputStopped(new MicrophoneStopUnconfirmedException()); }
         });
     }
 
@@ -173,14 +175,8 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
         try
         {
             Exception? captureError = await recordingStopped.Task.ConfigureAwait(false);
-            if (captureError is MicrophoneStopUnconfirmedException)
-            {
-                // Surface the failed stop before joining a potentially stalled native driver.
-                Complete(captureError);
-                CloseRecorder();
-                return;
-            }
             CloseRecorder();
+            ReportInputStopped(null);
             lock (gate)
             {
                 captureDeadline?.Dispose();
@@ -191,7 +187,6 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
                 if (phase == Phase.Recording) cancellation.CancelAfter(FinishTimeout);
                 phase = Phase.Transcribing;
             }
-            Publish(() => InputEnded?.Invoke());
             if (captureError is not null)
                 throw new InvalidOperationException("Microphone capture failed. Check the input device and try again.", captureError);
             cancellation.Token.ThrowIfCancellationRequested();
@@ -208,6 +203,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
         }
         catch (Exception error)
         {
+            if (!inputClosed) ReportInputStopped(new MicrophoneStopUnconfirmedException());
             Complete(new InvalidOperationException(
                 "Local Whisper transcription failed. Check the local model/runtime and try again.", error));
         }
@@ -222,6 +218,30 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
                 captureDeadline = stopDeadline = null;
                 DisposeCancellation();
             }
+        }
+    }
+
+    private void ReportInputStopped(Exception? error)
+    {
+        lock (gate)
+        {
+            if (inputClosed || error is not null && stopFailureReported) return;
+            if (error is null)
+            {
+                inputClosed = true;
+                stopDeadline?.Dispose();
+                stopDeadline = null;
+            }
+            else
+            {
+                stopFailureReported = true;
+                phase = Phase.Cancelled;
+                buffer.Clear();
+                if (!cancellationDisposed) cancellation.Cancel();
+            }
+            DiagnosticLog.Record("microphone_input_stopped", new { confirmed = error is null });
+            // Hardware acknowledgement must survive transcript cancellation, including a late stop.
+            InputStopped?.Invoke(error);
         }
     }
 
@@ -259,10 +279,11 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
 
     public void Cancel()
     {
-        bool stop;
+        bool stop, neverStarted;
         lock (gate)
         {
             if (phase == Phase.Cancelled) return;
+            neverStarted = phase == Phase.New;
             stop = phase is Phase.Recording or Phase.Stopping;
             phase = Phase.Cancelled;
             captureDeadline?.Dispose();
@@ -272,6 +293,7 @@ internal sealed class WhisperDictationRecognizer : IDictationRecognizer
             if (worker is null) DisposeCancellation();
         }
         if (stop) RequestRecorderStop();
+        else if (neverStarted) ReportInputStopped(null);
     }
 
     private void DisposeCancellation()

@@ -57,6 +57,8 @@ public partial class App : Application
                     stage = "self-test";
                     SelfTests.Run();
                     checks.Add("desktop-safety");
+                    CaptureTests.RunEvidenceChecks();
+                    checks.Add("action-priority-evidence-bounds-browser-resource-identity");
                     NotepadTests.Run(checks);
                     stage = "camera-state-fixtures";
                     CameraRecoveryTests.Run();
@@ -67,15 +69,19 @@ public partial class App : Application
                     stage = "screen-task-loop";
                     await PromptTests.RunTaskLoopAsync();
                     checks.Add("screen-task-progress-checkpoint-outcomes-supersession");
+                    stage = "screen-plan-segments";
+                    await PlanTests.RunAsync(checks);
                     stage = "native-action-lifecycle";
                     await PromptTests.RunNativeLifecycleAsync();
                     checks.Add("bounded-native-action-unknown-late-return-no-retry");
+                    checks.Add("visible-target-presentation-before-invocation-no-background-fallback");
                     stage = "guidance-client-deadline";
                     await PromptTests.RunClientDeadlineAsync();
                     checks.Add("guidance-client-remaining-freshness-cancellation");
                     stage = "speech-lifecycle";
                     await SpeechTests.RunAsync();
                     checks.Add("speech-drain-uncertainty-cancellation-input-feedback");
+                    checks.Add("microphone-cancel-stop-timeout-late-ack-second-input-gating");
                     WhisperTests.Run();
                     checks.Add("whisper-bounded-memory-capture");
                     if (Environment.GetEnvironmentVariable("MSGUIDE_WHISPER_SYNTHETIC_TEST") == "1")

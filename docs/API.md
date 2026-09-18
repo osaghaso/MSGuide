@@ -42,12 +42,22 @@ Session creation returns `sessionId` and `expiresAt`. Guidance requires:
 | `observation.elements` | Required list, at most 200 entries: `role`, `label`, `box`, `confidence`; optional strict evidence is described below. |
 | `observation.imageBase64` | Optional raw canonical base64 PNG, not a data-URL string. Omit unless pixel sharing was approved. |
 | `observation.automationComplete` | Strict boolean; an incomplete controls inspection cannot authorize generic execution. |
+| `observation.resourceId` | Optional opaque local resource-scope ID. Required for queued desktop execution; absence still permits descriptive guidance. |
+| `planSegments` | Strict boolean, default `false` for legacy clients. The desktop sends `true`; a missing plan then fails explicitly rather than silently returning one click. Mutually exclusive with camera recovery. |
 | `cameraRecovery` | Optional deterministic Teams camera-recovery request. Omit for legacy/demo guidance. |
 | `task` | Optional bounded generic continuation context; mutually exclusive with `cameraRecovery`. Not execution authority or a server job. |
 
 Boxes are normalized `[x, y, width, height]`, nonempty and entirely inside `[0,1]`. Labels are 1–256 characters, roles 1–64; element confidence is 0–1. PNGs must be single-frame, no more than 1600 pixels per side, match the declared dimensions, and fit within 2,000,000 bytes before and after sanitization (base64 cap 2,666,668 characters). Pillow verifies and re-encodes pixels without metadata. This is not pixel redaction.
 
-Each element may additionally provide a capture-local opaque `targetId`, `automationId`, `frameworkId`, `processId`, `isEnabled`, `isOffscreen`, and `toggleState` (`off`, `on`, or `indeterminate`); the observation may provide `rootProcessId` and strict `teamsCameraSessionState` (`notInitialized`, `active`, `reinitializing`, `reinitialized`, or `unknown`). Strings, integers, and booleans are strict, unknown properties remain rejected, and non-null element `targetId` values must be unique within the observation. A tree remains rooted to the selected `windowId`, but descendant `processId` is evidence only and is not required to equal `rootProcessId`: New Teams WebView and Settings provider elements can belong to a different process than their top-level HWND. These fields are never authority.
+Each element may additionally provide a reviewed-state `targetId`, stable logical
+`controlId`, `automationId`, `frameworkId`, `processId`, `isEnabled`, `isOffscreen`,
+and `toggleState` (`off`, `on`, `indeterminate`). Non-null `targetId` and
+`controlId` values must each be unique in an observation. The desktop derives
+logical identity from the selected window, provider PID and nonempty runtime ID,
+separately from the label/box-bound reviewed token. Missing/ambiguous runtime IDs
+do not authorize actions. The observation may also supply `rootProcessId` and
+`teamsCameraSessionState`. Descendant provider PIDs need not equal the selected
+root PID; selected-HWND rooting is mandatory. These fields are evidence, not grants.
 
 Elements can declare `action` (`invoke`, `toggle`, `select`, `expand`, `collapse`,
 `set_value`, `scroll`), `targetable`, `isPassword`, `isReadOnly`, `valueHash`,
@@ -76,6 +86,83 @@ before/optional-after observation ID, target ID, label, action, and outcome
 The server echoes `taskId` and `step` separately in its response. Providers receive
 this as untrusted context, not a claim of success or authority to reuse a target.
 The desktop owns the bounded in-memory task and its verification/continuation UI.
+Continuation context can additionally contain `plan`, `planCursor` (0 through the
+segment length), and `replanReason` (at most 500 characters). This retained plan is
+untrusted model context; old target tokens are not execution authority.
+
+## Structured plan segments
+
+With `planSegments: true`, generic guidance returns `status: "next_step"`,
+`target: null`, and a `plan`. The canonical shape is:
+
+```json
+{
+  "planId": "00000000-0000-0000-0000-000000000001",
+  "windowId": "window-1",
+  "resourceId": "resource-synthetic",
+  "steps": [
+    {
+      "kind": "action",
+      "instruction": "Open the currently observed menu.",
+      "controlId": "control-observed",
+      "intent": {"role": "button", "label": "Menu", "action": "invoke"}
+    },
+    {
+      "kind": "action",
+      "instruction": "Select the next uniquely matching control.",
+      "intent": {"role": "button", "label": "Details", "action": "invoke"}
+    }
+  ],
+  "boundary": {
+    "kind": "needs_input",
+    "reason": "The next part needs information from the user.",
+    "needed": "Provide the requested resource or clarification."
+  }
+}
+```
+
+There are at most **32 steps per response**, not per execution run. The desktop
+has no eight-action or two-minute execution checkpoint. Every step has a nonempty instruction of at most 500
+characters. `kind` is `action` or a terminal `manual` handoff. Manual steps have
+no target or action parameters and cannot precede more executable steps.
+Boundary kinds are `completion_candidate`, `resource`, `needs_input`,
+`permission`, `observation`, `unsupported`, and `plan_limit`. `reason` is 1-500
+characters; `needed` is at most 1000 and mandatory/nonblank except for completion
+suggestions. A 32-step segment cannot claim completion; it must expose a boundary.
+After observed progress, `plan_limit` and `observation` automatically request a
+fresh plan on the same approved, completely inspectable resource. Other boundary
+kinds still stop for review. An empty plan never causes automatic replanning;
+the existing 10,000-decision protocol ceiling remains.
+
+Action intents use exact `role`, `label`, supported `action`, and optional exact
+`automationId` / `frameworkId`. Toggles require the expected `toggleState` on/off;
+selection requires `isSelected: false`. `value` and a `valueHash` are required
+only for `set_value`; `scrollDirection` is required only for `scroll`. A deferred
+write (no `controlId`) must use the SHA-256 of an empty value, so it cannot replace
+unexpected nonempty text. Known-control steps preserve the server-derived
+reviewed value hash. Password/read-only/availability/value checks run again live.
+
+Model input is deliberately different: each action selects one approved
+`targetId` (Copilot) / `targetIndex`, or supplies a deferred `intent`. The server
+derives canonical `controlId` and preconditions from observed references.
+Invented opaque IDs, unknown fields, unsupported operations, malformed later
+steps, scope mismatch, and incompatible inputs reject the whole plan before its
+first action. Deferred intents are descriptions, never cached targets: the
+desktop resolves each against fresh complete evidence, requiring exactly one
+actionable match and a unique logical identity before creating a fresh target token.
+
+The desktop reuses suitable post-action evidence for the next local binding.
+Routine expected changes do not cause another model call. It retains remaining
+steps across batch checkpoints; missing/changed targets and resource boundaries
+pause for explicit review/replanning. New windows are not selected, permissions
+are not granted, and external resources are not fetched automatically. Generic
+document trees without a proven file/site identity require handoff; scope/caption
+changes cannot authorize the rest of an old plan. Guide mode remains non-executing,
+including when approved partial text/images can support a descriptive plan.
+
+Legacy clients can omit `planSegments`; single-target responses remain supported.
+The native capture/integration harness explicitly requests that legacy shape.
+Camera recovery is independent and does not request/upload generic plan segments.
 
 Camera targets additionally return an opaque `targetId` plus the observed process, automation, framework, enabled, offscreen, and toggle evidence. A supplied capture-local ID is echoed; otherwise the server generates one. In both cases the server binds it to the session, observation identity/time, element index, box, label, and state before returning it. A moved or mismatched target is invalid. Older non-camera providers may continue to return targets without these additive fields.
 
@@ -88,7 +175,8 @@ camera/demo verifiers. Invalid/absent provider results fail explicitly.
 
 Evidence still expires at 60 seconds. SDK/API/desktop waits are capped at 50/52/54
 seconds and shortened by evidence age, reserving 10/8/6 seconds respectively.
-The OpenAI-compatible provider retains its tighter ten-second cap. Old evidence
+The OpenAI-compatible provider uses a 50-second cap for plan output and retains
+its ten-second cap for legacy single-step requests. Old evidence
 with insufficient headroom fails before inference; results are freshness-checked
 again. HTTP disconnect cancels owned provider work. Copilot explicitly aborts
 before bounded detach; cancelling the SDK wait alone is not sufficient. There

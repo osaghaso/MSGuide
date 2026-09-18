@@ -56,6 +56,45 @@ internal static class CaptureTests
             foreach (var child in Buttons(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
 
+    internal static void RunEvidenceChecks()
+    {
+        var context = Enumerable.Range(0, 250).Select(index =>
+            new ElementInfo("text", $"Synthetic text {index}", [0, 0, 0.1, 0.1],
+                Targetable: false)).ToArray();
+        var button = new ElementInfo("button", "Synthetic action", [0.1, 0.2, 0.3, 0.1],
+            TargetId: "uia-action", Action: "invoke", ControlId: "control-action");
+        var document = new ElementInfo("document", "Synthetic document", [0, 0, 1, 1], Targetable: false);
+        var bounded = CaptureService.BoundEvidence([.. context, document, button], "", "", true);
+        Require(bounded.Complete && bounded.ContextTruncated && bounded.Elements.Length == 200
+            && bounded.Elements.Contains(button) && bounded.Elements.Contains(document));
+        bool rejected = false;
+        try { bounded.RequireComplete(); } catch (IncompleteAutomationReadException) { rejected = true; }
+        Require(rejected); // Camera diagnoses still require complete context, not only retained controls.
+        var controls = Enumerable.Range(0, 201).Select(index => button with
+        { TargetId = $"uia-{index}", ControlId = $"control-{index}" }).ToArray();
+        Require(!CaptureService.BoundEvidence(controls, "", "", true).Complete);
+        Require(!CaptureService.BoundEvidence([button], "", "", false).Complete);
+        var shortenedText = CaptureService.BoundEvidence([button], "", "", true, textTruncated: true);
+        Require(shortenedText.Complete && shortenedText.ContextTruncated);
+        Require(CaptureService.BoundEvidence([button], "", "", true).RequireComplete().Single() == button);
+
+        var window = new WindowChoice(new nint(0x1234), 42, "Synthetic browser", "Chrome_WidgetWin_1");
+        string? first = AutomationEvidence.BrowserResourceId(window, "https://example.test/#first");
+        Require(first is not null && first.StartsWith("browser-", StringComparison.Ordinal)
+            && !first.Contains("example", StringComparison.Ordinal)
+            && first == AutomationEvidence.BrowserResourceId(window, "https://example.test/#first")
+            && first != AutomationEvidence.BrowserResourceId(window, "https://example.test/#second")
+            && first != AutomationEvidence.BrowserResourceId(window with { Handle = new nint(0x5678) },
+                "https://example.test/#first"));
+        foreach (string unsupported in new[] { "", "example.test", "file:///C:/test", "javascript:alert(1)",
+                     "https://user:password@example.test/", new string('x', 2049) })
+            Require(AutomationEvidence.BrowserResourceId(window, unsupported) is null);
+        Require(AutomationEvidence.IsBrowserAddressControl("edit", "Address and search bar", false));
+        Require(!AutomationEvidence.IsBrowserAddressControl("edit", "Address and search bar", true));
+        Require(!AutomationEvidence.IsBrowserAddressControl("text", "Address and search bar", false));
+        Require(!AutomationEvidence.IsBrowserAddressControl("edit", "Untrusted address label", false));
+    }
+
     public static async Task Run(List<string> checks, Action<string> stage)
     {
         Application.Current.Dispatcher.VerifyAccess();
@@ -112,7 +151,7 @@ internal static class CaptureTests
                 Require(headings.Where((heading, index) => lines.Contains(heading) != (index == state)).Count() == 0);
                 Require(labels.Where((label, index) => lines.Contains(label) != (index == state)).Count() == 0);
                 Require(evidence.Elements.Length <= 200 && evidence.Elements.All(e => e.Label.Length <= 256
-                    && e.TargetId.StartsWith("uia-") && e.TargetId.Length == 28 && e.Targetable == e.IsEnabled
+                    && e.TargetId is { Length: 28 } targetId && targetId.StartsWith("uia-") && e.Targetable == e.IsEnabled
                     && e.AutomationId.Length <= 128 && e.FrameworkId.Length <= 64 && Safety.ValidBox(e.Box)));
                 foreach (var label in labels)
                     Require(evidence.Elements.Count(e => e.Role == "button" && e.Label == label)
@@ -122,7 +161,7 @@ internal static class CaptureTests
                 stage($"guidance-{state}");
                 var observation = evidence.Observation(false);
                 Require(observation.ImageBase64 is null);
-                var response = await api.Guide(observation, "Help me find the build error", ct);
+                var response = await api.Guide(observation, "Help me find the build error", ct, planSegments: false);
                 Require(evidence.Valid() && Safety.Matches(response, evidence.Id, window.Id)
                     && response.Mode == "demo" && response.Status == (state < 3 ? "next_step" : "completed"));
                 if (state < 3)
@@ -167,8 +206,71 @@ internal static class CaptureTests
                 Require(rejected);
                 checks.Add($"evidence-disposed-{state}");
             }
+            stage("dense-visible-controls");
+            await CheckDenseControls(ct);
+            checks.Add("dense-context-does-not-hide-action-controls-or-enable-background-input");
             stage("complete");
         }
         finally { demo.Hide(); demo.Close(); }
+    }
+
+    private static async Task CheckDenseControls(CancellationToken ct)
+    {
+        var panel = new Grid();
+        for (int index = 0; index < 250; index++)
+            panel.Children.Add(new TextBlock
+            {
+                Text = $"Synthetic context {index}",
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            });
+        var button = new Button
+        {
+            Content = "Synthetic foreground action", Width = 220, Height = 40,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+        };
+        AutomationProperties.SetName(button, "Synthetic foreground action");
+        AutomationProperties.SetAutomationId(button, "dense-action");
+        int invocations = 0;
+        button.Click += (_, _) => invocations++;
+        panel.Children.Add(button);
+        UIElement content = panel;
+        for (int depth = 0; depth < 20; depth++)
+        {
+            var group = new GroupBox { Content = content, Padding = new Thickness(0), BorderThickness = new Thickness(0) };
+            AutomationProperties.SetName(group, $"Synthetic group {depth}");
+            content = group;
+        }
+        var fixture = new Window
+        {
+            Title = "MSGuide owned inspection fixture", Width = 640, Height = 420,
+            ShowActivated = false, Content = content
+        };
+        try
+        {
+            var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.ContentRendered += (_, _) => rendered.TrySetResult();
+            fixture.Show();
+            await rendered.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+            await Idle(ct);
+            var handle = new WindowInteropHelper(fixture).Handle;
+            var window = new WindowChoice(handle, (uint)Environment.ProcessId, fixture.Title);
+            using var snapshot = await CaptureService.Capture(window, ct, includeImage: false);
+            Require(snapshot.Valid() && snapshot.AutomationComplete && snapshot.Elements.Length == 200
+                && snapshot.Note.Contains("Non-action context", StringComparison.Ordinal));
+            var element = snapshot.Elements.Single(item => item.AutomationId == "dense-action");
+            Require(element.Targetable && element.ControlId is not null && element.Action == "invoke");
+            var target = new TargetInfo(element.Label, element.Box, element.Confidence,
+                element.TargetId, element.AutomationId, element.FrameworkId, Action: element.Action,
+                ControlId: element.ControlId);
+            var rebound = await Task.Run(() => AutomationEvidence.FindUniqueTarget(window, snapshot.Rect,
+                element.TargetId!, element.Label, element.AutomationId, ct, snapshot.ResourceId), ct);
+            Require(rebound is not null);
+            Require(Native.GetForegroundWindow() != handle);
+            var result = await DesktopAction.ExecuteAsync(window, snapshot.Rect, snapshot.CapturedAt,
+                target, ct, snapshot.ResourceId);
+            Require(!result.Invoked && result.OutcomeKnown && invocations == 0);
+        }
+        finally { fixture.Close(); }
     }
 }

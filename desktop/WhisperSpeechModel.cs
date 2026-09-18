@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO;
+using System.Diagnostics;
 using Whisper.net;
 
 namespace MSGuide.Desktop;
@@ -47,8 +48,11 @@ internal static class WhisperSpeechModel
             entered = true;
             cancellationToken.ThrowIfCancellationRequested();
             EnsureAvailable();
+            var loadClock = Stopwatch.StartNew();
             using var factory = WhisperFactory.FromPath(ModelPath, new WhisperFactoryOptions { UseGpu = false });
+            DiagnosticLog.Record("whisper_model_loaded", new { elapsedMs = loadClock.ElapsedMilliseconds });
             cancellationToken.ThrowIfCancellationRequested();
+            var processorClock = Stopwatch.StartNew();
             await using var processor = factory.CreateBuilder()
                 .WithLanguage("en")
                 .WithNoContext()
@@ -58,18 +62,30 @@ internal static class WhisperSpeechModel
                 .WithProbabilities()
                 .WithoutStringPool()
                 .Build();
+            DiagnosticLog.Record("whisper_processor_created", new { elapsedMs = processorClock.ElapsedMilliseconds });
             var segments = new List<WhisperSegment>();
             inferenceStarting?.Invoke();
-            await foreach (var segment in processor.ProcessAsync(samples, cancellationToken).ConfigureAwait(false))
+            var inferenceClock = Stopwatch.StartNew();
+            bool finished = false;
+            try
             {
+                await foreach (var segment in processor.ProcessAsync(samples, cancellationToken).ConfigureAwait(false))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string text = CleanTranscript(segment.Text);
+                    if (text.Length != 0)
+                        segments.Add(new WhisperSegment(text,
+                            float.IsFinite(segment.Probability) ? Math.Clamp(segment.Probability, 0, 1) : 0));
+                }
                 cancellationToken.ThrowIfCancellationRequested();
-                string text = CleanTranscript(segment.Text);
-                if (text.Length != 0)
-                    segments.Add(new WhisperSegment(text,
-                        float.IsFinite(segment.Probability) ? Math.Clamp(segment.Probability, 0, 1) : 0));
+                finished = true;
+                return segments;
             }
-            cancellationToken.ThrowIfCancellationRequested();
-            return segments;
+            finally
+            {
+                DiagnosticLog.Record("whisper_inference_finished", new
+                { elapsedMs = inferenceClock.ElapsedMilliseconds, finished, cancelled = cancellationToken.IsCancellationRequested });
+            }
         }
         finally
         {

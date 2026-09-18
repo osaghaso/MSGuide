@@ -21,20 +21,22 @@ public partial class MainWindow : Window
     private Snapshot? snapshot;
     private DemoWindow? demo;
     private long generation;
+    private long pausedGeneration = -1;
+    private string? pausedBanner;
     private bool loaded, refreshing, closing, hotkeyRegistered, sending;
     private DateTimeOffset microphoneStarted;
     private Highlight? highlight;
     private WindowChoice? invokedWindow;
     private ScreenTaskSession? screenTask;
     private nint Handle => new WindowInteropHelper(this).Handle;
-    private sealed record Highlight(WindowChoice Window, Native.RECT Rect, DateTimeOffset CapturedAt, TargetInfo Target)
+    private sealed record Highlight(WindowChoice Window, Native.RECT Rect, DateTimeOffset CapturedAt,
+        TargetInfo Target, string? ResourceId = null)
     {
         public Highlight(WindowChoice window, Native.RECT rect, DateTimeOffset capturedAt, double[] box)
             : this(window, rect, capturedAt, new TargetInfo("Task target", box, 1)) { }
 
         public bool HasShown { get; set; }
     }
-    private sealed record ScreenGuidanceOutcome(bool Guided);
 
     public MainWindow() : this(new SpeechService()) { }
 
@@ -42,12 +44,16 @@ public partial class MainWindow : Window
     {
         this.speech = speech;
         InitializeComponent();
-        companion = new CompanionShell(SubmitCompanionPromptAsync, ShowDetailsNearCursor);
+        companion = new CompanionShell(SubmitCompanionPromptAsync, ShowDetailsNearCursor,
+            ContinueScreenTaskAsync, () => StopScreenTask_Click(this, new RoutedEventArgs()),
+            () => CameraSwitchMode_Click(this, new RoutedEventArgs()),
+            text => PromptBox.Text = text);
         MicrophonePicker.ItemsSource = new[] { MicrophoneChoice.Default };
         MicrophonePicker.SelectedItem = MicrophoneChoice.Default;
         ConfigureScreenShareStatus();
         ConfigureProductShell();
         InitializeCameraRecovery();
+        UpdateCompactTaskUi();
         speech.Transcribed += ApplyTranscript;
         speech.StatusChanged += status =>
         {
@@ -56,6 +62,7 @@ public partial class MainWindow : Window
             AutomationProperties.SetHelpText(SpeechText, status);
             if (!speech.Listening && !speech.Finishing) replaceVoiceDraft = false;
             UpdatePromptSubmissionUi();
+            UpdatePauseStatus();
         };
         speech.PreviewChanged += text =>
         {
@@ -129,10 +136,12 @@ public partial class MainWindow : Window
 
     private void InvokeNearCursor()
     {
-        CancelWork();
+        if (screenTask is null || !cameraRecovery.CanStart || demoTask is not null || notepadTask is not null)
+            CancelWork();
         speech.Stop();
         nint previousForeground = Native.GetForegroundWindow();
         if (previousForeground != 0 && previousForeground != Handle && previousForeground != overlay.Handle
+            && previousForeground != companion.PromptHandle
             && Native.NormalWindow(previousForeground))
         {
             Native.GetWindowThreadProcessId(previousForeground, out var processId);
@@ -140,6 +149,7 @@ public partial class MainWindow : Window
                 Native.WindowClass(previousForeground));
         }
         Hide();
+        UpdateCompactTaskUi();
         companion.Invoke(PromptBox.Text);
         StatusText.Text = sessionScreenContextApproved
             ? "Ready · ask about the app you invoked MSGuide from."
@@ -207,6 +217,7 @@ public partial class MainWindow : Window
 
     private void CancelWork(bool cancelCameraRecovery = true, bool preserveScreenTask = false)
     {
+        pausedBanner = null;
         if (!preserveScreenTask && screenTask is { Running: true } task)
         {
             task.Stop();
@@ -245,7 +256,20 @@ public partial class MainWindow : Window
         CitationsPanel.Children.Clear();
         SpeakButton.IsEnabled = false;
         ModeText.Text = "PAUSED · no execution authority";
-        StatusText.Text = "Paused · no capture, microphone, or speech active.";
+        pausedGeneration = generation;
+        pausedBanner = StatusText.Text;
+        UpdatePauseStatus();
+    }
+
+    private void UpdatePauseStatus()
+    {
+        if (pausedBanner is null || pausedGeneration != generation || StatusText.Text != pausedBanner) return;
+        pausedBanner = speech.InputStopUnconfirmed
+            ? "Paused · microphone status unknown; recording remains blocked until closure is confirmed."
+            : speech.Busy
+                ? "Paused · audio shutdown pending; recording remains blocked."
+                : "Paused · microphone off · no execution authority.";
+        StatusText.Text = pausedBanner;
     }
 
     private void Dismiss()
@@ -321,35 +345,37 @@ public partial class MainWindow : Window
         return captured;
     }
 
-    private async void Send_Click(object sender, RoutedEventArgs e) => _ = await SendAsync();
+    private async void Send_Click(object sender, RoutedEventArgs e) => await SendAsync();
 
-    private async Task<ScreenGuidanceOutcome> SendAsync(bool sessionApproved = false)
+    private async Task SendAsync()
     {
-        if (sending || snapshot is null || (!sessionApproved && ConsentBox.IsChecked != true)) return new(false);
-        if (!snapshot.Valid()) { CancelWork(); StatusText.Text = "Snapshot expired or window changed. Capture and review again."; return new(false); }
+        if (sending || snapshot is null || ConsentBox.IsChecked != true) return;
+        if (!snapshot.Valid()) { CancelWork(); StatusText.Text = "Snapshot expired or window changed. Capture and review again."; return; }
         string prompt = PromptBox.Text.Trim();
-        if (prompt.Length == 0) { StatusText.Text = "Type or dictate a question before sending."; return new(false); }
+        if (prompt.Length == 0) { StatusText.Text = "Type or dictate a question before sending."; return; }
         var current = snapshot;
         var ct = operation?.Token ?? CancellationToken.None;
         long mine = generation;
         sending = true;
-        bool guided = false;
         SendButton.IsEnabled = false;
         speech.Stop();
-        bool shareImage = sessionApproved || ShareImage.IsChecked == true;
-        StatusText.Text = shareImage ? "Sending session-approved text, boxes, and image…" : "Sending approved text and boxes only · image not shared…";
+        bool shareImage = ShareImage.IsChecked == true;
+        StatusText.Text = shareImage ? "Sending approved text, boxes, and image…" : "Sending approved text and boxes only · image not shared…";
         try
         {
             api ??= new ApiClient();
-            var response = await api.Guide(current.Observation(shareImage), prompt, ct);
-            if (!CurrentWork(mine, ct)) return new(false);
-            if (!current.Valid() || !Safety.Matches(response, current.Id, current.Window.Id))
+            var observation = current.Observation(shareImage);
+            var response = await api.Guide(observation, prompt, ct);
+            if (!CurrentWork(mine, ct)) return;
+            if (!current.Valid() || !Safety.Matches(response, current.Id, current.Window.Id)
+                || response.Plan is not null && !Safety.ValidPlan(response.Plan, observation))
                 throw new InvalidOperationException("Discarded stale, mismatched, or invalid response. Capture and review again.");
             var foreground = Native.GetForegroundWindow();
             if (foreground != Handle && foreground != current.Window.Handle)
                 throw new InvalidOperationException("Focus changed to another application. Response discarded; capture again.");
             ModeText.Text = ModeLabel(response.Mode);
-            AnswerText.Text = response.Instruction;
+            AnswerText.Text = response.Instruction
+                + (response.Plan is null ? "" : "\n" + ScreenTaskSession.DescribePlan(response.Plan));
             companion.ShowResponse(response.Instruction);
             ShowPromptFeedback("Guidance is ready in Screen context. Review the next step below.");
             SpeakButton.IsEnabled = true;
@@ -361,32 +387,23 @@ public partial class MainWindow : Window
                 "blocked" => "Unsupported or blocked step · task is not complete.",
                 _ => "Next step ready · switch to the selected window to see the outline."
             };
-            if (response.Status == "next_step" && response.Target is { } target)
+            var suggested = response.Target
+                ?? (response.Plan?.Steps.FirstOrDefault() is { } first ? Safety.BindPlanAction(first, observation) : null);
+            if (response.Status == "next_step" && suggested is { } target)
             {
                 if (!Safety.ObservedTarget(target, current.Elements))
                     StatusText.Text = "Target rejected: not grounded in the reviewed elements, low confidence, or invalid coordinates. No highlight. Capture again or clarify.";
                 else
                 {
-                    highlight = new(current.Window, current.Rect, current.CapturedAt, target);
-                    if (CanAutoExecuteScreenAction(sessionApproved, sessionAutomationApproved, target, SelectedCameraMode))
-                    {
-                        var actionResult = await ExecuteScreenActionAsync(highlight, ct, automatic: true);
-                        if (actionResult is not null)
-                            companion.ShowResponse($"{response.Instruction}\n\n{actionResult.Detail}");
-                    }
-                    else
-                    {
-                        UpdateScreenActionUi();
-                    }
+                    highlight = new(current.Window, current.Rect, current.CapturedAt, target, current.ResourceId);
+                    UpdateScreenActionUi();
                 }
             }
             ClearSnapshot();
-            guided = true;
         }
         catch (OperationCanceledException) { if (mine == generation) { ClearSnapshot(); StatusText.Text = "Request cancelled or timed out. Already sent data cannot be recalled."; } }
         catch (Exception ex) { if (mine == generation) { ClearSnapshot(); ShowError(ex); } }
         finally { if (mine == generation) sending = false; }
-        return new(guided);
     }
 
     private async Task CaptureAndGuideAsync(bool resume = false)
@@ -443,19 +460,21 @@ public partial class MainWindow : Window
                 if (!CurrentWork(mine, ct)) throw new OperationCanceledException(ct);
                 if (snapshot is not { } current || current.Id != observation.Id || !current.Valid()
                     || !Safety.Matches(response, current.Id, window.Id)
-                    || response.TaskId != progress.TaskId || response.Step != progress.Step)
+                    || response.TaskId != progress.TaskId || response.Step != progress.Step
+                    || response.Plan is not null && !Safety.ValidPlan(response.Plan, observation))
                     throw new InvalidOperationException("Discarded stale or mismatched task response.");
                 nint foreground = Native.GetForegroundWindow();
-                if (foreground != Handle && foreground != window.Handle)
+                if (foreground != Handle && foreground != companion.PromptHandle && foreground != window.Handle)
                     throw new InvalidOperationException("Focus changed to another app. No action was accepted.");
                 ModeText.Text = ModeLabel(response.Mode);
-                AnswerText.Text = response.Instruction;
+                AnswerText.Text = response.Instruction
+                    + (response.Plan is null ? "" : "\n" + ScreenTaskSession.DescribePlan(response.Plan));
                 SpeakButton.IsEnabled = true;
                 RenderCitations(response.Citations);
                 if (response.Status == "next_step" && response.Target is { } target
                     && Safety.ObservedTarget(target, current.Elements))
                 {
-                    highlight = new(window, current.Rect, current.CapturedAt, target);
+                    highlight = new(window, current.Rect, current.CapturedAt, target, observation.ResourceId);
                     UpdateScreenActionUi();
                 }
                 return response;
@@ -469,7 +488,7 @@ public partial class MainWindow : Window
                 || snapshot is not { } current || current.Id != observation.Id || !current.Valid())
                 return new(false, true, "Task authority or the fresh target changed. No action was started.");
             var result = await ExecuteScreenActionAsync(
-                new(window, current.Rect, current.CapturedAt, target), token, automatic: true);
+                new(window, current.Rect, current.CapturedAt, target, observation.ResourceId), token, automatic: true);
             if (!CurrentWork(mine, ct)) throw new OperationCanceledException(ct);
             return result ?? new(true, false, "The native action outcome is unknown. No retry is allowed.");
         }
@@ -505,25 +524,45 @@ public partial class MainWindow : Window
     {
         if (ScreenTaskPanel is null) return;
         ScreenTaskPanel.Visibility = screenTask is null ? Visibility.Collapsed : Visibility.Visible;
+        UpdateCompactTaskUi();
         if (screenTask is not { } task) return;
         ScreenTaskStatusText.Text = $"{task.Status} - {task.Detail}"
+            + (task.Plan is null ? "" : "\n" + ScreenTaskSession.DescribePlan(task.Plan, task.PlanCursor))
             + (task.RemainingWork.Length == 0 ? "" : "\nModel checkpoint (unverified): " + task.RemainingWork)
             + (task.History.Count == 0 ? "" : "\nRecent steps:\n" + string.Join("\n",
                 task.History.Select(step => $"{step.Step}. {step.Action} - {step.Outcome}")));
         ContinueScreenTaskButton.IsEnabled = task.CanContinue && !DesktopAction.IsBusy
             && WindowPicker.SelectedItem is WindowChoice selected && selected.Id == task.WindowId;
-        StopScreenTaskButton.IsEnabled = task.Running;
+        ContinueScreenTaskButton.Content = task.ReplanRequired ? "Review boundary & replan" : "Review & continue";
+        StopScreenTaskButton.IsEnabled = task.Running || task.Plan is not null && task.CanContinue;
         ScreenTaskReplyBox.IsEnabled = !task.Running && task.CanContinue;
     }
 
-    private async void ContinueScreenTask_Click(object sender, RoutedEventArgs e)
+    private async void ContinueScreenTask_Click(object sender, RoutedEventArgs e) =>
+        await ContinueScreenTaskAsync(ScreenTaskReplyBox.Text);
+
+    private async Task ContinueScreenTaskAsync(string reply)
     {
         if (screenTask is not { CanContinue: true } task) return;
-        task.UserInput = ScreenTaskReplyBox.Text;
+        task.UserInput = reply;
+        ScreenTaskReplyBox.Clear();
+        companion.Prompt.TaskReply.Clear();
         await CaptureAndGuideAsync(resume: true);
     }
 
-    private void StopScreenTask_Click(object sender, RoutedEventArgs e) => CancelWork();
+    private void StopScreenTask_Click(object sender, RoutedEventArgs e)
+    {
+        screenTask?.Stop();
+        CancelWork();
+        UpdateScreenTaskUi();
+        if (screenTask is { } task) companion.FinishTask(task.Detail);
+    }
+
+    private void UpdateCompactTaskUi() => companion?.UpdateTask(
+        SelectedCameraMode, screenTask,
+        screenTask is { CanContinue: true } task && !DesktopAction.IsBusy
+            && WindowPicker.SelectedItem is WindowChoice selected && selected.Id == task.WindowId,
+        cameraRecoverySensing is ICameraRecoveryControl);
 
     private void ForgetScreenTask()
     {
@@ -652,16 +691,45 @@ public partial class MainWindow : Window
     {
         long mine = generation;
         ApproveScreenActionButton.IsEnabled = false;
-        overlay.Hide();
         StatusText.Text = automatic
-            ? $"Invoking one session-authorized {approved.Target.Action} action on “{approved.Target.Label}”…"
-            : $"Invoking one approved {approved.Target.Action} action on “{approved.Target.Label}”…";
+            ? $"Showing the next {approved.Target.Action} action on “{approved.Target.Label}”…"
+            : $"Showing the approved {approved.Target.Action} action on “{approved.Target.Label}”…";
+        async Task<bool> Present(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!CurrentWork(mine, token) || !approved.Window.Matches()
+                || !Safety.Fresh(approved.CapturedAt, DateTimeOffset.UtcNow)
+                || !Native.GetWindowRect(approved.Window.Handle, out var current)
+                || !approved.Rect.Same(current))
+                return false;
+            nint foreground = Native.GetForegroundWindow();
+            if (!DesktopAction.CanPresentInForeground(foreground, approved.Window.Handle, Handle, companion.PromptHandle)
+                || foreground != approved.Window.Handle && !Native.SetForegroundWindow(approved.Window.Handle))
+                return false;
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);
+            token.ThrowIfCancellationRequested();
+            if (!CurrentWork(mine, token) || Native.GetForegroundWindow() != approved.Window.Handle) return false;
+            highlight = approved;
+            overlay.PointAt(approved.Rect, approved.Target.Box);
+            if (!overlay.IsVisible) return false;
+            approved.HasShown = true;
+            companion.HideForAction();
+            DiagnosticLog.Record("screen_action_presented", new
+            { targetId = approved.Target.TargetId, action = approved.Target.Action, foreground = true });
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);
+            await Task.Delay(250, token);
+            return CurrentWork(mine, token) && overlay.IsVisible
+                && Native.GetForegroundWindow() == approved.Window.Handle;
+        }
         try
         {
-            var result = await DesktopAction.ExecuteAsync(
-                approved.Window, approved.Rect, approved.CapturedAt, approved.Target, ct, Handle);
+            var result = await DesktopAction.RunVisible(Present, token => DesktopAction.ExecuteAsync(
+                approved.Window, approved.Rect, approved.CapturedAt, approved.Target, token,
+                approved.ResourceId), () =>
+                {
+                    if (mine == generation) ClearHighlight();
+                }, ct);
             if (!CurrentWork(mine, ct)) return null;
-            ClearHighlight();
             StatusText.Text = result.Detail;
             return result;
         }
@@ -678,6 +746,14 @@ public partial class MainWindow : Window
             {
                 ClearHighlight();
                 StatusText.Text = "The grounded action could not be invoked. MSGuide did not retry it.";
+            }
+        }
+        finally
+        {
+            if (mine == generation)
+            {
+                if (automatic) companion.ShowTaskStatus(StatusText.Text);
+                else companion.ShowResponse(StatusText.Text);
             }
         }
         return null;

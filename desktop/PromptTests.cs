@@ -54,30 +54,26 @@ internal static class PromptTests
             return Task.FromResult(new DesktopActionResult(true, true, "Invocation returned; effect unverified."));
         }
         await task.RunAsync(Capture, Guide, Execute, true, () => { }, CancellationToken.None, NoDelay);
-        IntegrationTests.Require(task.Status == "checkpoint" && calls == 8 && task.ActionsTaken == 8);
-        IntegrationTests.Require(task.History.Count == 8 && task.History.All(step => step.Outcome == "screen_changed"));
-        IntegrationTests.Require(images.Count == 17 && images.Count(image => image) == 1);
-        IntegrationTests.Require(task.History[^1].AfterObservationId is not null); // Eighth action was observed too.
+        IntegrationTests.Require(task.Status == "review_required" && calls == 10 && task.ActionsTaken == 10);
+        IntegrationTests.Require(task.History.Count == 10 && task.History.All(step => step.Outcome == "screen_changed"));
+        IntegrationTests.Require(images.Count == 21 && images.Count(image => image) == 1);
+        IntegrationTests.Require(task.History.All(step => step.AfterObservationId is not null));
         string originalId = task.Id;
-        await task.RunAsync(Capture, Guide, Execute, true, () => { }, CancellationToken.None, NoDelay);
-        IntegrationTests.Require(task.Status == "review_required" && task.Id == originalId && calls == 10);
         IntegrationTests.Require(task.Detail.Contains("not independently verified", StringComparison.Ordinal));
         IntegrationTests.Require(contexts[8].History.Length == 8 && contexts[8].Step == 9
             && contexts[8].TaskId == originalId && contexts[8].RemainingWork.Length > 0);
         IntegrationTests.Require(contexts.Skip(1).All(context => context.History.Length > 0));
         var bounded = new ScreenTaskSession("Long synthetic task", "synthetic-window");
         var boundedPublished = new List<int>();
-        for (int batch = 0; batch < 3; batch++)
-        {
-            int boundedShownStep = bounded.History.LastOrDefault()?.Step ?? 0;
-            await bounded.RunAsync(Capture,
-                (observation, progress, _) => Task.FromResult(Response(observation, progress)),
-                Execute, true, () => boundedShownStep = MainWindow.PublishScreenTaskActions(
-                    bounded, boundedShownStep, (step, _) => boundedPublished.Add(step)),
-                CancellationToken.None, NoDelay);
-            IntegrationTests.Require(boundedShownStep == bounded.Step - 1);
-        }
-        IntegrationTests.Require(bounded.ActionsTaken == 24 && bounded.History.Count == ScreenTaskSession.HistoryLimit
+        int goal = state + 24, boundedShownStep = 0;
+        await bounded.RunAsync(Capture,
+            (observation, progress, _) => Task.FromResult(Response(observation, progress,
+                state < goal ? "next_step" : "completion_candidate")),
+            Execute, true, () => boundedShownStep = MainWindow.PublishScreenTaskActions(
+                bounded, boundedShownStep, (step, _) => boundedPublished.Add(step)),
+            CancellationToken.None, NoDelay);
+        IntegrationTests.Require(bounded.Status == "review_required" && boundedShownStep == 24
+            && bounded.ActionsTaken == 24 && bounded.History.Count == ScreenTaskSession.HistoryLimit
             && bounded.History[0].Step == 9 && bounded.Progress.History.Length == 16
             && boundedPublished.SequenceEqual(Enumerable.Range(1, 24)));
 
@@ -355,6 +351,37 @@ internal static class PromptTests
 
     public static async Task RunNativeLifecycleAsync()
     {
+        IntegrationTests.Require(DesktopAction.CanPresentInForeground(1, 1, 2, 3)
+            && DesktopAction.CanPresentInForeground(2, 1, 2, 3)
+            && DesktopAction.CanPresentInForeground(3, 1, 2, 3)
+            && !DesktopAction.CanPresentInForeground(4, 1, 2, 3)
+            && !DesktopAction.CanPresentInForeground(0, 1, 2, 3)
+            && !DesktopAction.CanPresentInForeground(2, 0, 2, 3));
+        foreach (string presentation in new[] { "shown", "unavailable", "cancelled", "failed" })
+        {
+            var order = new List<string>();
+            using var cancelled = new CancellationTokenSource();
+            try
+            {
+                var result = await DesktopAction.RunVisible(token =>
+                {
+                    order.Add("present");
+                    if (presentation == "failed") throw new InvalidOperationException("Synthetic presentation failure.");
+                    if (presentation == "cancelled") cancelled.Cancel();
+                    return Task.FromResult(presentation != "unavailable");
+                }, token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    order.Add("invoke");
+                    return Task.FromResult(new DesktopActionResult(true, true, "Synthetic visible action."));
+                }, () => order.Add("clear"), cancelled.Token);
+                IntegrationTests.Require(result.Invoked == (presentation == "shown"));
+            }
+            catch (OperationCanceledException) when (presentation == "cancelled") { }
+            catch (InvalidOperationException) when (presentation == "failed") { }
+            IntegrationTests.Require(order.SequenceEqual(presentation == "shown"
+                ? new[] { "present", "invoke", "clear" } : new[] { "present", "clear" }));
+        }
         foreach (bool startInvocation in new[] { false, true })
         {
             using var release = new ManualResetEventSlim();

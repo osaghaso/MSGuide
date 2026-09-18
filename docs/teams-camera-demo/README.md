@@ -12,7 +12,8 @@ explicit limits; do not present it as unrestricted desktop automation.
 
 - An unlocked Windows 11 desktop. The live scenario was exercised on an ARM64
   Snapdragon PC with English-language Teams.
-- PowerShell 7, .NET 10 SDK, and Python 3.11.
+- PowerShell 7, .NET SDK 10.0.303 (or the patch allowed by `global.json`),
+  and Windows x64 CPython 3.11.9. Use x64 Python on ARM64 Windows for these locks.
 - A working camera and a visible **Teams meeting or prejoin** window.
 - For voice: a microphone and the local Whisper English model.
 - For `-Copilot`: an installed, authenticated Copilot CLI and access to the
@@ -28,11 +29,20 @@ Run from the repository root in PowerShell 7:
 
 ```powershell
 python -m venv venv
-.\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\venv\Scripts\python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock.txt
+dotnet restore .\desktop\MSGuide.Desktop.csproj --locked-mode
 
 # Run only after approving the approximately 466 MiB model download.
 .\scripts\Install-MSGuideSpeechModel.ps1 -AcceptDownload
 ```
+
+`requirements-dev.lock.txt` contains the tested runtime/test closure and wheel
+hashes without workstation-specific mirror URLs. Runtime-only installations use
+`requirements.lock.txt` with the same hash/binary flags. Normal installation does
+not need experimental lock support. Direct intent remains in `requirements.txt` /
+`requirements-dev.txt`; regenerate locks intentionally after manifest changes with
+pip 26.2.1 through `scripts\lock_python_dependencies.py`, without weakening TLS or
+incorporating unrelated packages from an existing venv.
 
 The model installer verifies its size and SHA-256 digest, then stores
 `ggml-small.en.bin` under `%LOCALAPPDATA%\MSGuide\models`. It does not record or

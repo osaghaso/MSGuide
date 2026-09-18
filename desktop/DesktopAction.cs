@@ -14,9 +14,28 @@ internal static class DesktopAction
 
     internal static Task<DesktopActionResult> ExecuteAsync(
         WindowChoice window, Native.RECT reviewedRect, DateTimeOffset capturedAt, TargetInfo target,
-        CancellationToken cancellationToken, nint companion = 0) =>
+        CancellationToken cancellationToken, string? resourceId = null) =>
         RunBounded((token, beginInvocation) => Execute(
-            window, reviewedRect, capturedAt, target, token, beginInvocation, companion), cancellationToken);
+            window, reviewedRect, capturedAt, target, token, beginInvocation, resourceId), cancellationToken);
+
+    internal static bool CanPresentInForeground(nint foreground, nint target, nint companion, nint prompt) =>
+        target != 0 && (foreground == target || foreground != 0 && (foreground == companion || foreground == prompt));
+
+    internal static async Task<DesktopActionResult> RunVisible(
+        Func<CancellationToken, Task<bool>> present,
+        Func<CancellationToken, Task<DesktopActionResult>> invoke,
+        Action clear, CancellationToken token)
+    {
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            if (!await present(token))
+                return new(false, true, "The target could not be shown in the foreground. Select the approved app and continue; no background action was performed.");
+            token.ThrowIfCancellationRequested();
+            return await invoke(token);
+        }
+        finally { clear(); }
+    }
 
     // ponytail: contain one native worker, not a queue. COM cannot be interrupted safely;
     // process isolation is needed to recover a permanently hung provider without restart.
@@ -76,7 +95,7 @@ internal static class DesktopAction
 
     private static DesktopActionResult Execute(
         WindowChoice window, Native.RECT reviewedRect, DateTimeOffset capturedAt, TargetInfo target,
-        CancellationToken cancellationToken, Func<bool> beginInvocation, nint companion)
+        CancellationToken cancellationToken, Func<bool> beginInvocation, string? resourceId)
     {
         if (string.IsNullOrWhiteSpace(target.TargetId)
             || string.IsNullOrWhiteSpace(target.Action)
@@ -92,7 +111,7 @@ internal static class DesktopAction
         {
             element = AutomationEvidence.FindUniqueTarget(
                 window, currentRect, target.TargetId, target.Label,
-                target.AutomationId, cancellationToken);
+                target.AutomationId, cancellationToken, resourceId);
         }
         catch (Exception ex) when (
             ex is ElementNotAvailableException or InvalidOperationException or COMException
@@ -126,6 +145,8 @@ internal static class DesktopAction
                 return new(false, true, "The writable field changed after review. No text was replaced.");
             if (currentAction == "scroll" && metadata.ScrollDirections?.Contains(target.ScrollDirection!) != true)
                 return new(false, true, "The approved scroll direction is no longer available.");
+            if (currentAction == "select" && target.IsSelected is not null && metadata.IsSelected != target.IsSelected)
+                return new(false, true, "The reviewed selection state changed before invocation.");
             var pattern = element.GetCurrentPattern(currentAction switch
             {
                 "toggle" => TogglePattern.Pattern,
@@ -139,9 +160,13 @@ internal static class DesktopAction
             nint foreground = Native.GetForegroundWindow();
             if (!Safety.Fresh(capturedAt, DateTimeOffset.UtcNow) || !window.Matches()
                 || !Native.GetWindowRect(window.Handle, out var invocationRect) || !reviewedRect.Same(invocationRect)
-                || (foreground != window.Handle && foreground != companion)
+                || foreground != window.Handle
+                || resourceId is not null && !AutomationEvidence.ResourceMatches(window, resourceId, cancellationToken)
                 || !AutomationEvidence.MatchesTargetId(window, invocationRect, element, target.TargetId))
                 return new(false, true, "The exact window, focus, or target changed before invocation. No action was started.");
+            if (Native.GetForegroundWindow() != window.Handle
+                || !Safety.Fresh(capturedAt, DateTimeOffset.UtcNow))
+                return new(false, true, "Focus or evidence freshness changed. No background action was started.");
             if (!(invoked = beginInvocation()))
                 return new(false, true, "Cancelled before invocation. No action was started.");
             switch (pattern)

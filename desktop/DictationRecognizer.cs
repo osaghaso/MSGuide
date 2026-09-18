@@ -15,7 +15,7 @@ internal interface IDictationRecognizer : IDisposable
     event Action<string>? SignalProblem;
     event Action? Rejected;
     event Action<Exception?>? Completed;
-    event Action? InputEnded;
+    event Action<Exception?>? InputStopped;
     void Start();
     void Finish();
     void Cancel();
@@ -34,7 +34,9 @@ internal sealed class WindowsDictationRecognizer : IDictationRecognizer
     public event Action<string>? SignalProblem;
     public event Action? Rejected;
     public event Action<Exception?>? Completed;
-    public event Action? InputEnded;
+    public event Action<Exception?>? InputStopped;
+    private bool disposed;
+    private int inputClosureRequested;
 
     internal WindowsDictationRecognizer(Stream? syntheticInput = null)
     {
@@ -51,20 +53,46 @@ internal sealed class WindowsDictationRecognizer : IDictationRecognizer
         engine.SpeechRecognitionRejected += (_, _) => Rejected?.Invoke();
         engine.RecognizeCompleted += (_, e) =>
         {
-            InputEnded?.Invoke();
-            Completed?.Invoke(e.Error);
+            if (Interlocked.Exchange(ref inputClosureRequested, 1) != 0) return;
+            _ = Task.Run(() =>
+            {
+                try { engine.SetInputToNull(); }
+                catch (Exception error) when (error is InvalidOperationException
+                    or System.Runtime.InteropServices.COMException or IOException or UnauthorizedAccessException)
+                {
+                    DiagnosticLog.Record("microphone_input_close_failed", new { errorType = error.GetType().Name });
+                    InputStopped?.Invoke(new MicrophoneStopUnconfirmedException());
+                    return;
+                }
+                InputStopped?.Invoke(null);
+                Completed?.Invoke(e.Error);
+            });
         };
     }
 
     public void Start()
     {
-        engine.LoadGrammar(new DictationGrammar());
-        if (syntheticInput is null) engine.SetInputToDefaultAudioDevice();
-        else engine.SetInputToWaveStream(syntheticInput);
-        engine.RecognizeAsync(RecognizeMode.Multiple);
+        try
+        {
+            engine.LoadGrammar(new DictationGrammar());
+            if (syntheticInput is null) engine.SetInputToDefaultAudioDevice();
+            else engine.SetInputToWaveStream(syntheticInput);
+            engine.RecognizeAsync(RecognizeMode.Multiple);
+        }
+        catch
+        {
+            Dispose();
+            InputStopped?.Invoke(null);
+            throw;
+        }
     }
 
     public void Finish() => engine.RecognizeAsyncStop();
     public void Cancel() => engine.RecognizeAsyncCancel();
-    public void Dispose() => engine.Dispose();
+    public void Dispose()
+    {
+        if (disposed) return;
+        engine.Dispose();
+        disposed = true;
+    }
 }

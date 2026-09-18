@@ -32,7 +32,7 @@ $client = $null
 $http = $null
 try {
     if (!$SkipBuild) {
-        & dotnet build $project --nologo
+        & dotnet build $project --nologo -p:RestoreLockedMode=true
         if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed.' }
     }
     if (!(Test-Path $desktop)) { throw 'Desktop binary missing. Run without -SkipBuild.' }
@@ -100,24 +100,40 @@ try {
     $http = [System.Net.Http.HttpClient]::new($handler)
     $http.Timeout = [TimeSpan]::FromSeconds(2)
     $ready = $false
-    $deadline = [DateTime]::UtcNow.AddSeconds(25)
+    # Provider startup is bounded to 30 seconds; allow another 30 for Python/imports and readiness.
+    $readinessSeconds = 60
+    $deadline = [DateTime]::UtcNow.AddSeconds($readinessSeconds)
+    $readinessStage = 'connect-health'
+    $readinessError = 'none'
+    Write-Host "Starting local API/provider; readiness budget is $readinessSeconds seconds. Diagnostics: $backendLog"
     # Bounded readiness check; wait on the owned child between connection attempts.
     while ([DateTime]::UtcNow -lt $deadline -and !$server.HasExited) {
         try {
             $json = $http.GetStringAsync("$url/health").GetAwaiter().GetResult() | ConvertFrom-Json
+            $readinessStage = 'validate-health'
             if ($json.status -eq 'ok' -and $json.version -eq '0.2.0') {
                 $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, "$url/v1/sessions")
+                $readinessStage = 'authenticate-local-session'
                 try {
                     $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $token)
                     $reply = $http.SendAsync($request).GetAwaiter().GetResult()
-                    try { $ready = $reply.IsSuccessStatusCode } finally { $reply.Dispose() }
+                    try
+                    {
+                        $ready = $reply.IsSuccessStatusCode
+                        $readinessError = "HTTP $([int]$reply.StatusCode)"
+                    }
+                    finally { $reply.Dispose() }
                 } finally { $request.Dispose() }
                 if ($ready) { break }
             }
-        } catch { }
+        } catch { $readinessError = $_.Exception.GetType().Name }
         if ($server.WaitForExit(150)) { break }
     }
-    if (!$ready) { throw 'Local API did not become ready. Check dependency installation and optional provider configuration.' }
+    if (!$ready) {
+        $failure = if ($server.HasExited) { "child exited with code $($server.ExitCode)" }
+            else { "$readinessSeconds-second readiness deadline exceeded" }
+        throw "Local API startup failed: $failure; stage=$readinessStage; lastError=$readinessError. See $backendLog for provider startup diagnostics."
+    }
     Write-Host "MSGuide ready at $url (local single-user mode). Diagnostic logs: $logDirectory"
     if ($Shareable) {
         Write-Warning 'Shareable demo mode is on. MSGuide can appear when you share the full screen.'

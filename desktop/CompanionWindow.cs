@@ -321,14 +321,26 @@ internal sealed class CompanionPromptWindow : Window
     private readonly TextBox prompt;
     private readonly Button ask;
     private readonly Func<string, Task> submit;
+    private readonly Func<string, Task>? continueTask;
+    private readonly TextBlock modeText;
+    private readonly TextBlock taskText;
+    private readonly StackPanel taskPanel;
+    internal Button ContinueTaskButton { get; }
+    internal Button StopTaskButton { get; }
+    internal Button SwitchModeButton { get; }
+    internal TextBox TaskReply { get; }
+    private bool updatingDraft;
     private nint Handle => new WindowInteropHelper(this).Handle;
 
-    public CompanionPromptWindow(Func<string, Task> submit, Action showDetails)
+    public CompanionPromptWindow(Func<string, Task> submit, Action showDetails,
+        Func<string, Task>? continueTask = null, Action? stopTask = null,
+        Action? switchMode = null, Action<string>? editDraft = null)
     {
         this.submit = submit;
+        this.continueTask = continueTask;
         Title = "Ask MSGuide";
-        Width = 440;
-        Height = 116;
+        Width = 470;
+        Height = 164;
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
         AllowsTransparency = true;
@@ -337,6 +349,9 @@ internal sealed class CompanionPromptWindow : Window
         Topmost = true;
 
         var layout = new Grid { Margin = new Thickness(1) };
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         layout.ColumnDefinitions.Add(new ColumnDefinition());
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -373,6 +388,8 @@ internal sealed class CompanionPromptWindow : Window
                 Hide();
             }
         };
+        prompt.TextChanged += (_, _) => { if (!updatingDraft) editDraft?.Invoke(prompt.Text); };
+        System.Windows.Automation.AutomationProperties.SetName(prompt, "New question; editing replaces the previous task");
         Grid.SetColumn(prompt, 1);
         layout.Children.Add(prompt);
 
@@ -391,6 +408,44 @@ internal sealed class CompanionPromptWindow : Window
         buttons.Children.Add(details);
         Grid.SetColumn(buttons, 2);
         layout.Children.Add(buttons);
+
+        var modePanel = new WrapPanel { Margin = new Thickness(12, 0, 12, 8) };
+        modeText = new TextBlock
+        { Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+        SwitchModeButton = new Button { Content = "Switch mode", Padding = new Thickness(8, 4, 8, 4) };
+        SwitchModeButton.Click += (_, _) => switchMode?.Invoke();
+        modePanel.Children.Add(modeText);
+        modePanel.Children.Add(SwitchModeButton);
+        Grid.SetRow(modePanel, 1);
+        Grid.SetColumnSpan(modePanel, 3);
+        layout.Children.Add(modePanel);
+
+        taskPanel = new StackPanel { Margin = new Thickness(12, 0, 12, 12), Visibility = Visibility.Collapsed };
+        taskText = new TextBlock { Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap };
+        System.Windows.Automation.AutomationProperties.SetName(taskText, "Retained plan, progress, boundary and required input");
+        System.Windows.Automation.AutomationProperties.SetLiveSetting(taskText, System.Windows.Automation.AutomationLiveSetting.Polite);
+        taskPanel.Children.Add(new ScrollViewer
+        { Content = taskText, MaxHeight = 160, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+        TaskReply = new TextBox
+        {
+            MaxLength = 1000, IsUndoEnabled = false, TextWrapping = TextWrapping.Wrap,
+            MaxHeight = 65, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Foreground = Brushes.White, Background = new SolidColorBrush(Color.FromRgb(45, 45, 48)),
+            CaretBrush = Brushes.White, Margin = new Thickness(0, 6, 0, 6)
+        };
+        System.Windows.Automation.AutomationProperties.SetName(TaskReply, "Clarification for the retained task");
+        taskPanel.Children.Add(TaskReply);
+        var taskButtons = new WrapPanel();
+        ContinueTaskButton = new Button { Content = "Review & continue" };
+        ContinueTaskButton.Click += async (_, _) => await ContinueAsync();
+        StopTaskButton = new Button { Content = "Stop task" };
+        StopTaskButton.Click += (_, _) => stopTask?.Invoke();
+        taskButtons.Children.Add(ContinueTaskButton);
+        taskButtons.Children.Add(StopTaskButton);
+        taskPanel.Children.Add(taskButtons);
+        Grid.SetRow(taskPanel, 2);
+        Grid.SetColumnSpan(taskPanel, 3);
+        layout.Children.Add(taskPanel);
 
         Content = new Border
         {
@@ -418,7 +473,9 @@ internal sealed class CompanionPromptWindow : Window
 
     public void Invoke(string draft)
     {
-        prompt.Text = draft;
+        updatingDraft = true;
+        try { prompt.Text = draft; }
+        finally { updatingDraft = false; }
         ask.IsEnabled = true;
         if (CompanionPlacement.TryCurrent((int)Width, (int)Height, out var rect))
         {
@@ -437,6 +494,37 @@ internal sealed class CompanionPromptWindow : Window
         && background.Color == Color.FromRgb(45, 45, 48)
         && prompt.ToolTip is null;
 
+    internal string TaskDescription => taskText.Text;
+    internal string ModeDescription => modeText.Text;
+
+    internal void UpdateTask(CameraRecoveryInteractionMode mode, ScreenTaskSession? task,
+        bool canContinue, bool controlAvailable)
+    {
+        bool fix = mode == CameraRecoveryInteractionMode.Control;
+        modeText.Text = fix ? "FIX IT FOR ME - approved actions only" : "GUIDE ME - no automatic actions";
+        System.Windows.Automation.AutomationProperties.SetName(modeText, modeText.Text);
+        SwitchModeButton.Content = fix ? "Stop & switch to Guide" : "Stop & switch to Fix";
+        SwitchModeButton.IsEnabled = fix || controlAvailable;
+        System.Windows.Automation.AutomationProperties.SetName(SwitchModeButton, SwitchModeButton.Content.ToString());
+        taskPanel.Visibility = task is null ? Visibility.Collapsed : Visibility.Visible;
+        Height = task is null ? 164 : 440;
+        taskText.Text = task is null ? "" : task.Status + " - " + task.Detail
+            + (task.Plan is null ? "" : "\n" + ScreenTaskSession.DescribePlan(task.Plan, task.PlanCursor));
+        ContinueTaskButton.IsEnabled = canContinue && continueTask is not null;
+        ContinueTaskButton.Content = task?.ReplanRequired == true ? "Review boundary & replan" : "Review & continue";
+        StopTaskButton.IsEnabled = task is not null && (task.Running || task.Plan is not null && task.CanContinue);
+        TaskReply.IsEnabled = task?.CanContinue == true;
+    }
+
+    private async Task ContinueAsync()
+    {
+        if (!ContinueTaskButton.IsEnabled || continueTask is null) return;
+        ContinueTaskButton.IsEnabled = false;
+        string reply = TaskReply.Text;
+        Hide();
+        await continueTask(reply);
+    }
+
     private async Task SubmitAsync()
     {
         string text = prompt.Text.Trim();
@@ -452,27 +540,35 @@ internal sealed class CompanionShell
 {
     private readonly CursorCompanionWindow cursor = new();
     private readonly CompanionPromptWindow prompt;
+    private bool active;
 
-    public CompanionShell(Func<string, Task> submit, Action showDetails)
+    public CompanionShell(Func<string, Task> submit, Action showDetails,
+        Func<string, Task> continueTask, Action stopTask, Action switchMode, Action<string> editDraft)
     {
-        prompt = new CompanionPromptWindow(submit, showDetails);
+        prompt = new CompanionPromptWindow(submit, showDetails, continueTask, stopTask, switchMode, editDraft);
     }
 
     public nint PromptHandle => new WindowInteropHelper(prompt).Handle;
-    public void Start() => cursor.ShowIdle();
+    internal CompanionPromptWindow Prompt => prompt;
+    public void UpdateTask(CameraRecoveryInteractionMode mode, ScreenTaskSession? task, bool canContinue, bool controlAvailable)
+        => prompt.UpdateTask(mode, task, canContinue, controlAvailable);
+    public void Start() { active = true; cursor.ShowIdle(); }
     public void Invoke(string draft)
     {
+        active = true;
         cursor.Hide();
         prompt.Invoke(draft);
     }
-    public void ShowProcessing() => cursor.ShowProcessing();
-    public void ShowResponse(string text) => cursor.ShowResponse(text);
-    public void BeginTask() => cursor.BeginTask();
-    public void ShowTaskAction(int number, string action) => cursor.ShowTaskAction(number, action);
-    public void ShowTaskStatus(string status) => cursor.ShowTaskStatus(status);
-    public void FinishTask(string status) => cursor.FinishTask(status);
+    public void ShowProcessing() { if (active) cursor.ShowProcessing(); }
+    public void HideForAction() { if (active) cursor.Hide(); }
+    public void ShowResponse(string text) { if (active) cursor.ShowResponse(text); }
+    public void BeginTask() { if (active) cursor.BeginTask(); }
+    public void ShowTaskAction(int number, string action) { if (active) cursor.ShowTaskAction(number, action); }
+    public void ShowTaskStatus(string status) { if (active) cursor.ShowTaskStatus(status); }
+    public void FinishTask(string status) { if (active) cursor.FinishTask(status); }
     public void Stop()
     {
+        active = false;
         prompt.Close();
         cursor.Stop();
     }

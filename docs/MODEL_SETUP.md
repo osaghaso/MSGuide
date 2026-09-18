@@ -25,35 +25,71 @@ Run [scripts/Start-MSGuide.ps1](../scripts/Start-MSGuide.ps1) normally after con
 
 ## Provider compatibility
 
-The endpoint must accept the chat-completions-style fields `model`, `messages`, `stream: false`, `max_tokens: 1200`, and `response_format: {type: json_object}`. If images are approved, it must support an image content part containing a PNG data URL. The request posts to the exact configured URL.
+The endpoint must accept `model`, `messages`, `stream: false`, `response_format:
+{type: json_object}`, and `max_tokens` of 8000 for plans or 1200 for legacy
+single-step requests. Approved images use a PNG data URL. The exact configured
+URL is used, without redirects or an appended route.
 
-The response must have exactly one stopped assistant choice containing a JSON object with `instruction`, `status`, and optional `targetIndex`, `remainingWork`, `value`, and `scrollDirection`. Statuses include `next_step`, `clarification`/`needs_input`, `blocked`, and `completion_candidate`; legacy `completed` is downgraded to `completion_candidate`, never treated as a verified generic goal. Unknown fields, tools, URLs/citations, duplicate JSON keys, invalid indexes, refusals, and oversized responses fail closed. Action targets must expose the same supported capability in fresh UIA evidence. `value` is required only for `set_value` (full-field replacement, 0-1000 characters); `scrollDirection` is required only for a `scroll` target and must be in its allowlist.
+The response must have one stopped assistant choice containing validated JSON.
+For `planRequested: true`, return `instruction`, `status: next_step`, and `plan`
+matching the supplied `planSchema`; a missing plan fails, never silently
+degrades to one click. Plans describe up to 32 steps to a resource/information/
+permission/observation/unsupported/plan-limit boundary or a completion suggestion.
+Each action selects an observed `targetIndex` or an exact deferred intent; the
+server derives observed logical IDs and previous-value constraints. Deferred
+writes can replace only an empty writable non-password field. See the full
+[plan contract](API.md#structured-plan-segments).
 
-HTTP redirects, automatic retries, and environment proxies are disabled. The OpenAI-compatible call is bounded to ten seconds overall or the remaining evidence lifetime minus ten seconds, whichever is shorter; socket timeouts are eight seconds, with three seconds for connecting. Failures return generic errors without exposing provider response bodies or credentials. The client does not implement provider-specific authentication flows or tool execution.
+Legacy single-step requests still support `targetIndex`, `remainingWork`, `value`
+and `scrollDirection`. Legacy `completed` becomes `completion_candidate`, never
+verified generic success. Unknown fields, tools, duplicate keys, invented IDs,
+malformed later steps, refusals and oversized output fail closed. Responses are
+bounded to 128 KiB; content is at most 64 KiB for plans or 16 KiB for legacy output.
+
+HTTP redirects, automatic retries, and environment proxies are disabled. Plans
+have a 50-second whole-call cap (48-second socket timeout); legacy calls retain
+10/8-second caps. Both reserve ten seconds of remaining evidence freshness and
+use a three-second connection timeout. Failures expose no response bodies or
+credentials. The provider does not execute tools or handle authentication flows.
 
 ## What is shared
 
 After **Capture / review → consent → Send**, the remote provider receives the prompt and reviewed observation metadata, including application/window identifiers, timestamp, UIA names, element boxes, and dimensions. Text-only approval still transmits that metadata remotely in model mode.
 
-Manual screenshot pixels are sent **only if opted in for that snapshot**. The explicit `-Copilot` launch grant also covers the first automatic task image; later task steps are fresh UIA-only. [src/images.py](../src/images.py) validates size/type/dimensions with Pillow and re-encodes pixel-only PNGs, dropping metadata. It does not redact pixels or perform OCR. Inspect both image and text; discard any sensitive content. Already sent content cannot be recalled, and provider retention is outside this application's control.
+Manual screenshot pixels are sent **only if opted in for that snapshot**. The
+explicit `-Copilot` grant covers initial planning and explicitly reviewed
+replanning; routine steps inside a retained segment use local UIA observations
+without another inference call/upload. Camera verification remains separate.
+[src/images.py](../src/images.py) validates/re-encodes PNGs without metadata, not
+pixel redaction or OCR. Discard sensitive evidence; already sent content cannot
+be recalled, and provider retention is outside this application's control.
 
 To return to local-only guidance, stop the desktop/launcher, set `MSGUIDE_GUIDANCE_PROVIDER=demo` (or remove it), remove the remote-approval and model credential variables from the current process, and restart. Verify the **DEMO** label. See [validation](VALIDATION.md) for the distinction between mocked provider tests and unverified live behavior.
 
 ## GitHub Copilot SDK provider (integration seam)
 
 `src/copilot_provider.py` provides an optional `CopilotProvider` with the same
-`async provider(prompt, Observation, *, task=None) -> GuidanceResult` callable seam. It is
+`async provider(prompt, Observation, *, task=None, plan=False) -> GuidanceResult` callable seam. It is
 selected by the launcher's `-Copilot` switch; deterministic demo guidance
 remains the default without that switch. `OpenAICompatibleProvider` remains
 available.
 
-Clean-machine setup requires Python 3.11+, a GitHub Copilot entitlement (unless
-the SDK is configured separately for BYOK), and:
+The checked-in locks target Windows x64 CPython 3.11.9 (including x64 Python
+on ARM64 Windows). Setup uses portable hash-pinned requirements and requires a
+GitHub Copilot entitlement unless the SDK is configured separately for BYOK:
 
 ```powershell
-python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m copilot download-runtime
+python -m venv venv
+.\venv\Scripts\python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock.txt
+.\venv\Scripts\python -m copilot download-runtime
 ```
+
+Use `requirements.lock.txt` instead of `requirements-dev.lock.txt` for runtime-only
+installation with the same hash/binary flags. The locks contain the tested project
+closure and wheel hashes, not unrelated packages or workstation-specific mirror
+URLs. Normal installation needs no experimental lock support. Direct intent
+remains in `requirements.txt` / `requirements-dev.txt`; intentional regeneration
+uses pip 26.2.1 through `scripts\lock_python_dependencies.py`. Keep TLS validation enabled.
 
 The pinned `github-copilot-sdk==1.0.13` wheel requires `pydantic>=2`,
 `httpx>=0.24`, and `python-dateutil>=2.9.0.post0`; the existing pinned Pydantic
@@ -109,12 +145,14 @@ An integrator must:
 6. Catch `CopilotProviderFailure` and invoke the caller-owned deterministic
    fallback explicitly. The provider never falls back silently.
 
-Each call still uses an isolated SDK session and the persistent `CopilotClient`
-runtime. The task ID, monotonically increasing step, last 16 action outcomes,
-original request, and bounded remaining-work/user-input context are passed
+Each plan/replan call uses an isolated SDK session and the persistent `CopilotClient`
+runtime; routine locally grounded steps do not create new sessions. The task ID,
+step, last 16 action outcomes, retained plan/cursor, original request and bounded remaining-work/user-input context are passed
 explicitly as **untrusted continuation data**. Old targets are never cached or
-reused for execution. Non-actionable elements remain useful observation context
-but cannot appear in the execution allowlist.
+reused for execution. The model-facing allowlist references the observation's
+element indexes instead of repeating UIA labels/states. Complete control evidence
+and useful history remain present once. Non-actionable elements remain descriptive
+context, not execution targets.
 
 Session storage, memory, and infinite sessions remain disabled. The replaced
 system prompt, explicit tool allowlist, and deny-by-default permission handler
@@ -122,9 +160,10 @@ do not grant shell, filesystem, editor, or arbitrary tool access. Only the
 local `submit_guidance` tool returns guidance. It requires current
 `observationId`/`stepId`, an explicit status (`next_step`, `needs_input`,
 `blocked`, or `completion_candidate`), instruction, allowlisted target/citation
-IDs, and optional bounded remaining work or semantic input. `next_step` needs
-a target; other statuses forbid one. The action comes from current evidence,
-not a model-selected command. One correction is permitted; absent/invalid
+IDs, and optional bounded remaining work or semantic input for legacy requests.
+Plan requests instead require a whole structured `plan` with root `next_step`
+and no legacy target. Future semantic intents are not opaque target authority;
+fresh unique local rebinding is mandatory. One correction is permitted; absent/invalid
 submissions now return an explicit sanitized failure, not a success-shaped
 clarification. Model completion is only a suggestion for user/local review.
 
@@ -147,17 +186,32 @@ stops that runtime. Remote termination cannot be guaranteed if the SDK/runtime
 itself fails to acknowledge shutdown. No unbounded cleanup queue is created.
 
 The WPF client, not the model or `/v1/jobs`, executes actions. Only **Fix it for
-me** plus the launch grant can auto-execute; Guide mode never does. Each batch
-has at most eight actions and post-action verification, including its final
-action. `set_value` and `scroll` require writable/non-password bounded
+me** plus the launch grant can auto-execute; Guide mode never does. Runs no longer
+pause after eight actions or two minutes: every queued action is freshly checked
+and observed. After progress, `plan_limit` and `observation` boundaries request a
+new plan automatically only after refreshing the same approved, completely
+inspectable resource. Empty plans, actual resource changes and input/permission
+boundaries still stop; per-operation deadlines and the 10,000-decision protocol
+ceiling remain. Boundary reasons/needed input are visible in
+the compact prompt and Details; unknown/cancelled queued actions cannot resume.
+`set_value` and `scroll` require writable/non-password bounded
 ValuePattern or ScrollPattern evidence and explicit inputs. No coordinate,
 keyboard, shell, or unknown-outcome retry fallback exists.
 
 Screenshot bytes are attached only when approved `Observation.imageBase64` is
-present. The desktop sends the first automatic task image, then fresh UIA-only
-steps/checks rather than another full image at every step. No screenshot or task
+present. The desktop sends an initial, same-resource automatic refresh, or explicitly reviewed replanning image,
+then uses fresh local UIA-only steps/checks instead of another inference per action.
+Generic file/site document surfaces without proven resource identity stop for
+handoff rather than speculative multi-step navigation. No screenshot or task
 history file is created. This removes repeated image work and foreground
-teardown latency, not remote inference or per-call session creation latency.
+teardown latency, not remote inference or per-plan session creation latency.
+Provider startup is bounded to 30 seconds by default; the launcher allows 60
+seconds for Python/imports plus readiness and logs sanitized startup stages/errors.
+Runtime ownership begins with the startup attempt, not only after readiness.
+Startup failure, timeout and cancellation trigger bounded SDK shutdown, and API
+lifespan cleanup also covers failed startup. An unconfirmed shutdown retains
+ownership and blocks provider reuse; explicit close can join the pending stop or
+retry after a failed stop has finished, without queuing overlapping stop workers.
 
 By default the provider reuses the user's existing `copilot login` credential
 through the system credential store. It replaces the system prompt, exposes
@@ -168,7 +222,10 @@ process environment, and MSGuide never writes it to disk.
 
 ### Optional Agency Microsoft Learn MCP
 
-Set `AgencyMicrosoftLearnConfig(enabled=True)` only on machines where `agency`
+Structured plan requests do not start external retrieval servers or approve
+retrieval permissions, even if the legacy retrieval option is enabled. They
+return a resource boundary instead. For legacy single-step requests, set
+`AgencyMicrosoftLearnConfig(enabled=True)` only on machines where `agency`
 is installed and its Microsoft integration is approved. The SDK session starts
 the local stdio server as:
 

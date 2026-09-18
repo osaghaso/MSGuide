@@ -242,7 +242,8 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     body = json.loads(payload)
     assert body["untrustedObservation"]["ocrText"] == "untrusted screen text"
     assert "imageBase64" not in payload and "box" not in body["serverApproved"]["targets"][0]
-    assert body["serverApproved"]["targets"][0]["action"] == "invoke"
+    assert body["serverApproved"]["targets"][0] == {"targetId": "continue", "elementIndex": 0}
+    assert body["untrustedObservation"]["elements"][0]["action"] == "invoke"
     assert attachments == [
         {
             "type": "blob",
@@ -816,3 +817,185 @@ async def test_cancel_during_session_creation_stops_owned_runtime(tmp_path):
     with pytest.raises(CopilotProviderFailure):
         await model("next", observation())
     await model.close()
+
+
+class PartialStartClient(FakeClient):
+    def __init__(self, failure, stop="success"):
+        super().__init__(None)
+        self.failure, self.stop_behavior = failure, stop
+        self.active = False
+        self.acquired = asyncio.Event()
+        self.stop_entered = asyncio.Event()
+        self.release_stop = asyncio.Event()
+
+    async def start(self):
+        self.started += 1
+        self.active = True
+        self.acquired.set()
+        if self.failure == "error":
+            raise RuntimeError("private partial startup detail")
+        if self.failure != "ready":
+            await asyncio.Event().wait()
+
+    async def stop(self):
+        self.stopped += 1
+        self.stop_entered.set()
+        if self.stop_behavior == "error":
+            raise RuntimeError("private shutdown detail")
+        if self.stop_behavior == "timeout":
+            await self.release_stop.wait()
+        if self.stop_behavior == "resistant":
+            while not self.release_stop.is_set():
+                try:
+                    await self.release_stop.wait()
+                except asyncio.CancelledError:
+                    pass  # Deliberately uncooperative SDK; tests always release it.
+        self.active = False
+
+
+def partial_provider(tmp_path, failure, stop="success"):
+    client = PartialStartClient(failure, stop)
+    model = CopilotProvider(
+        CopilotProviderConfig(model="synthetic", base_directory=tmp_path,
+                              startup_timeout_seconds=0.1, shutdown_timeout_seconds=0.1),
+        approved_context, client_factory=lambda **_: client,
+    )
+    return model, client
+
+
+async def failed_start(model, client, failure):
+    starting = asyncio.create_task(model.start())
+    await client.acquired.wait()
+    if failure == "cancel":
+        starting.cancel()
+    expected = asyncio.CancelledError if failure == "cancel" else CopilotProviderFailure
+    with pytest.raises(expected) as error:
+        await asyncio.wait_for(starting, 1)
+    if failure != "cancel":
+        assert error.value.code == "startup" and "private" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "error", "cancel"])
+async def test_partial_start_cleans_acquired_runtime_even_before_explicit_close(tmp_path, failure):
+    model, client = partial_provider(tmp_path, failure)
+    await failed_start(model, client, failure)
+    assert not client.active and client.stopped == 1
+    assert not model._started and not model._runtime_owned
+    await asyncio.gather(model.close(), model.close())
+    assert client.stopped == 1 and not model._owned_cleanup
+    with pytest.raises(CopilotProviderFailure) as error:
+        await model("No readiness authority", observation())
+    assert error.value.code == "not_started" and not client.sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+@pytest.mark.parametrize("stop", ["error", "timeout", "resistant"])
+async def test_partial_start_cleanup_failure_is_bounded_preserves_error_and_blocks_reuse(tmp_path, failure, stop):
+    model, client = partial_provider(tmp_path, failure, stop)
+    started = asyncio.get_running_loop().time()
+    try:
+        await failed_start(model, client, failure)
+        assert asyncio.get_running_loop().time() - started < 0.8
+        assert client.active and model._runtime_owned and model._cleanup_failed and not model._started
+        with pytest.raises(CopilotProviderFailure) as error:
+            await model.start()
+        assert error.value.code == "runtime" and client.started == 1
+        with pytest.raises(CopilotProviderFailure) as error:
+            await model("Must not infer", observation())
+        assert error.value.code == "runtime" and not client.sessions
+        for _ in range(2):
+            with pytest.raises(CopilotProviderFailure) as error:
+                await asyncio.wait_for(model.close(), 0.5)
+            assert error.value.code == "runtime" and model._runtime_owned and not model._started
+            if stop == "resistant":
+                assert client.stopped == 1  # Reuse the one pending stop, never queue another worker.
+    finally:
+        client.release_stop.set()
+        if model._runtime_stop_task is not None:
+            await asyncio.wait_for(asyncio.gather(model._runtime_stop_task, return_exceptions=True), 0.5)
+        client.stop_behavior = "success"
+        await model.close()
+    assert not client.active and not model._runtime_owned and model._cleanup_failed
+    with pytest.raises(CopilotProviderFailure):
+        await model.start()
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_partial_start_and_serializes_idempotent_shutdown(tmp_path):
+    model, client = partial_provider(tmp_path, "blocked")
+    starting = asyncio.create_task(model.start())
+    await client.acquired.wait()
+    await asyncio.wait_for(asyncio.gather(model.close(), model.close()), 0.8)
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    assert not client.active and client.stopped == 1 and not model._runtime_owned
+    client.failure = "ready"
+    await asyncio.gather(model.start(), model.start())
+    assert client.active and client.started == 2 and model._started
+    await asyncio.gather(model.close(), model.close())
+    assert not client.active and client.stopped == 2 and not model._runtime_owned
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_keeps_runtime_owned_until_late_acknowledgement(tmp_path):
+    model, client = partial_provider(tmp_path, "ready", "resistant")
+    await model.start()
+    closing = asyncio.create_task(model.close())
+    await client.stop_entered.wait()
+    closing.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert model._runtime_owned and model._cleanup_failed and not model._started
+        with pytest.raises(CopilotProviderFailure):
+            await model("No work after cancelled shutdown", observation())
+    finally:
+        client.release_stop.set()
+        await asyncio.wait_for(model._runtime_stop_task, 0.5)
+        await model.close()
+    assert not client.active and not model._runtime_owned and client.stopped == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "error", "cancel"])
+@pytest.mark.parametrize("stop", ["success", "error"])
+async def test_api_lifespan_cleans_failed_start_without_masking_original_failure(tmp_path, monkeypatch, failure, stop):
+    from src.main import Config, create_app
+
+    model, client = partial_provider(tmp_path, failure, stop)
+    app = create_app(Config(token="synthetic-token"), guidance_provider=model)
+    app.state.sessions["synthetic"] = object()
+    job = app.state.runner.start("synthetic", "local", "view_logs", {})
+    closed = 0
+    original_close = model.close
+
+    async def counted_close():
+        nonlocal closed
+        closed += 1
+        await original_close()
+
+    monkeypatch.setattr(model, "close", counted_close)
+
+    async def lifespan():
+        async with app.router.lifespan_context(app):
+            pytest.fail("Failed startup must never yield a ready API")
+
+    running = asyncio.create_task(lifespan())
+    await client.acquired.wait()
+    if failure == "cancel":
+        running.cancel()
+    expected = asyncio.CancelledError if failure == "cancel" else CopilotProviderFailure
+    with pytest.raises(expected) as error:
+        await asyncio.wait_for(running, 1)
+    if failure != "cancel":
+        assert error.value.code == "startup" and "private" not in str(error.value)
+    assert closed == 1 and not app.state.sessions and job.task.done()
+    assert not model._started and client.stopped >= 1
+    assert client.active == (stop == "error")
+    if stop == "error":
+        assert model._cleanup_failed
+        client.stop_behavior = "success"
+        await model.close()
+    assert not client.active and not model._runtime_owned

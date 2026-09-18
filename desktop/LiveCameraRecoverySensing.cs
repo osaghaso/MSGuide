@@ -81,10 +81,13 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
             var cameraControl = FindTeamsCameraControl(read.Elements);
             if (cameraControl is { State: TeamsCameraControlState.Off, Element: { } offCamera })
             {
+                if (offCamera.TargetId is not { Length: > 0 } targetId)
+                    return new(window.Id, TeamsCameraFinding.Unsupported,
+                        "The camera control has no unique reviewed identity. No action was prepared.");
                 lock (gate)
                 {
                     target = new(
-                        offCamera.TargetId, read.Window, read.Rect, offCamera,
+                        targetId, read.Window, read.Rect, offCamera,
                         CameraRecoveryTargetKind.TeamsCameraButton);
                     teamsCameraOffObserved = true;
                     teamsCameraEnabledAt = null;
@@ -93,7 +96,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                     window.Id, TeamsCameraFinding.CameraOff,
                     "The visible Teams camera control is off.",
                     new CameraRecoveryTarget(
-                        offCamera.TargetId, offCamera.Label, offCamera.AutomationId,
+                        targetId, offCamera.Label, offCamera.AutomationId,
                         CameraRecoveryTargetKind.TeamsCameraButton));
             }
             if (cameraControl is { State: TeamsCameraControlState.On })
@@ -182,8 +185,12 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 return Result(CameraSettingsFinding.ManagedOrDisabled,
                     "The required camera setting is disabled. MSGuide will not override it.");
             if (element.ToggleState == "off")
+            {
+                if (element.TargetId is not { Length: > 0 } targetId)
+                    return Result(CameraSettingsFinding.Unsupported, "The permission control has no unique reviewed identity.");
                 return Result(CameraSettingsFinding.PermissionOff, CameraPermissionEvidence.DescribeBlock(kind),
-                    new(element.TargetId, element.Label, element.AutomationId, kind));
+                    new(targetId, element.Label, element.AutomationId, kind));
+            }
             if (element.ToggleState != "on")
                 return Result(CameraSettingsFinding.Unsupported, "The camera permission toggle state is unknown.");
         }
@@ -473,7 +480,7 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         }
 
         var raw = AutomationEvidence.FindUniqueTarget(
-            refreshed.Window, refreshed.Rect, expected.TargetId, expected.Label,
+            refreshed.Window, refreshed.Rect, current.Id, expected.Label,
             expected.AutomationId, cancellationToken);
         if (raw is null)
             return new CameraTargetControlResult(

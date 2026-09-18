@@ -10,14 +10,18 @@ public sealed class SpeechService : IDisposable
     private readonly Dispatcher dispatcher;
     private readonly Func<IDictationRecognizer> createRecognizer;
     private readonly DispatcherTimer finishTimer;
+    private readonly DispatcherTimer inputStopTimer;
     private IDictationRecognizer? recognizer;
     private SpeechSynthesizer? synthesizer;
     private int phrases, peakLevel;
-    private bool uncertain;
+    private bool uncertain, acceptTranscript, inputClosed, disposed;
+    private string cancelReason = "";
     internal MicrophoneChoice Input { get; private set; } = MicrophoneChoice.Default;
     public bool Listening { get; private set; }
     public bool Finishing { get; private set; }
+    public bool Stopping { get; private set; }
     public bool InputStopUnconfirmed { get; private set; }
+    public bool Busy => Listening || Finishing || Stopping || InputStopUnconfirmed;
     public string Status { get; private set; } = "Microphone off. Nothing is listening.";
     public event Action<string>? Transcribed;
     public event Action<string>? StatusChanged;
@@ -36,12 +40,15 @@ public sealed class SpeechService : IDisposable
             Interval = TimeSpan.FromSeconds(2)
         };
         finishTimer.Tick += (_, _) => FinishTimedOut();
+        inputStopTimer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher)
+        { Interval = TimeSpan.FromSeconds(3) };
+        inputStopTimer.Tick += (_, _) => InputStopTimedOut();
     }
 
     internal void SelectInput(MicrophoneChoice input)
     {
         dispatcher.VerifyAccess();
-        if (Listening || Finishing || InputStopUnconfirmed)
+        if (Busy)
             throw new InvalidOperationException("Stop dictation before changing the microphone.");
         Input = input;
     }
@@ -49,13 +56,14 @@ public sealed class SpeechService : IDisposable
     public void Toggle()
     {
         dispatcher.VerifyAccess();
+        ObjectDisposedException.ThrowIf(disposed, this);
         if (InputStopUnconfirmed)
         {
             SetStatus(new MicrophoneStopUnconfirmedException().Message);
             return;
         }
         if (Listening) { FinishListening(); return; }
-        if (Finishing) return;
+        if (Finishing || Stopping || recognizer is not null) return;
         StopSpeaking();
         phrases = peakLevel = 0;
         uncertain = false;
@@ -70,6 +78,9 @@ public sealed class SpeechService : IDisposable
                 throw new InvalidOperationException("Speech finalization timeout must be bounded to 45 seconds.");
             }
             recognizer = current;
+            acceptTranscript = true;
+            inputClosed = false;
+            cancelReason = "";
             current.Recognized += (text, confidence) => Dispatch(current, () =>
             {
                 if (string.IsNullOrWhiteSpace(text))
@@ -99,27 +110,27 @@ public sealed class SpeechService : IDisposable
             }));
             current.Rejected += () => Dispatch(current, () =>
                 SetStatus("Audio was heard, but words were not recognized. Speak clearly or check the input in Sound settings."));
-            current.Completed += error => Dispatch(current, () => CompleteListening(error));
-            current.InputEnded += () => Dispatch(current, BeginFinishing);
+            current.Completed += error => Dispatch(current, () => CompleteListening(error), transcript: false);
+            current.InputStopped += error => Dispatch(current, () => InputStopped(error), transcript: false);
             Listening = true;
             SetStatus($"Recording locally ({current.CultureName}) using {Input}. Stop to transcribe; auto-stop after 30 seconds.");
             current.Start();
         }
         catch (Exception ex) when (IsSpeechFailure(ex))
         {
-            ReleaseRecognizer();
-            SetStatus(InputFailure(ex));
+            if (recognizer is null) SetStatus(InputFailure(ex));
+            else CancelListening(InputFailure(ex));
         }
     }
 
-    private void Dispatch(IDictationRecognizer source, Action callback)
+    private void Dispatch(IDictationRecognizer source, Action callback, bool transcript = true)
     {
         void Deliver()
         {
-            if (ReferenceEquals(recognizer, source)) callback();
+            if (ReferenceEquals(recognizer, source) && (!transcript || acceptTranscript)) callback();
         }
         if (dispatcher.CheckAccess()) Deliver();
-        else dispatcher.BeginInvoke((Action)Deliver);
+        else if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvoke((Action)Deliver);
     }
 
     public void FinishListening()
@@ -130,8 +141,7 @@ public sealed class SpeechService : IDisposable
         try { recognizer.Finish(); }
         catch (Exception ex) when (IsSpeechFailure(ex))
         {
-            ReleaseRecognizer();
-            SetStatus(InputFailure(ex));
+            CancelListening(InputFailure(ex));
         }
     }
 
@@ -140,22 +150,63 @@ public sealed class SpeechService : IDisposable
         if (recognizer is null || Finishing) return;
         Listening = false;
         Finishing = true;
+        Stopping = !inputClosed;
         finishTimer.Interval = recognizer.FinishTimeout;
-        SetStatus(recognizer.FinishDescription);
+        SetStatus(Stopping ? "Stopping microphone; waiting for input closure before transcription."
+            : recognizer.FinishDescription);
         finishTimer.Start();
+        if (Stopping) inputStopTimer.Start();
     }
 
     internal void FinishTimedOut()
     {
         if (!Finishing) return;
-        StopListening();
-        SetStatus("Local transcription timed out before the last phrase could finish. Review the retained transcript; nothing was submitted.");
+        CancelListening("Local transcription timed out before the last phrase could finish. Review the retained transcript; nothing was submitted.");
+    }
+
+    internal void InputStopTimedOut()
+    {
+        if (recognizer is not null && !inputClosed) InputStopped(new MicrophoneStopUnconfirmedException());
+    }
+
+    private void InputStopped(Exception? error)
+    {
+        if (recognizer is null) return;
+        inputStopTimer.Stop();
+        Stopping = false;
+        if (error is not null)
+        {
+            InputStopUnconfirmed = true;
+            acceptTranscript = Listening = Finishing = false;
+            finishTimer.Stop();
+            PreviewChanged?.Invoke("");
+            AudioLevelChanged?.Invoke(0);
+            SetStatus(new MicrophoneStopUnconfirmedException().Message);
+            return;
+        }
+        inputClosed = true;
+        InputStopUnconfirmed = false;
+        if (!acceptTranscript)
+        {
+            var cleanupError = ReleaseRecognizer();
+            SetStatus(cleanupError is not null ? InputFailure(cleanupError)
+                : "Microphone off. " + (cancelReason.Length > 0
+                    ? cancelReason : "Input closure confirmed. Review the retained transcript."));
+        }
+        else if (!Finishing) BeginFinishing();
+        else SetStatus(recognizer.FinishDescription);
     }
 
     private void CompleteListening(Exception? error)
     {
-        InputStopUnconfirmed |= error is MicrophoneStopUnconfirmedException;
-        ReleaseRecognizer();
+        if (!inputClosed)
+        {
+            InputStopped(new MicrophoneStopUnconfirmedException());
+            return;
+        }
+        if (!acceptTranscript) return;
+        var cleanupError = ReleaseRecognizer();
+        error ??= cleanupError;
         SetStatus(error is not null ? InputFailure(error)
             : phrases > 0 ? uncertain
                 ? "Microphone off. Uncertain transcript captured; review and correct it before asking."
@@ -165,36 +216,61 @@ public sealed class SpeechService : IDisposable
                 : "Microphone off. Audio was heard but no words were captured. Check input volume and recognizer language, or type your question.");
     }
 
-    private void ReleaseRecognizer()
+    private Exception? ReleaseRecognizer()
     {
         finishTimer.Stop();
+        inputStopTimer.Stop();
         var old = recognizer;
         recognizer = null;
-        Listening = Finishing = false;
-        old?.Dispose();
+        Listening = Finishing = Stopping = acceptTranscript = false;
+        Exception? cleanupError = null;
+        try { old?.Dispose(); }
+        catch (Exception error) when (IsSpeechFailure(error))
+        {
+            cleanupError = error;
+            InputStopUnconfirmed |= error is MicrophoneStopUnconfirmedException;
+            DiagnosticLog.Record("speech_cleanup_failed", new { errorType = error.GetType().Name });
+        }
         PreviewChanged?.Invoke("");
         AudioLevelChanged?.Invoke(0);
+        return cleanupError;
     }
 
     public void StopListening()
     {
         dispatcher.VerifyAccess();
-        if (recognizer is null) return;
+        CancelListening("Recording cancelled. Existing transcript retained; no further words will be added.");
+    }
+
+    private void CancelListening(string reason)
+    {
+        if (recognizer is null || !acceptTranscript) return;
         var current = recognizer;
-        // Invalidate callbacks before cancellation so old audio cannot repopulate a cleared draft.
-        recognizer = null;
+        acceptTranscript = Listening = Finishing = false;
+        cancelReason = reason;
+        finishTimer.Stop();
+        PreviewChanged?.Invoke("");
+        AudioLevelChanged?.Invoke(0);
+        Stopping = !inputClosed;
+        if (Stopping)
+        {
+            inputStopTimer.Start();
+            SetStatus("Stopping microphone; input closure is not yet confirmed. " + reason);
+        }
         try
         {
             current.Cancel();
-            SetStatus("Microphone stopped. Existing transcript retained; no further words will be added.");
         }
-        catch (Exception ex) when (IsSpeechFailure(ex)) { SetStatus(InputFailure(ex)); }
-        finally
+        catch (Exception ex) when (IsSpeechFailure(ex))
         {
-            current.Dispose();
-            ReleaseRecognizer();
+            if (!inputClosed) InputStopped(new MicrophoneStopUnconfirmedException());
+            else cancelReason = InputFailure(ex);
         }
-        StatusChanged?.Invoke(Status);
+        if (inputClosed && ReferenceEquals(recognizer, current))
+        {
+            var cleanupError = ReleaseRecognizer();
+            SetStatus(cleanupError is not null ? InputFailure(cleanupError) : "Microphone off. " + cancelReason);
+        }
     }
 
     private void SetStatus(string status)
@@ -219,6 +295,7 @@ public sealed class SpeechService : IDisposable
     public void Speak(string text)
     {
         StopListening();
+        if (Stopping || InputStopUnconfirmed) return;
         try
         {
             synthesizer ??= new SpeechSynthesizer();
@@ -231,5 +308,12 @@ public sealed class SpeechService : IDisposable
 
     public void StopSpeaking() => synthesizer?.SpeakAsyncCancelAll();
     public void Stop() { StopListening(); StopSpeaking(); }
-    public void Dispose() { Stop(); synthesizer?.Dispose(); synthesizer = null; }
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        Stop();
+        synthesizer?.Dispose();
+        synthesizer = null;
+    }
 }

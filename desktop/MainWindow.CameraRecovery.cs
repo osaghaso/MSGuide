@@ -178,6 +178,7 @@ public partial class MainWindow
         AutomationProperties.SetHelpText(CameraControlMode, controlModeHelp);
         CameraGuideMode.ToolTip = guideModeHelp;
         CameraControlMode.ToolTip = controlModeHelp;
+        UpdateCompactTaskUi();
         CameraStateText.Text = cameraRecoveryBusy && cameraRecovery.CanStart
             ? "Checking current camera"
             : CameraStateLabel(cameraRecovery.State);
@@ -453,12 +454,14 @@ public partial class MainWindow
         if (CameraModeHint is null || cameraRecoveryBusy || !cameraRecovery.CanSelectMode)
             return;
         if (loaded && screenTask?.Running == true) CancelWork(cancelCameraRecovery: false);
+        if (loaded) screenTask?.RevokePlan();
         bool endedRun = !cameraRecovery.CanStart;
         ResetCameraRecovery();
         if (loaded && endedRun)
             StatusText.Text = "Camera recovery reset for the selected mode · start when ready.";
         UpdateCameraRecoveryUi();
         UpdateScreenActionUi();
+        UpdateScreenTaskUi();
     }
 
     private void CameraSwitchMode_Click(object sender, RoutedEventArgs e)
@@ -471,6 +474,7 @@ public partial class MainWindow
         }
         promptRequestActive = false;
         CancelWork();
+        screenTask?.RevokePlan();
         ResetCameraRecovery();
         var selectedMode = switchToControl ? CameraControlMode : CameraGuideMode;
         selectedMode.IsChecked = true;

@@ -89,6 +89,19 @@ internal static class SpeechTests
         Check(!failure.Listening && brokenInput.Disposals == 1 && failure.Status == error
             && error.Contains("blocked", StringComparison.Ordinal), "input errors survive Stop");
 
+        foreach (bool disposalFailure in new[] { false, true })
+        {
+            var failedInput = new FakeRecognizer
+            { DisposeFailure = disposalFailure ? new IOException("Synthetic private cleanup detail.") : null };
+            using var failedSpeech = new SpeechService(() => failedInput);
+            failedSpeech.Toggle();
+            failedInput.Complete(disposalFailure ? null : new InvalidOperationException("Synthetic private transcription detail."));
+            Check(!failedSpeech.Busy && failedInput.Disposals == 1
+                && failedSpeech.Status.StartsWith("Local dictation failed", StringComparison.Ordinal)
+                && !failedSpeech.Status.Contains("private", StringComparison.Ordinal),
+                "acknowledged input is released on transcription/cleanup failure without faulting callbacks or claiming success");
+        }
+
         var stuckInput = new FakeRecognizer();
         using var stuck = new SpeechService(() => stuckInput);
         stuck.Toggle();
@@ -97,6 +110,71 @@ internal static class SpeechTests
         Check(stuck.InputStopUnconfirmed && stuckInput.Starts == 1
             && stuck.Status.Contains("Close MSGuide", StringComparison.Ordinal),
             "unknown microphone stop prevents a second recording and gives explicit recovery");
+
+        var pendingInput = new FakeRecognizer { AcknowledgeCancellation = false };
+        var replacementInput = new FakeRecognizer();
+        var pendingInputs = new Queue<IDictationRecognizer>([pendingInput, replacementInput]);
+        using var pending = new SpeechService(pendingInputs.Dequeue);
+        var cancelledWords = new List<string>();
+        pending.Transcribed += cancelledWords.Add;
+        pending.Toggle();
+        pending.StopListening();
+        Check(pending.Stopping && pending.Busy && !pending.Status.Contains("Microphone off", StringComparison.Ordinal)
+            && pendingInput.Disposals == 0, "cancel waits for hardware acknowledgement without claiming input off");
+        pending.Toggle();
+        bool changeRejected = false;
+        try { pending.SelectInput(MicrophoneChoice.Default); }
+        catch (InvalidOperationException) { changeRejected = true; }
+        Check(changeRejected && pendingInputs.Count == 1, "pending closure gates recording and device changes");
+        pending.InputStopTimedOut();
+        pendingInput.Result("cancelled transcript", 1);
+        pending.Toggle();
+        Check(pending.InputStopUnconfirmed && pending.Busy && cancelledWords.Count == 0
+            && pendingInputs.Count == 1, "stop timeout is retained independently of cancelled transcript callbacks");
+        pendingInput.EndInput();
+        Check(!pending.Busy && !pending.InputStopUnconfirmed && pendingInput.Disposals == 1,
+            "late hardware acknowledgement clears only the input closure gate");
+        pending.Toggle();
+        pendingInput.Result("stale previous recording", 1);
+        pendingInput.Complete();
+        Check(replacementInput.Starts == 1 && pending.Listening && cancelledWords.Count == 0,
+            "new recording after acknowledged closure rejects old session callbacks");
+        pending.Stop();
+
+        var wave = new WhisperTests.MemoryWaveIn { NotifyStopped = false };
+        int whisperStarts = 0, unexpectedTranscriptions = 0;
+        WhisperDictationRecognizer? whisper = null;
+        using (var hardware = new SpeechService(() =>
+        {
+            whisperStarts++;
+            return whisper = new WhisperDictationRecognizer(() => wave, (_, _) =>
+            {
+                unexpectedTranscriptions++;
+                return Task.FromResult<IReadOnlyList<WhisperSegment>>([]);
+            });
+        }))
+        {
+            hardware.Toggle();
+            hardware.StopListening();
+            await Task.Delay(TimeSpan.FromMilliseconds(3400));
+            hardware.Toggle();
+            Check(wave.Active && hardware.InputStopUnconfirmed && whisperStarts == 1
+                && !wave.Disposed && hardware.Status.Contains("not confirmed", StringComparison.Ordinal),
+                "actual Whisper adapter cancel timeout retains the unacknowledged fake hardware input");
+            wave.AcknowledgeStopped();
+            await whisper!.Cleanup.WaitAsync(TimeSpan.FromSeconds(3));
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(!hardware.Busy && !wave.Active && wave.Disposed && unexpectedTranscriptions == 0,
+                "late actual-adapter acknowledgement closes input without reviving cancelled inference");
+        }
+
+        var disposingInput = new FakeRecognizer { AcknowledgeCancellation = false };
+        var disposing = new SpeechService(() => disposingInput);
+        disposing.Toggle();
+        disposing.Dispose();
+        Check(disposing.Stopping && disposingInput.Disposals == 0, "disposal does not report unacknowledged hardware off");
+        disposingInput.EndInput();
+        Check(!disposing.Busy && disposingInput.Disposals == 1, "disposal retains hardware completion handling");
 
         var silentInput = new FakeRecognizer();
         var rejectedInput = new FakeRecognizer();
@@ -142,6 +220,17 @@ internal static class SpeechTests
         var ui = new MainWindow(new SpeechService(uiQueue.Dequeue));
         try { ui.CheckSpeechComposer(uiInputs); }
         finally { ui.Close(); }
+        var pendingUiInput = new FakeRecognizer { AcknowledgeCancellation = false };
+        var pendingUi = new MainWindow(new SpeechService(() => pendingUiInput));
+        try { pendingUi.CheckPendingSpeechControls(pendingUiInput); }
+        finally { pendingUi.Close(); }
+        foreach (string replacement in new[] { "none", "new-task", "new-status" })
+        {
+            var pausedInput = new FakeRecognizer { AcknowledgeCancellation = false };
+            var pausedUi = new MainWindow(new SpeechService(() => pausedInput));
+            try { pausedUi.CheckPausedSpeechStatus(pausedInput, replacement); }
+            finally { pausedUi.Close(); }
+        }
     }
 
     public static async Task RunSyntheticAsync()
@@ -175,33 +264,114 @@ internal static class SpeechTests
         public string FinishDescription => "Finishing the last phrase.";
         public int Starts, Finishes, Cancels, Disposals;
         public Exception? StartFailure { get; init; }
+        public Exception? DisposeFailure { get; init; }
+        public bool AcknowledgeCancellation { get; init; } = true;
         public event Action<string, float>? Recognized;
         public event Action<string>? Hypothesized;
         public event Action<int>? AudioLevel;
         public event Action<string>? SignalProblem;
         public event Action? Rejected;
         public event Action<Exception?>? Completed;
-        public event Action? InputEnded;
+        public event Action<Exception?>? InputStopped;
         public void Start()
         {
             Starts++;
-            if (StartFailure is not null) throw StartFailure;
+            if (StartFailure is not null)
+            {
+                InputStopped?.Invoke(null);
+                throw StartFailure;
+            }
         }
         public void Finish() => Finishes++;
-        public void Cancel() => Cancels++;
-        public void Dispose() => Disposals++;
+        public void Cancel()
+        {
+            Cancels++;
+            if (AcknowledgeCancellation) InputStopped?.Invoke(null);
+        }
+        public void Dispose()
+        {
+            Disposals++;
+            if (DisposeFailure is not null) throw DisposeFailure;
+        }
         public void Result(string text, float confidence) => Recognized?.Invoke(text, confidence);
         public void Preview(string text) => Hypothesized?.Invoke(text);
         public void Level(int value) => AudioLevel?.Invoke(value);
         public void Problem(string value) => SignalProblem?.Invoke(value);
         public void Reject() => Rejected?.Invoke();
-        public void Complete(Exception? error = null) => Completed?.Invoke(error);
-        public void EndInput() => InputEnded?.Invoke();
+        public void Complete(Exception? error = null)
+        {
+            InputStopped?.Invoke(error is MicrophoneStopUnconfirmedException ? error : null);
+            Completed?.Invoke(error);
+        }
+        public void EndInput() => InputStopped?.Invoke(null);
     }
 }
 
 public partial class MainWindow
 {
+    internal void CheckPausedSpeechStatus(SpeechTests.FakeRecognizer input, string replacement)
+    {
+        loaded = true;
+        try
+        {
+            PromptBox.Text = "Synthetic draft before Pause";
+            MicButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Pause();
+            IntegrationTests.Require(speech.Busy && speech.Stopping
+                && MicrophoneStateText.Text == "MIC STOPPING"
+                && StatusText.Text.Contains("shutdown pending", StringComparison.Ordinal)
+                && !StatusText.Text.Contains("microphone off", StringComparison.Ordinal)
+                && !MicButton.IsEnabled && !MicrophonePicker.IsEnabled && PromptBox.Text.Length == 0);
+            input.Result("Cancelled transcript must stay discarded", 1);
+            speech.InputStopTimedOut();
+            IntegrationTests.Require(speech.InputStopUnconfirmed && speech.Busy
+                && MicrophoneStateText.Text == "MIC STATUS UNKNOWN"
+                && StatusText.Text.Contains("microphone status unknown", StringComparison.Ordinal)
+                && !MicButton.IsEnabled && !MicrophonePicker.IsEnabled && PromptBox.Text.Length == 0);
+            long pauseGeneration = generation;
+            if (replacement == "new-task") PromptBox.Text = "A newer synthetic task";
+            if (replacement == "new-status") StatusText.Text = "A newer status message";
+            string newerStatus = StatusText.Text;
+            input.EndInput();
+            input.Result("Stale late transcript", 1);
+            IntegrationTests.Require(!speech.Busy && MicrophoneStateText.Text == "MIC OFF"
+                && MicButton.IsEnabled && MicrophonePicker.IsEnabled);
+            if (replacement == "none")
+                IntegrationTests.Require(StatusText.Text == "Paused · microphone off · no execution authority."
+                    && PromptBox.Text.Length == 0);
+            else
+                IntegrationTests.Require(StatusText.Text == newerStatus
+                    && (replacement == "new-task" ? generation != pauseGeneration && PromptBox.Text == "A newer synthetic task"
+                        : generation == pauseGeneration && PromptBox.Text.Length == 0));
+        }
+        finally { loaded = false; }
+    }
+
+    internal void CheckPendingSpeechControls(SpeechTests.FakeRecognizer input)
+    {
+        loaded = true;
+        try
+        {
+            PromptBox.Text = "Retained typed draft";
+            MicButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            StopAudioButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            IntegrationTests.Require(MicrophoneStateText.Text == "MIC STOPPING"
+                && !MicrophonePicker.IsEnabled && !MicButton.IsEnabled);
+            StopAudioButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            speech.InputStopTimedOut();
+            input.Result("Cancelled replacement", 1);
+            IntegrationTests.Require(MicrophoneStateText.Text == "MIC STATUS UNKNOWN"
+                && !MicrophonePicker.IsEnabled && !RefreshMicrophonesButton.IsEnabled
+                && !MicButton.IsEnabled && !AddVoiceButton.IsEnabled && !AskPromptButton.IsEnabled
+                && PromptBox.Text == "Retained typed draft");
+            input.EndInput();
+            IntegrationTests.Require(MicrophoneStateText.Text == "MIC OFF"
+                && MicrophonePicker.IsEnabled && MicButton.IsEnabled && AskPromptButton.IsEnabled
+                && PromptBox.Text == "Retained typed draft");
+        }
+        finally { loaded = false; }
+    }
+
     internal void CheckSpeechComposer(SpeechTests.FakeRecognizer[] inputs)
     {
         static void Check(bool condition, string name)

@@ -4,7 +4,12 @@ WPF / .NET 10 Windows companion. Local dictation uses **Whisper.net 1.9.1**,
 its CPU runtime (including Windows ARM64), and **NAudio.WinMM 2.2.1** for
 microphone capture. **System.Speech 10.0.0** supplies playback and synthetic
 test audio, not the interactive dictation engine. A .NET 10 SDK is required to
-build; Python 3.11 and PowerShell 7 are required by the root launcher. No cloud
+build; the root setup uses PowerShell 7 and Windows x64 CPython 3.11.9, including
+x64 Python on ARM64 Windows. Install portable `requirements-dev.lock.txt`
+(runtime plus tests) or `requirements.lock.txt` (runtime only) with
+`--require-hashes --only-binary=:all:`. Pip 26.2.1 is needed for lock regeneration,
+not ordinary installation;
+see the [root setup commands](../README.md#install-and-start). No cloud
 provisioning or Developer Mode is needed.
 
 ## Build and start
@@ -18,7 +23,7 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 
 ## Try the supported workflow
 
-1. Start the local backend and desktop through the parent launcher. The Windows-logo buddy appears beside the pointer; the full workspace does not open first. Press `Ctrl+Alt+M` over the foreground app, type a question in the compact prompt, and press Enter. Choose **Details** when you need the mode label or manual controls: **DEMO** means deterministic sample guidance, not AI; **MODEL** means the backend-configured provider, not a claim of enterprise authorization.
+1. Start the local backend and desktop through the parent launcher. The Windows-logo buddy appears beside the pointer; the full workspace does not open first. Press `Ctrl+Alt+M` over the foreground app, choose Guide/Fix in the compact prompt, enter a question, and press Enter. Reopen it for the retained plan, boundary, clarification, continuation, and Stop. The buddy stays click-through. **Details** provides manual review and expanded controls: **DEMO** is deterministic sample guidance; **MODEL** is the configured provider, not enterprise authorization.
 2. Click **Open demo**. A separate **MSGuide Demo** window shows a synthetic build dashboard; only **View logs** is initially available.
 3. Invoke the companion with the hotkey, type “Help me find the build error”, select **MSGuide Demo**, and click **Capture / review**.
 4. Inspect the actual image (expand full-size inspection if needed) and UI Automation text/element metadata. Pixel sharing defaults **off**. Check consent, optionally enable image sharing for a vision provider, then click **Send approved snapshot**. No capture is uploaded without this click.
@@ -42,26 +47,53 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 
 ## Generic task progress and continuation
 
-`ScreenTaskSession.RunAsync` is the production generic loop and its offline
-test seam. It retains the original prompt, task ID, monotonic step, at most 16
-action records, and bounded model checkpoint/clarification text in local
-memory. A batch has at most eight actions; **Review & continue** starts a new
-bounded batch with fresh evidence and the same context. An optional reply field
-answers questions without replacing the original goal. New prompts, Pause/clear,
-dismissal, and exit discard this context; there is no durable task store.
+`ScreenTaskSession.RunAsync` is the production generic loop and offline test
+seam. An approved observation requests up to 32 ordered plan steps through the next
+resource/information/permission/observation/unsupported/plan-limit boundary or a
+completion suggestion. Both providers and the API validate the entire segment;
+the desktop validates it again before any action. Legacy single-step results
+remain an explicit compatibility path, not the normal desktop request.
 
-The first automatic observation may include its approved screenshot. Subsequent
-steps and verification use fresh UIA-only observations. After invocation,
+The loop retains the prompt, plan/cursor, task ID, step, last 16 action results and
+bounded clarification text in memory. Fix mode executes continuously without an
+eight-action or two-minute checkpoint. After a segment makes progress, a
+`plan_limit` or `observation` boundary refreshes the approved screenshot and
+requests the next plan automatically, but only while the same identified resource
+remains completely inspectable. Empty plans cannot trigger an inference loop.
+Other boundaries or failed grounding require review, with a reason and needed input.
+Per-operation deadlines and the 10,000-decision protocol ceiling remain. Mode changes
+revoke old queued authority; unknown and cancelled work cannot resume. New prompts,
+Pause/clear, dismissal and exit discard context; there is no durable task store.
+
+Initial planning, same-resource automatic refreshes, and explicitly reviewed
+replanning may include an approved screenshot. Inside a segment, binding and verification use local UIA-only
+observations, reusing suitable post-action evidence for the next step. No new
+model call is made for a routine expected control change. After invocation,
 verification makes at most six reads within five seconds, waiting 250 ms only
 between reads. Toggle, value replacement, selection, expansion/collapse, and
 scroll actions require their expected semantic effect; unrelated UI changes
 cannot substitute for it. If that effect is still missing after the bounded
 checks, the outcome is `unknown` and continuation is disabled. Only `invoke`,
 which has no generic semantic postcondition, can use two consecutive stable
-changed UIA states. Reads, not actions, are retried. The eighth action is also
-observed before pausing. Repeated controls are valid on progressed states;
+changed UIA states. Reads, not actions, are retried. Every action is observed
+before continuing. Repeated controls are valid on progressed states;
 unchanged/repeated states stop, and continuing an unchanged no-progress
 checkpoint cannot replay its action.
+
+Observed targets are anchored by stable `controlId` (selected window, provider
+process and nonempty runtime ID); label/box changes can still be recognized during
+effect verification. The separate reviewed `targetId`, exact label/box/action,
+availability, password/read-only/value and window checks remain enforced before
+invocation. Missing or ambiguous identities cannot authorize planned actions.
+Deferred target intents match exact role/label/action and any declared metadata,
+never fuzzy text or first-match selectors. Deferred writes require an empty field;
+observed writes require the unchanged prior value hash.
+
+Resource scope is conservative: selected HWND identity and caption must remain
+stable. A generic document tree cannot establish the current file/site identity
+and therefore requires handoff instead of queued execution. New windows/resources,
+permissions and credentials are not acquired automatically. Guide mode can
+describe approved partial text/images, but incomplete evidence cannot execute.
 
 Statuses distinguish `checkpoint`, `needs_input`, `blocked`, `no_progress`,
 `cancelled`, `failed`, `unknown`, and `review_required`. An invocation returning
@@ -72,8 +104,9 @@ Capture-access denials retain a `failed` checkpoint before invocation, or an
 `unknown` outcome while checking an invoked action; uncertain actions are not
 replayed. Companion action results use their recorded step numbers, not the
 invocation count, including across continuation and the rolling history bound.
-The buddy no longer auto-hides final task states; Details retains the stop reason,
-recent outcomes, and model checkpoint. Current images/evidence are disposed on
+The buddy no longer auto-hides final task states; the compact prompt and Details
+retain the plan/cursor, boundary and needed input. They share the same mode,
+continue/reply and Stop handlers, not separate task engines. Current evidence is disposed on
 stop; bounded task text stays only until explicit clearing/replacement/exit.
 
 The camera and demo adapters keep their independent local state/verifiers and
@@ -84,16 +117,23 @@ the executor: `/v1/actions/*` and `/v1/jobs/*` are still the unrelated in-memory
 
 ## Runnable checks and verification
 
-Run `desktop/bin/Debug/net10.0-windows/MSGuide.Desktop.exe --self-test` (or `dotnet run --project desktop/MSGuide.Desktop.csproj -- --self-test`). This exits 0 on success, 1 on failure, without showing a window or connecting to the backend. Checks cover loopback URL rejection, unsafe citation schemes, freshness boundaries, response echo mismatch, malformed target boxes, and physical target mapping at 100/125/150/200% scale with a negative desktop origin.
+Run `desktop\bin\Debug\net10.0-windows10.0.19041.0\MSGuide.Desktop.exe --self-test` (or `dotnet run --project desktop\MSGuide.Desktop.csproj -- --self-test`). This exits 0 on success, 1 on failure, without showing a window or connecting to the backend. Checks cover loopback URL rejection, unsafe citation schemes, freshness boundaries, response echo mismatch, malformed target boxes, and physical target mapping at 100/125/150/200% scale with a negative desktop origin.
 
 Self-tests also run the actual generic loop with synthetic observations and fake
 guidance/actions: multi-step history, legitimate repeated controls, no progress,
-eighth-action verification, budget continuation, bounded history, all stop states,
+continuous execution beyond eight actions, bounded history, all stop states,
 Guide-mode non-execution, semantic value/scroll effects, cancellation/supersession,
 unrelated UI churn with missing/late semantic effects, capture-access failures
 before/after invocation, result notifications across continuation/history rollover,
 and a fake hung native worker. A delayed HTTP handler verifies cancellation at the
 remaining freshness deadline. Camera state/consent tests use fixtures only.
+Plan regressions assert one model call for complete three-, 17-, and 31-step runs,
+automatic continuation across 32-step plan limits and same-resource observation
+boundaries, scope/cancellation checks before refreshed inference, every-step
+verification, whole-plan rejection of a malformed third
+step, resource/target drift, cancelled/unknown queues, stable logical identity,
+partial Guide context and actual compact-control handlers. No test opens the
+interactive companion or invokes real app controls.
 Build with `dotnet build .\desktop\MSGuide.Desktop.csproj --no-restore --output <unique-artifact-directory>`
 and run that directory's `MSGuide.Desktop.exe --self-test --test-results <absolute-json-path>`
 to avoid replacing an active desktop binary. Disable session grants and synthetic
@@ -106,7 +146,16 @@ Install the local English model with
 `%LOCALAPPDATA%\MSGuide\models`, never in the repository. Normal startup never
 downloads or substitutes another speech model automatically.
 
-Speech lifecycle self-tests use a fake input and never open a microphone.
+Speech lifecycle self-tests use fake input and never open a microphone. Cancel
+invalidates transcript callbacks immediately but retains hardware completion
+handling. Recording/device changes remain gated while `MIC STOPPING` or
+`MIC STATUS UNKNOWN`; a three-second missing acknowledgement is explicit, and a
+late acknowledgement can clear the hardware gate without reviving transcription.
+The main Pause banner also distinguishes pending shutdown, unknown microphone
+state and confirmed inactivity. Late audio notifications update that banner only
+while the same paused UI still owns it, never a newer task or status message.
+Whisper model/factory load, processor construction and inference have separate
+content-free timing events. No factory reuse or native speedup is claimed.
 Set `MSGUIDE_WHISPER_SYNTHETIC_TEST=1` for real local Whisper transcription of
 synthetic speech and silence. These use memory only, with no speaker output,
 microphone input, audio file, or remote call. The older

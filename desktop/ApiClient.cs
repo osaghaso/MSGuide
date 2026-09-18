@@ -87,7 +87,7 @@ public sealed class ApiClient : IDisposable
     public Task<HealthInfo> Health(CancellationToken ct) => Send<HealthInfo>(new(HttpMethod.Get, "health"), false, ct);
 
     public async Task<Guidance> Guide(
-        Observation observation, string prompt, CancellationToken ct, TaskProgress? task = null)
+        Observation observation, string prompt, CancellationToken ct, TaskProgress? task = null, bool planSegments = true)
     {
         var budget = Safety.GuidanceBudget(observation.CapturedAt, DateTimeOffset.UtcNow);
         if (!Safety.Fresh(observation.CapturedAt, DateTimeOffset.UtcNow) || budget <= TimeSpan.Zero)
@@ -108,8 +108,12 @@ public sealed class ApiClient : IDisposable
             requestToken.ThrowIfCancellationRequested();
             if (!Safety.Fresh(observation.CapturedAt, DateTimeOffset.UtcNow))
                 throw new InvalidOperationException("Snapshot expired. Capture and review again.");
-            return await Send<Guidance>(new(HttpMethod.Post, "v1/guidance")
-            { Content = JsonContent.Create(new GuidanceRequest(session.SessionId, prompt, true, observation, task), options: Json) }, true, requestToken);
+            var result = await Send<Guidance>(new(HttpMethod.Post, "v1/guidance")
+            { Content = JsonContent.Create(new GuidanceRequest(session.SessionId, prompt, true, observation, task, planSegments), options: Json) }, true, requestToken);
+            if (planSegments && result.Plan is null
+                || result.Plan is not null && !Safety.ValidPlan(result.Plan, observation))
+                throw new InvalidOperationException("The service returned a missing or invalid whole plan. No action was accepted.");
+            return result;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

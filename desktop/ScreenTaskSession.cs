@@ -8,7 +8,6 @@ namespace MSGuide.Desktop;
 /// <summary>One local task checkpoint. Observations are fresh; history never grants action authority.</summary>
 internal sealed class ScreenTaskSession(string prompt, string windowId)
 {
-    internal const int ActionBudget = 8;
     internal const int HistoryLimit = 16;
     internal const int ObservationAttempts = 6;
     internal static readonly TimeSpan VerificationTimeout = TimeSpan.FromSeconds(5);
@@ -19,6 +18,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
     private TaskStep? pendingAction;
     private string? unchangedState;
     private readonly Stopwatch lifetime = new();
+    private bool replanRequired;
 
     internal string Id { get; } = Guid.NewGuid().ToString();
     internal string Prompt { get; } = prompt;
@@ -29,15 +29,20 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
     internal string Detail { get; private set; } = "Ready for a fresh task observation.";
     internal string RemainingWork { get; private set; } = "";
     internal string UserInput { get; set; } = "";
+    internal PlanSegment? Plan { get; private set; }
+    internal int PlanCursor { get; private set; }
+    internal string ReplanReason { get; private set; } = "";
+    internal bool ReplanRequired => replanRequired;
     internal IReadOnlyList<TaskStep> History => history;
     internal bool Running => Status == "running";
     internal bool AwaitingActionEvidence => pendingAction is not null;
-    internal bool CanContinue => !Running && Status != "unknown" && Step < 10000;
-    internal TaskProgress Progress => new(Id, Step, Status, history.ToArray(), RemainingWork, UserInput);
+    internal bool CanContinue => !Running && Status is not ("unknown" or "cancelled") && Step < 10000;
+    internal TaskProgress Progress => new(Id, Step, Status, history.ToArray(), RemainingWork, UserInput,
+        Plan, PlanCursor, ReplanReason);
 
     internal void Stop()
     {
-        if (!Running) return;
+        if (Status is "unknown" or "cancelled" || !Running && Plan is null) return;
         bool uncertain = actionInFlight;
         if (pendingAction is { } pending) Record(pending);
         version++;
@@ -51,11 +56,46 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
         });
     }
 
+    internal void RevokePlan()
+    {
+        if (Running) Stop();
+        else if (Plan is not null && CanContinue)
+            PauseForReplan("mode_changed", "Mode changed. The retained plan is descriptive only; review and request a fresh plan before executing.");
+    }
+
+    private void PauseForReplan(string reason, string detail, string status = "blocked")
+    {
+        replanRequired = true;
+        ReplanReason = reason;
+        SetStatus(status, detail);
+        DiagnosticLog.Record("screen_task_plan_boundary", new
+        { taskId = Id, planId = Plan?.PlanId, cursor = PlanCursor, reason, status });
+    }
+
+    private void FinishPlan()
+    {
+        var boundary = Plan!.Boundary;
+        PauseForReplan(boundary.Kind,
+            (boundary.Kind == "completion_candidate"
+                ? "Completion suggested, not independently verified. Review the current app.\n"
+                : "Plan segment stopped at a boundary. No new resource or permission was acquired.\n")
+            + boundary.Reason + (boundary.Needed.Length == 0 ? "" : "\nNeeded: " + boundary.Needed),
+            boundary.Kind == "completion_candidate" ? "review_required" : "needs_input");
+    }
+
+    internal static string DescribePlan(PlanSegment plan, int cursor = 0) =>
+        $"Plan: {cursor}/{plan.Steps.Length} steps observed\n"
+        + string.Join("\n", plan.Steps.Select((step, index) =>
+            $"{index + 1}. {(index < cursor ? "[observed] " : "")}{step.Instruction}"))
+        + $"\nBoundary: {plan.Boundary.Kind} - {plan.Boundary.Reason}"
+        + (plan.Boundary.Needed.Length == 0 ? "" : "\nNeeded: " + plan.Boundary.Needed);
+
     private void SetStatus(string status, string detail)
     {
         Status = status;
         Detail = detail;
-        DiagnosticLog.Record("screen_task_state", new { taskId = Id, step = Step, status, actions = ActionsTaken });
+        DiagnosticLog.Record("screen_task_state", new
+        { taskId = Id, step = Step, status, actions = ActionsTaken, planId = Plan?.PlanId, cursor = PlanCursor });
     }
 
     private void Record(Observation before, TargetInfo target, string outcome, Observation? after = null)
@@ -73,14 +113,19 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
     internal static string Fingerprint(Observation observation) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
-            observation.WindowId, observation.OcrText, observation.Elements
+            observation.WindowId, observation.ResourceId, observation.OcrText, observation.Elements
         }))));
 
     private static bool EffectObserved(TargetInfo target, Observation before, Observation after)
     {
-        var prior = before.Elements.SingleOrDefault(e => e.TargetId == target.TargetId);
-        var current = after.Elements.SingleOrDefault(e => e.TargetId == target.TargetId);
-        if (prior is null || current is null) return false;
+        var previous = before.Elements.Where(e => e.TargetId == target.TargetId).ToArray();
+        var next = after.Elements.Where(e => target.ControlId is null
+            ? e.TargetId == target.TargetId : e.ControlId == target.ControlId).ToArray();
+        if (previous.Length != 1 || next.Length != 1 || next[0].IsPassword || next[0].IsOffscreen
+            || target.ControlId is not null && (previous[0].ControlId != target.ControlId
+                || before.Elements.Count(e => e.ControlId == target.ControlId) != 1)) return false;
+        var prior = previous[0];
+        var current = next[0];
         return target.Action switch
         {
             "set_value" => prior.ValueHash != current.ValueHash
@@ -111,7 +156,6 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
         if (!CanContinue) throw new InvalidOperationException("This task cannot continue without manual review or a new request.");
         if (UserInput.Length > 1000) throw new InvalidOperationException("Continuation input exceeds 1000 characters.");
         int mine = ++version;
-        int budgetUsed = 0;
         var runClock = Stopwatch.StartNew();
         lifetime.Restart();
         var delay = delayForTest ?? Task.Delay;
@@ -150,8 +194,9 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
         }
         try
         {
-            var observation = await Observe(Step == 1, cancellationToken);
-            if (!observation.AutomationComplete)
+            if (UserInput.Length > 0) replanRequired = true;
+            var observation = await Observe(Step == 1 || replanRequired, cancellationToken);
+            if (!observation.AutomationComplete && allowExecution)
             {
                 SetStatus("blocked", "The accessible controls inspection was incomplete. Use manual screen guidance or a supported surface; no task action was accepted.");
                 return;
@@ -162,44 +207,134 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 return;
             }
             unchangedState = null;
-            while (budgetUsed < ActionBudget && Step < 10000)
+            while (Step < 10000)
             {
                 CheckCurrent();
-                Detail = $"Considering step {Step} from fresh evidence ({budgetUsed}/{ActionBudget} actions in this batch).";
-                changed();
-                var guideClock = Stopwatch.StartNew();
-                var response = await guide(observation, Progress, cancellationToken);
-                CheckCurrent();
-                if (!Safety.Fresh(observation.CapturedAt, DateTimeOffset.UtcNow)
-                    || !Safety.Matches(response, observation.Id, WindowId)
-                    || response.TaskId != Id || response.Step != Step)
-                    throw new InvalidOperationException("Stale or mismatched task response. No action was accepted.");
-                DiagnosticLog.Record("screen_task_guidance", new
+                TargetInfo? target = null;
+                if (Plan is null || replanRequired)
                 {
-                    taskId = Id, step = Step, response.CorrelationId, status = response.Status,
-                    elapsedMs = guideClock.ElapsedMilliseconds
-                });
-                RemainingWork = response.RemainingWork ?? RemainingWork;
-                if (response.Status != "next_step" || response.Target is null)
-                {
-                    Step++;
-                    SetStatus(response.Status switch
+                    Detail = "Planning the next steps from fresh approved evidence...";
+                    changed();
+                    CheckCurrent();
+                    var guideClock = Stopwatch.StartNew();
+                    var response = await guide(observation, Progress, cancellationToken);
+                    CheckCurrent();
+                    if (!Safety.Fresh(observation.CapturedAt, DateTimeOffset.UtcNow)
+                        || !Safety.Matches(response, observation.Id, WindowId)
+                        || response.TaskId != Id || response.Step != Step
+                        || response.Plan is not null && !Safety.ValidPlan(response.Plan, observation))
+                        throw new InvalidOperationException("Stale, mismatched, or invalid whole-plan response. No action was accepted.");
+                    DiagnosticLog.Record("screen_task_guidance", new
                     {
-                        "completed" or "completion_candidate" => "review_required",
-                        "clarification" or "needs_input" => "needs_input",
-                        _ => "blocked"
-                    }, response.Status is "completed" or "completion_candidate"
-                        ? "Completion suggested, not independently verified. Review the current app before continuing.\n" + response.Instruction
-                        : "Task paused; completion was not verified.\n" + response.Instruction);
-                    return;
+                        taskId = Id, step = Step, response.CorrelationId, status = response.Status,
+                        planId = response.Plan?.PlanId, planSteps = response.Plan?.Steps.Length ?? 0,
+                        elapsedMs = guideClock.ElapsedMilliseconds
+                    });
+                    RemainingWork = response.RemainingWork ?? RemainingWork;
+                    UserInput = "";
+                    if (response.Plan is { } segment)
+                    {
+                        Plan = segment;
+                        PlanCursor = 0;
+                        replanRequired = false;
+                        ReplanReason = "";
+                    }
+                    else
+                    {
+                        Plan = null;
+                        PlanCursor = 0;
+                        replanRequired = false;
+                        if (response.Status != "next_step" || response.Target is null)
+                        {
+                            Step++;
+                            SetStatus(response.Status switch
+                            {
+                                "completed" or "completion_candidate" => "review_required",
+                                "clarification" or "needs_input" => "needs_input",
+                                _ => "blocked"
+                            }, response.Status is "completed" or "completion_candidate"
+                                ? "Completion suggested, not independently verified. Review the current app before continuing.\n" + response.Instruction
+                                : "Task paused; completion was not verified.\n" + response.Instruction);
+                            return;
+                        }
+                        if (!Safety.ObservedTarget(response.Target, observation.Elements))
+                            throw new InvalidOperationException("The legacy target or its inputs do not match the fresh observation.");
+                        if (!allowExecution)
+                        {
+                            Step++;
+                            SetStatus("needs_input", "Guide mode: no action executed. Review the guidance and continue explicitly.\n" + response.Instruction);
+                            return;
+                        }
+                        target = response.Target;
+                    }
                 }
-                var target = response.Target;
-                if (!Safety.ObservedTarget(target, observation.Elements))
+                if (Plan is { } plan)
+                {
+                    if (!allowExecution)
+                    {
+                        PauseForReplan("guide_review", "Guide mode: no action executed. Follow the descriptive plan, then review fresh evidence.",
+                            "needs_input");
+                        return;
+                    }
+                    if (PlanCursor == plan.Steps.Length)
+                    {
+                        if (plan.Steps.Length > 0 && plan.Boundary.Kind is "plan_limit" or "observation")
+                        {
+                            replanRequired = true;
+                            ReplanReason = plan.Boundary.Kind;
+                            Detail = "The planned steps were observed. Refreshing the same resource to continue...";
+                            DiagnosticLog.Record("screen_task_plan_boundary", new
+                            {
+                                taskId = Id, planId = plan.PlanId, cursor = PlanCursor,
+                                reason = ReplanReason, status = Status, automatic = true
+                            });
+                            changed();
+                            observation = await Observe(true, cancellationToken);
+                            if (!observation.AutomationComplete)
+                            {
+                                PauseForReplan("incomplete_observation",
+                                    "The refreshed controls inspection was incomplete. No further step was planned or executed; review the app.");
+                                return;
+                            }
+                            if (plan.ResourceId is null || observation.ResourceId != plan.ResourceId)
+                            {
+                                PauseForReplan("resource_changed",
+                                    "The resource changed while refreshing the plan. No new model request or action was started; review the new resource.");
+                                return;
+                            }
+                            continue;
+                        }
+                        FinishPlan();
+                        return;
+                    }
+                    var planned = plan.Steps[PlanCursor];
+                    if (planned.Kind == "manual")
+                    {
+                        PauseForReplan(plan.Boundary.Kind, planned.Instruction + "\nNeeded: " + plan.Boundary.Needed,
+                            "needs_input");
+                        return;
+                    }
+                    if (plan.ResourceId is null || observation.ResourceId != plan.ResourceId)
+                    {
+                        PauseForReplan("resource_changed", "The selected resource changed or its identity cannot be established locally. No queued step was executed. Review the window/file/site and explicitly replan; a new window requires a new approved request.");
+                        return;
+                    }
+                    target = Safety.BindPlanAction(planned, observation);
+                    if (target is null)
+                    {
+                        PauseForReplan("target_not_grounded", $"Plan step {PlanCursor + 1} could not be uniquely grounded with its expected state. No action was started. Review changed, missing, ambiguous, or unsupported controls before replanning.");
+                        return;
+                    }
+                    Detail = $"Plan step {PlanCursor + 1}/{plan.Steps.Length}: {planned.Instruction}";
+                    changed();
+                }
+                CheckCurrent();
+                if (target is null || !Safety.ObservedTarget(target, observation.Elements))
                     throw new InvalidOperationException("The action target or its inputs do not match the fresh observation.");
-                if (!allowExecution || target.Action is null || string.IsNullOrEmpty(target.TargetId))
+                if (target.Action is null || string.IsNullOrEmpty(target.TargetId))
                 {
                     Step++;
-                    SetStatus("needs_input", "No action executed. Perform the guided step, then choose Review & continue for fresh evidence.\n" + response.Instruction);
+                    SetStatus("needs_input", "No executable target. Perform the described step manually and review fresh evidence.");
                     return;
                 }
                 string before = Fingerprint(observation);
@@ -214,9 +349,10 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 }
                 Detail = $"Invoking step {Step} once. Invocation alone is not verified progress.";
                 changed();
+                CheckCurrent();
                 var actionClock = Stopwatch.StartNew();
                 DiagnosticLog.Record("screen_task_action_started", new
-                { taskId = Id, step = Step, action = target.Action });
+                { taskId = Id, step = Step, action = target.Action, planId = Plan?.PlanId, cursor = PlanCursor });
                 actionInFlight = true;
                 pendingAction = new(Step, observation.Id, null, target.TargetId!, target.Label, target.Action!, "unknown");
                 var result = await execute(observation, target, cancellationToken);
@@ -228,7 +364,6 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 });
                 if (result.Invoked)
                 {
-                    budgetUsed++;
                     ActionsTaken++;
                     attemptedStates.Enqueue(attemptKey);
                     if (attemptedStates.Count > HistoryLimit) attemptedStates.Dequeue();
@@ -258,6 +393,11 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                             throw new InvalidOperationException("Post-action verification was incomplete or reused an observation.");
                         after = next;
                         string fingerprint = Fingerprint(after);
+                        if (requiresSemanticEffect && Plan is not null && after.ResourceId != Plan.ResourceId)
+                        {
+                            ReplanReason = "resource_changed";
+                            break;
+                        }
                         if (EffectObserved(target, observation, after))
                         { outcome = "effect_observed"; break; }
                         if (!requiresSemanticEffect && fingerprint != before && fingerprint == candidate)
@@ -282,7 +422,9 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 });
                 if (outcome == "unknown")
                 {
-                    SetStatus("unknown", "The expected control effect was not observed within the bounded observation window. Unrelated screen changes do not verify it. Do not retry; review the app manually.");
+                    SetStatus("unknown", ReplanReason == "resource_changed"
+                        ? "The resource changed before the control effect could be verified. No queued action will run. Do not retry; review the app manually."
+                        : "The expected control effect was not observed within the bounded observation window. Unrelated screen changes do not verify it. Do not retry; review the app manually.");
                     return;
                 }
                 if (outcome == "no_progress")
@@ -292,15 +434,23 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                     return;
                 }
                 observation = after!;
+                if (Plan is not null)
+                {
+                    PlanCursor++;
+                    if (observation.ResourceId != Plan.ResourceId)
+                    {
+                        PauseForReplan("resource_changed", "The action reached a different or unidentified resource. Remaining steps were retained but not executed. Review the new resource before explicitly replanning.");
+                        return;
+                    }
+                }
                 Detail = outcome == "effect_observed"
                     ? "The control effect was observed; the overall task goal is still unverified."
                     : "A stable screen change was observed, not proof of the action's effect or task completion.";
                 changed();
             }
-            if (Step >= 10000)
+            if (Plan is not null && PlanCursor == Plan.Steps.Length) FinishPlan();
+            else if (Step >= 10000)
                 SetStatus("blocked", "The task reached its 10,000-decision ceiling. Its checkpoint is retained for review, but continuing requires a new request. Goal completion is unverified.");
-            else
-                SetStatus("checkpoint", $"Paused after {budgetUsed} actions; the last action received a fresh verification check. Review & continue starts another bounded batch, not a new task. Goal completion is unverified.");
         }
         catch (OperationCanceledException)
         {
@@ -310,7 +460,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 if (pendingAction is { } pending) Record(pending);
                 SetStatus(uncertain ? "unknown" : "cancelled", uncertain
                     ? "Cancelled before the action's effect was verified. Its outcome is unknown; do not retry."
-                    : "Task cancelled. No further action will start; the checkpoint is retained.");
+                    : "Task cancelled. No queued action can resume; the checkpoint is retained for review.");
             }
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.Net.Http.HttpRequestException or JsonException)

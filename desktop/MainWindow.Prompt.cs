@@ -10,7 +10,7 @@ public partial class MainWindow
     private void UpdatePromptSubmissionUi()
     {
         if (AskPromptButton is null || PromptBox is null) return;
-        AskPromptButton.IsEnabled = !cameraRecoveryBusy && !speech.Listening && !speech.Finishing
+        AskPromptButton.IsEnabled = !cameraRecoveryBusy && !speech.Busy
             && !string.IsNullOrWhiteSpace(PromptBox.Text);
         UseScreenContextButton.IsEnabled = AskPromptButton.IsEnabled;
         UpdateSpeechControls();
@@ -42,7 +42,7 @@ public partial class MainWindow
 
     private async Task SubmitPromptAsync()
     {
-        if (speech.Listening || speech.Finishing)
+        if (speech.Busy)
         {
             speech.FinishListening();
             ShowPromptFeedback("Finish dictation and review the transcript, then select Ask MSGuide. Nothing has been submitted.");

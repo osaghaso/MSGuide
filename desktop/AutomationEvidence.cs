@@ -9,6 +9,10 @@ namespace MSGuide.Desktop;
 
 internal static class AutomationEvidence
 {
+    internal const int ScanNodeLimit = 2000;
+    internal const int ScanDepthLimit = 64;
+    internal const int ScanMilliseconds = 3000;
+
     private static readonly HashSet<string> KnownAutomationIds =
     [
         "SystemSettings_CapabilityAccess_Camera_SystemGlobal_ToggleSwitch",
@@ -64,6 +68,145 @@ internal static class AutomationEvidence
         return "uia-" + Convert.ToHexString(digest.AsSpan(0, 12)).ToLowerInvariant();
     }
 
+    internal static string? ControlId(WindowChoice window, int providerProcessId, IReadOnlyList<int>? runtimeId)
+    {
+        if (providerProcessId <= 0 || runtimeId is not { Count: > 0 and <= 64 }) return null;
+        string identity = string.Join("|", "control-v1", window.Id, window.ClassName,
+            providerProcessId.ToString(CultureInfo.InvariantCulture), string.Join(",", runtimeId));
+        return "control-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant();
+    }
+
+    internal static string? ResourceId(WindowChoice window, string title, ElementInfo[] elements)
+    {
+        // Generic UIA document trees do not prove a file/site identity. Use an explicit resource handoff.
+        if (string.IsNullOrWhiteSpace(title) || elements.Any(e => e.Role == "document")) return null;
+        return "resource-" + ValueDigest(string.Join("|", window.Id, window.ClassName, title));
+    }
+
+    internal static CacheRequest CaptureCache(bool details = false)
+    {
+        var cache = new CacheRequest { TreeScope = TreeScope.Element };
+        AutomationProperty[] properties =
+        [
+            AutomationElement.IsPasswordProperty, AutomationElement.IsOffscreenProperty,
+            AutomationElement.IsEnabledProperty, AutomationElement.ProcessIdProperty,
+            AutomationElement.ControlTypeProperty, AutomationElement.BoundingRectangleProperty
+        ];
+        foreach (var property in properties) cache.Add(property);
+        if (details)
+        {
+            AutomationProperty[] metadata =
+            [
+                AutomationElement.NameProperty, AutomationElement.AutomationIdProperty,
+                AutomationElement.FrameworkIdProperty, AutomationElement.RuntimeIdProperty,
+                AutomationElement.HelpTextProperty, AutomationElement.ItemStatusProperty,
+                AutomationElement.IsValuePatternAvailableProperty, AutomationElement.IsTogglePatternAvailableProperty,
+                AutomationElement.IsInvokePatternAvailableProperty, AutomationElement.IsSelectionItemPatternAvailableProperty,
+                AutomationElement.IsExpandCollapsePatternAvailableProperty, AutomationElement.IsScrollPatternAvailableProperty
+            ];
+            foreach (var property in metadata) cache.Add(property);
+        }
+        return cache;
+    }
+
+    internal static bool IsSupportedBrowser(WindowChoice window)
+    {
+        if (!window.ClassName.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)) return false;
+        try
+        {
+            using var process = Process.GetProcessById((int)window.ProcessId);
+            return process.ProcessName is "msedge" or "chrome";
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException
+            or System.ComponentModel.Win32Exception)
+        {
+            DiagnosticLog.Record("browser_identity_unavailable", new { errorType = ex.GetType().Name });
+            return false;
+        }
+    }
+
+    internal static string? BrowserResourceId(WindowChoice window, string address)
+    {
+        if (address.Length > 2048 || !Uri.TryCreate(address, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("https" or "http") || uri.UserInfo.Length != 0
+            || string.IsNullOrWhiteSpace(uri.Host))
+            return null;
+        return "browser-" + ValueDigest(string.Join("|", window.Id, window.ClassName, uri.AbsoluteUri));
+    }
+
+    internal static bool IsBrowserAddressControl(string role, string name, bool insideDocument) =>
+        !insideDocument && role == "edit" && name is "Address and search bar" or "Address bar";
+
+    internal static string? ReadBrowserResourceId(WindowChoice window, CancellationToken token)
+    {
+        try { return ReadBrowserResourceCore(window, token); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException
+            or COMException or UnauthorizedAccessException or ArgumentException)
+        {
+            DiagnosticLog.Record("browser_resource_inspection_failed", new { errorType = ex.GetType().Name });
+            return null;
+        }
+    }
+
+    private static string? ReadBrowserResourceCore(WindowChoice window, CancellationToken token)
+    {
+        if (!IsSupportedBrowser(window) || !window.Matches()
+            || !Native.GetWindowRect(window.Handle, out var rect)) return null;
+        var privacy = CaptureCache();
+        var details = CaptureCache(details: true);
+        var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
+        if (root.Cached.ProcessId != (int)window.ProcessId) return null;
+        var walker = TreeWalker.RawViewWalker;
+        var clock = Stopwatch.StartNew();
+        int visited = 0, documents = 0, addresses = 0;
+        bool incomplete = false;
+        string? resource = null;
+        void Walk(AutomationElement node, int depth)
+        {
+            token.ThrowIfCancellationRequested();
+            if (++visited > ScanNodeLimit || depth > ScanDepthLimit || clock.ElapsedMilliseconds >= ScanMilliseconds)
+            { incomplete = true; return; }
+            var value = node.Cached;
+            if (value.IsPassword || value.IsOffscreen) return;
+            if (value.ControlType == ControlType.Document)
+            {
+                if (Safety.AutomationBox(value.BoundingRectangle, rect) is not null) documents++;
+                return; // Never accept an address-like field supplied by web content.
+            }
+            if (value.ControlType == ControlType.TabItem) return;
+            if (value.ControlType == ControlType.Edit && value.IsEnabled
+                && Safety.AutomationBox(value.BoundingRectangle, rect) is not null)
+            {
+                var field = node.GetUpdatedCache(details);
+                if (!field.Cached.IsPassword && !field.Cached.IsOffscreen
+                    && IsBrowserAddressControl("edit", field.Cached.Name, insideDocument: false))
+                {
+                    addresses++;
+                    if (!field.Current.IsPassword
+                        && field.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern)
+                        && pattern is ValuePattern address)
+                        resource = BrowserResourceId(window, address.Current.Value);
+                }
+            }
+            var child = walker.GetFirstChild(node, privacy);
+            while (child is not null && !incomplete)
+            {
+                Walk(child, depth + 1);
+                if (incomplete) break;
+                child = walker.GetNextSibling(child, privacy);
+            }
+        }
+        Walk(root, 0);
+        return !incomplete && addresses == 1 && documents == 1 && window.Matches()
+            && Native.GetWindowRect(window.Handle, out var after) && rect.Same(after) ? resource : null;
+    }
+
+    internal static bool ResourceMatches(WindowChoice window, string expected, CancellationToken token) =>
+        expected.StartsWith("browser-", StringComparison.Ordinal)
+            ? ReadBrowserResourceId(window, token) == expected
+            : ResourceId(window, Native.Title(window.Handle), []) == expected;
+
     internal static string? ToggleState(AutomationElement element)
     {
         if (!element.TryGetCurrentPattern(TogglePattern.Pattern, out var pattern)
@@ -85,11 +228,17 @@ internal static class AutomationEvidence
         string[]? ScrollDirections = null, double? HorizontalScrollPercent = null,
         double? VerticalScrollPercent = null);
 
-    internal static ActionMetadata ReadAction(AutomationElement element)
+    internal static ActionMetadata ReadAction(AutomationElement element, bool cachedPatterns = false)
     {
         var current = element.Current;
         if (current.IsPassword || current.IsOffscreen || !current.IsEnabled) return new(null);
-        if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePattern)
+        bool TryPattern(AutomationPattern pattern, AutomationProperty available, out object value)
+        {
+            value = null!;
+            return (!cachedPatterns || element.GetCachedPropertyValue(available) is true)
+                && element.TryGetCurrentPattern(pattern, out value);
+        }
+        if (TryPattern(ValuePattern.Pattern, AutomationElement.IsValuePatternAvailableProperty, out var valuePattern)
             && valuePattern is ValuePattern value && !value.Current.IsReadOnly)
         {
             string text = value.Current.Value;
@@ -98,17 +247,17 @@ internal static class AutomationEvidence
                 ? new("set_value", false, ValueDigest(text), text.Length)
                 : new(null);
         }
-        bool toggle = element.TryGetCurrentPattern(TogglePattern.Pattern, out _);
-        bool invoke = element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
-        bool select = element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selection);
-        bool expandable = element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var pattern);
+        bool toggle = TryPattern(TogglePattern.Pattern, AutomationElement.IsTogglePatternAvailableProperty, out _);
+        bool invoke = TryPattern(InvokePattern.Pattern, AutomationElement.IsInvokePatternAvailableProperty, out _);
+        bool select = TryPattern(SelectionItemPattern.Pattern, AutomationElement.IsSelectionItemPatternAvailableProperty, out var selection);
+        bool expandable = TryPattern(ExpandCollapsePattern.Pattern, AutomationElement.IsExpandCollapsePatternAvailableProperty, out var pattern);
         string? state = pattern is ExpandCollapsePattern expand
             ? expand.Current.ExpandCollapseState.ToString().ToLowerInvariant()
             : null;
         string? action = ActionName(toggle, invoke, select, expandable, state);
         if (action is not null)
             return new(action, IsSelected: selection is SelectionItemPattern item ? item.Current.IsSelected : null);
-        if (element.TryGetCurrentPattern(ScrollPattern.Pattern, out var scrollPattern)
+        if (TryPattern(ScrollPattern.Pattern, AutomationElement.IsScrollPatternAvailableProperty, out var scrollPattern)
             && scrollPattern is ScrollPattern scroll)
         {
             double horizontal = scroll.Current.HorizontalScrollPercent;
@@ -156,6 +305,7 @@ internal static class AutomationEvidence
         try { runtimeId = element.GetRuntimeId(); }
         catch (Exception ex) when (
             ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
+        if (ControlId(window, value.ProcessId, runtimeId) is null) return false;
         string role = value.ControlType.ProgrammaticName
             .Replace("ControlType.", "").ToLowerInvariant();
         string label = name.Length > 0 ? name : automationId;
@@ -166,11 +316,14 @@ internal static class AutomationEvidence
 
     internal static AutomationElement? FindUniqueTarget(
         WindowChoice window, Native.RECT rect, string targetId, string label,
-        string? automationId, CancellationToken cancellationToken)
+        string? automationId, CancellationToken cancellationToken, string? resourceId = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var root = AutomationElement.FromHandle(window.Handle);
-        if (root.Current.ProcessId != (int)window.ProcessId) return null;
+        var privacy = CaptureCache();
+        var details = CaptureCache(details: true);
+        var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
+        if (root.Cached.ProcessId != (int)window.ProcessId) return null;
+        if (resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken)) return null;
         var walker = TreeWalker.RawViewWalker;
         var clock = Stopwatch.StartNew();
         int visited = 0;
@@ -179,32 +332,41 @@ internal static class AutomationEvidence
         void Walk(AutomationElement node, int depth)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (++visited > 800 || depth > 32 || clock.ElapsedMilliseconds >= 3000)
+            if (++visited > ScanNodeLimit || depth > ScanDepthLimit || clock.ElapsedMilliseconds >= ScanMilliseconds)
             {
                 incomplete = true;
                 return;
             }
-            var value = node.Current;
+            var value = node.Cached;
+            if (resourceId is not null && !resourceId.StartsWith("browser-", StringComparison.Ordinal)
+                && value.ControlType == ControlType.Document)
+            {
+                incomplete = true;
+                return;
+            }
             if (value.IsPassword || value.IsOffscreen) return;
+            var named = node.GetUpdatedCache(details).Cached;
+            if (named.IsPassword || named.IsOffscreen) return;
             bool candidate = string.IsNullOrWhiteSpace(automationId)
-                ? value.Name == label : value.AutomationId == automationId;
+                ? named.Name == label : named.AutomationId == automationId;
             if (candidate && MatchesTargetId(window, rect, node, targetId))
             {
                 if (match is not null) { duplicate = true; return; }
                 match = node;
             }
-            var child = walker.GetFirstChild(node);
+            var child = walker.GetFirstChild(node, privacy);
             while (child is not null && !incomplete && !duplicate)
             {
                 Walk(child, depth + 1);
                 if (incomplete || duplicate) break;
-                child = walker.GetNextSibling(child);
+                child = walker.GetNextSibling(child, privacy);
             }
         }
         // Unlike FindAll, traversal has node/depth/time ceilings. Individual COM calls
         // can still hang; the action caller contains one late native worker.
         Walk(root, 0);
-        return incomplete || duplicate || clock.ElapsedMilliseconds >= 3000 ? null : match;
+        return incomplete || duplicate || clock.ElapsedMilliseconds >= ScanMilliseconds
+            || resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken) ? null : match;
     }
 
     internal static AutomationProbeDiagnostic Probe(WindowChoice window, Native.RECT rect, CancellationToken ct)

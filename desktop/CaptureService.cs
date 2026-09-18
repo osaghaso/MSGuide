@@ -10,7 +10,7 @@ namespace MSGuide.Desktop;
 
 public sealed class Snapshot(WindowChoice window, Native.RECT rect, DateTimeOffset captured,
     byte[] png, BitmapSource? preview, ElementInfo[] elements, string text, string note,
-    bool automationComplete = true) : IDisposable
+    bool automationComplete = true, string? resourceId = null, string? application = null) : IDisposable
 {
     private bool disposed;
     public string Id { get; } = Guid.NewGuid().ToString();
@@ -23,14 +23,19 @@ public sealed class Snapshot(WindowChoice window, Native.RECT rect, DateTimeOffs
     public string Text { get; private set; } = text;
     public string Note { get; } = note;
     public bool AutomationComplete { get; } = automationComplete;
+    public string? ResourceId { get; } = resourceId;
+    private string ApplicationName { get; } = application ?? window.Title;
     public bool Valid() => !disposed && Safety.Fresh(CapturedAt, DateTimeOffset.UtcNow) && Window.Matches()
-        && Native.GetWindowRect(Window.Handle, out var now) && Rect.Same(now);
+        && Native.GetWindowRect(Window.Handle, out var now) && Rect.Same(now)
+        && (ResourceId is null || (ResourceId.StartsWith("browser-", StringComparison.Ordinal)
+            ? Native.Title(Window.Handle) == ApplicationName
+            : ResourceId == AutomationEvidence.ResourceId(Window, Native.Title(Window.Handle), Elements)));
     public Observation Observation(bool image)
     {
         if (disposed) throw new ObjectDisposedException(nameof(Snapshot));
-        return new(Id, Window.Id, Window.Title[..Math.Min(Window.Title.Length, 256)], CapturedAt,
+        return new(Id, Window.Id, ApplicationName[..Math.Min(ApplicationName.Length, 256)], CapturedAt,
             Preview?.PixelWidth ?? Rect.Width, Preview?.PixelHeight ?? Rect.Height, Text, Elements,
-            image && Png.Length > 0 ? Convert.ToBase64String(Png) : null, AutomationComplete);
+            image && Png.Length > 0 ? Convert.ToBase64String(Png) : null, AutomationComplete, ResourceId);
     }
     public void Dispose()
     {
@@ -105,6 +110,9 @@ public static class CaptureService
                 || (long)rect.Width * rect.Height > 32_000_000)
                 throw new InvalidOperationException("Unsupported window dimensions. Resize the selected window and retry.");
             var captured = DateTimeOffset.UtcNow;
+            string resourceTitle = Native.Title(window.Handle);
+            bool browser = AutomationEvidence.IsSupportedBrowser(window);
+            string? browserResource = browser ? AutomationEvidence.ReadBrowserResourceId(window, ct) : null;
             BitmapSource? preview = null;
             png = [];
             if (includeImage)
@@ -121,11 +129,17 @@ public static class CaptureService
                 }
                 if (png.Length > 2_000_000) throw new InvalidOperationException("PNG exceeds the 2 MB limit; select a smaller window.");
             }
-            var (elements, text, note, complete) = ReadAutomation(window, rect, ct);
+            var (elements, text, note, complete) = ReadAutomation(window, rect, ct,
+                maxDepth: AutomationEvidence.ScanDepthLimit);
             ct.ThrowIfCancellationRequested();
             if (!window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
                 throw new InvalidOperationException("Window changed during capture. Capture and review again.");
-            return new(window, rect, captured, png, preview, elements, text, note, complete);
+            if (resourceTitle != Native.Title(window.Handle))
+                throw new InvalidOperationException("The selected resource changed during capture. Review it before continuing.");
+            if (browser && browserResource != AutomationEvidence.ReadBrowserResourceId(window, ct))
+                throw new InvalidOperationException("The browser resource changed during capture. Review it before continuing.");
+            return new(window, rect, captured, png, preview, elements, text, note, complete,
+                browser ? browserResource : AutomationEvidence.ResourceId(window, resourceTitle, elements), resourceTitle);
         }
         catch { if (png is not null) Array.Clear(png); throw; }
         finally { Native.SetThreadDpiAwarenessContext(previousDpi); }
@@ -165,119 +179,165 @@ public static class CaptureService
         var text = new List<string>();
         var clock = Stopwatch.StartNew();
         int visited = 0, chars = 0;
-        bool complete = true;
+        bool complete = true, textTruncated = false;
+        string outcome = "complete";
         string note = "Bounded UI Automation evidence only (not pixel OCR). Password/offscreen subtrees excluded; cross-process descendants are included only beneath the selected HWND root; image is NOT redacted.";
         try
         {
             ct.ThrowIfCancellationRequested();
-            var root = AutomationElement.FromHandle(window.Handle);
-            if (root.Current.ProcessId != (int)window.ProcessId)
+            var privacy = AutomationEvidence.CaptureCache();
+            var details = AutomationEvidence.CaptureCache(details: true);
+            var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
+            if (root.Cached.ProcessId != (int)window.ProcessId)
                 throw new InvalidOperationException("UI Automation root identity changed.");
             var walker = TreeWalker.RawViewWalker;
             void Walk(AutomationElement node, int depth)
             {
                 ct.ThrowIfCancellationRequested();
-                if (++visited > 800 || depth > maxDepth || elements.Count >= 200
-                    || text.Count >= 200 || chars >= 12000 || clock.ElapsedMilliseconds > 3000)
+                if (++visited > AutomationEvidence.ScanNodeLimit || depth > maxDepth
+                    || clock.ElapsedMilliseconds >= AutomationEvidence.ScanMilliseconds)
                 {
                     complete = false;
+                    outcome = depth > maxDepth ? "depth_limit"
+                        : visited > AutomationEvidence.ScanNodeLimit ? "node_limit" : "time_limit";
                     return;
                 }
-                var value = node.Current;
+                var value = node.Cached;
                 // Do not read Name, Value, TextPattern or descendants of password controls.
                 // Cross-process descendants are permitted only through this exact HWND-rooted Raw View tree.
                 if (value.IsPassword || value.IsOffscreen) return;
                 var box = Safety.AutomationBox(value.BoundingRectangle, rect);
                 if (box is not null)
                 {
+                    node = node.GetUpdatedCache(details);
+                    value = node.Cached;
+                    if (value.IsPassword || value.IsOffscreen) return;
+                    box = Safety.AutomationBox(value.BoundingRectangle, rect);
                     var name = AutomationEvidence.Bounded(value.Name, 256);
                     string automationId = AutomationEvidence.Bounded(value.AutomationId, 128);
                     bool knownMarker = AutomationEvidence.IsKnownAutomationId(automationId);
-                    if ((name.Length > 0 || knownMarker)
-                        && (name.Length == 0 || chars + name.Length + 1 <= 12000))
+                    if (box is not null && (name.Length > 0 || knownMarker
+                        || value.ControlType == ControlType.Document))
                     {
-                        string label = name.Length > 0 ? name : automationId;
+                        string label = name.Length > 0 ? name : knownMarker ? automationId : "Document";
                         string role = value.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
                         string frameworkId = AutomationEvidence.Bounded(value.FrameworkId, 64);
                         int[]? runtimeId = null;
                         string? toggleState = null;
-                        try { runtimeId = node.GetRuntimeId(); }
+                        try { runtimeId = node.GetCachedPropertyValue(AutomationElement.RuntimeIdProperty) as int[]; }
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
-                        try { toggleState = AutomationEvidence.ToggleState(node); }
+                        try
+                        {
+                            if (node.GetCachedPropertyValue(AutomationElement.IsTogglePatternAvailableProperty) is true)
+                                toggleState = AutomationEvidence.ToggleState(node);
+                        }
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
                         var action = new AutomationEvidence.ActionMetadata(null);
-                        try { action = AutomationEvidence.ReadAction(node); }
+                        try { action = AutomationEvidence.ReadAction(node, cachedPatterns: true); }
                         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException) { }
                         bool enabled = value.IsEnabled;
+                        string? controlId = name.Length > 0 || knownMarker
+                            ? AutomationEvidence.ControlId(window, value.ProcessId, runtimeId) : null;
                         elements.Add(new(role, label, box, TargetId: AutomationEvidence.TargetId(window,
                             role, label, box, automationId, frameworkId, value.ProcessId, runtimeId),
                             AutomationId: automationId, FrameworkId: frameworkId,
-                            IsEnabled: enabled, Targetable: enabled, ToggleState: toggleState,
+                            IsEnabled: enabled, Targetable: enabled && controlId is not null, ToggleState: toggleState,
                             HelpText: name.Length > 0 ? AutomationEvidence.Optional(value.HelpText, 256) : null,
                             ItemStatus: name.Length > 0 ? AutomationEvidence.Optional(value.ItemStatus, 128) : null,
-                            Action: action.Name, IsReadOnly: action.IsReadOnly,
+                            Action: controlId is null ? null : action.Name, IsReadOnly: action.IsReadOnly,
                             ValueHash: action.ValueHash, ValueLength: action.ValueLength,
                             IsSelected: action.IsSelected, ScrollDirections: action.ScrollDirections,
                             HorizontalScrollPercent: action.HorizontalScrollPercent,
-                            VerticalScrollPercent: action.VerticalScrollPercent));
+                            VerticalScrollPercent: action.VerticalScrollPercent, ControlId: controlId));
                         if (name.Length > 0)
                         {
-                            text.Add(name);
-                            chars += name.Length + 1;
+                            if (chars + name.Length + 1 <= 12000 && text.Count < 200)
+                            {
+                                text.Add(name);
+                                chars += name.Length + 1;
+                            }
+                            else textTruncated = true;
                         }
                     }
-                    else if (name.Length > 0 && chars + name.Length + 1 > 12000)
-                        complete = false;
                 }
                 ct.ThrowIfCancellationRequested();
-                if (elements.Count >= 200 || text.Count >= 200
-                    || chars >= 12000 || clock.ElapsedMilliseconds > 3000)
+                if (clock.ElapsedMilliseconds >= AutomationEvidence.ScanMilliseconds)
                 {
                     complete = false;
+                    outcome = "time_limit";
                     return;
                 }
-                var child = walker.GetFirstChild(node);
+                var child = walker.GetFirstChild(node, privacy);
                 if (depth >= maxDepth)
                 {
-                    if (child is not null) complete = false;
+                    if (child is not null) { complete = false; outcome = "depth_limit"; }
                     return;
                 }
-                while (child is not null && visited < 800 && elements.Count < 200
-                    && text.Count < 200 && chars < 12000 && clock.ElapsedMilliseconds < 3000)
+                while (child is not null && visited < AutomationEvidence.ScanNodeLimit
+                    && clock.ElapsedMilliseconds < AutomationEvidence.ScanMilliseconds)
                 {
                     Walk(child, depth + 1);
                     ct.ThrowIfCancellationRequested();
-                    if (visited >= 800 || elements.Count >= 200 || text.Count >= 200
-                        || chars >= 12000 || clock.ElapsedMilliseconds >= 3000)
+                    if (visited >= AutomationEvidence.ScanNodeLimit
+                        || clock.ElapsedMilliseconds >= AutomationEvidence.ScanMilliseconds)
                     {
                         complete = false;
+                        outcome = visited >= AutomationEvidence.ScanNodeLimit ? "node_limit" : "time_limit";
                         break;
                     }
-                    child = walker.GetNextSibling(child);
+                    child = walker.GetNextSibling(child, privacy);
                 }
                 if (child is not null) complete = false;
             }
             Walk(root, 0);
-            if (visited >= 800 || elements.Count >= 200 || text.Count >= 200
-                || chars >= 12000 || clock.ElapsedMilliseconds >= 3000) complete = false;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException or COMException or UnauthorizedAccessException)
         {
             complete = false;
+            outcome = "provider_error";
             note += " This application exposed incomplete/no accessible text; review carefully.";
         }
-        if (!complete) note += " Metadata was bounded/truncated.";
-        return new(elements.ToArray(), string.Join('\n', text.Distinct()), note, complete);
+        var ambiguousIds = elements.Where(e => e.ControlId is not null)
+            .GroupBy(e => e.ControlId).Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet();
+        var duplicateTargets = elements.GroupBy(e => e.TargetId).Where(group => group.Count() > 1)
+            .Select(group => group.Key).ToHashSet();
+        for (int index = 0; index < elements.Count; index++)
+            if (ambiguousIds.Contains(elements[index].ControlId) || duplicateTargets.Contains(elements[index].TargetId))
+                elements[index] = elements[index] with { ControlId = null, TargetId = null, Action = null, Targetable = false };
+        var result = BoundEvidence(elements, string.Join('\n', text.Distinct()), note, complete, textTruncated);
+        DiagnosticLog.Record("uia_inspection", new
+        {
+            visited, retained = result.Elements.Length, result.Complete, result.ContextTruncated,
+            outcome = complete && !result.Complete ? "control_limit" : outcome,
+            elapsedMs = clock.ElapsedMilliseconds
+        });
+        return result;
+    }
+
+    internal static AutomationReadResult BoundEvidence(IReadOnlyList<ElementInfo> elements, string text,
+        string note, bool complete, bool textTruncated = false)
+    {
+        static bool Priority(ElementInfo element) => element.Action is not null
+            || element.Role == "document" || AutomationEvidence.IsKnownAutomationId(element.AutomationId);
+        var controls = elements.Where(Priority).ToArray();
+        bool truncated = textTruncated || elements.Count > 200;
+        var retained = controls.Concat(elements.Where(element => !Priority(element))).Take(200).ToArray();
+        complete &= controls.Length <= 200;
+        if (!complete) note += " The controls inspection was incomplete; no automation is authorized.";
+        else if (truncated) note += " Non-action context was shortened; all inspected action controls were retained.";
+        return new(retained, text, note, complete) { ContextTruncated = truncated };
     }
 }
 
 internal sealed record AutomationReadResult(
     ElementInfo[] Elements, string Text, string Note, bool Complete)
 {
+    internal bool ContextTruncated { get; init; }
+
     public ElementInfo[] RequireComplete()
     {
-        if (!Complete) throw new IncompleteAutomationReadException();
+        if (!Complete || ContextTruncated) throw new IncompleteAutomationReadException();
         return Elements;
     }
 }
