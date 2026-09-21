@@ -12,25 +12,41 @@ public partial class App : Application
         ApplyAccessibilityTheme();
         bool integration = e.Args.Contains("--integration-test"), self = e.Args.Contains("--self-test");
         bool capture = e.Args.Contains("--capture-test");
+        bool feedback = e.Args.Contains("--feedback-test");
         bool control = e.Args.Contains("--control-test");
         bool controlComponent = e.Args.Contains("--control-component-test");
         bool native = e.Args.Contains("--native-diagnostic");
         bool notepad = e.Args.Contains("--notepad-test");
         bool notepadGuide = e.Args.Contains("--notepad-guide-test");
+        bool browserPlanOnly = e.Args.Contains("--browser-plan-test");
+        bool browser = e.Args.Contains("--browser-e2e-test") || browserPlanOnly;
         DiagnosticLog.Record("desktop_started", new { version = "0.2.0" });
-        if (integration || self || capture || control || controlComponent || native || notepad || notepadGuide)
+        if (integration || self || capture || feedback || control || controlComponent || native || notepad || notepadGuide || browser)
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             var checks = new List<string>();
             string stage = "arguments", failure = "", detail = "";
             string? results = null;
             nint notepadHandle = 0;
+            nint browserHandle = 0;
+            string? browserAddress = null;
             try
             {
-                if ((integration ? 1 : 0) + (self ? 1 : 0) + (capture ? 1 : 0) + (control ? 1 : 0) + (controlComponent ? 1 : 0) + (native ? 1 : 0) + (notepad ? 1 : 0) + (notepadGuide ? 1 : 0) != 1) throw new InvalidOperationException();
+                if (browserPlanOnly && e.Args.Contains("--browser-e2e-test")) throw new InvalidOperationException();
+                if ((integration ? 1 : 0) + (self ? 1 : 0) + (capture ? 1 : 0) + (feedback ? 1 : 0) + (control ? 1 : 0) + (controlComponent ? 1 : 0) + (native ? 1 : 0) + (notepad ? 1 : 0) + (notepadGuide ? 1 : 0) + (browser ? 1 : 0) != 1) throw new InvalidOperationException();
                 for (int i = 0; i < e.Args.Length; i++)
                 {
-                    if (e.Args[i] is "--integration-test" or "--self-test" or "--capture-test" or "--control-test" or "--control-component-test" or "--native-diagnostic" or "--notepad-test" or "--notepad-guide-test") continue;
+                    if (e.Args[i] is "--integration-test" or "--self-test" or "--capture-test" or "--feedback-test" or "--control-test" or "--control-component-test" or "--native-diagnostic" or "--notepad-test" or "--notepad-guide-test" or "--browser-e2e-test" or "--browser-plan-test") continue;
+                    if (e.Args[i] == "--browser-hwnd" && browser && browserHandle == 0 && ++i < e.Args.Length)
+                    {
+                        browserHandle = new nint(long.Parse(e.Args[i], System.Globalization.CultureInfo.InvariantCulture));
+                        continue;
+                    }
+                    if (e.Args[i] == "--fixture-url" && browser && browserAddress is null && ++i < e.Args.Length)
+                    {
+                        browserAddress = e.Args[i];
+                        continue;
+                    }
                     if (e.Args[i] == "--notepad-hwnd" && (notepad || notepadGuide) && notepadHandle == 0 && ++i < e.Args.Length)
                     {
                         notepadHandle = new nint(long.Parse(e.Args[i], System.Globalization.CultureInfo.InvariantCulture));
@@ -41,8 +57,21 @@ public partial class App : Application
                     results = e.Args[i];
                 }
                 if (capture) results ??= "capture-results.json";
-                if (integration) await IntegrationTests.Run(checks, value => stage = value);
+                if (browser)
+                {
+                    if (browserHandle == 0 || browserAddress is null) throw new InvalidOperationException();
+                    await BrowserTaskTests.Run(browserHandle, browserAddress, checks, value => stage = value,
+                        execute: !browserPlanOnly);
+                }
+                else if (integration) await IntegrationTests.Run(checks, value => stage = value);
                 else if (capture) await CaptureTests.Run(checks, value => stage = value);
+                else if (feedback)
+                {
+                    stage = "persistent-companion-feedback";
+                    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                    await CaptureTests.CheckFeedbackVisibility(deadline.Token);
+                    checks.Add("dpi-stable-outcomes-prompt-restoration-and-no-response-timeout");
+                }
                 else if (control) await ControlTests.Run(checks, value => stage = value);
                 else if (controlComponent) await ControlTests.Run(checks, value => stage = value, component: true);
                 else if (native) await NativeTests.Run(checks, value => stage = value);
@@ -104,7 +133,7 @@ public partial class App : Application
                 // Only sealed source-line assertions or literal-only capture codes may supply detail.
                 if (ex is IntegrationTests.AssertionFailure or CaptureTests.AssertionFailure or CaptureTests.CaptureFailure or ControlTests.AssertionFailure or NotepadTests.AssertionFailure) detail = ex.Message;
             }
-            string Report() => JsonSerializer.Serialize(new { test = integration ? "integration" : capture ? "capture" : control ? "control" : controlComponent ? "control-component" : native ? "native-diagnostic" : notepadGuide ? "notepad-guide-native" : notepad ? "notepad-native" : "self", passed = failure.Length == 0, checks, stage, failure, detail });
+            string Report() => JsonSerializer.Serialize(new { test = feedback ? "feedback" : browserPlanOnly ? "browser-plan-readonly" : browser ? "browser-e2e" : integration ? "integration" : capture ? "capture" : control ? "control" : controlComponent ? "control-component" : native ? "native-diagnostic" : notepadGuide ? "notepad-guide-native" : notepad ? "notepad-native" : "self", passed = failure.Length == 0, checks, stage, failure, detail });
             if (results is not null)
             {
                 try { File.WriteAllText(results, Report() + Environment.NewLine); }

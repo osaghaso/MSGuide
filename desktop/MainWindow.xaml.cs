@@ -229,7 +229,7 @@ public partial class MainWindow : Window
             if (!closing)
             {
                 UpdateScreenTaskUi();
-                companion.FinishTask(task.Detail);
+                companion.FinishTask(task);
             }
         }
         if (cancelCameraRecovery) CancelCameraRecoveryForSupersession();
@@ -420,7 +420,9 @@ public partial class MainWindow : Window
             return;
         }
         var previous = screenTask;
-        if (resume && (previous is null || !previous.CanContinue || previous.WindowId != window.Id))
+        if (resume && previous is { } retained && retained.CanApproveResourceHandoff(window.Id))
+            retained.ApproveResourceHandoff(window.Id);
+        else if (resume && (previous is null || !previous.CanContinue || previous.WindowId != window.Id))
         {
             ShowPromptFeedback("The retained task cannot continue on this window. Review it or submit a new request.");
             return;
@@ -439,7 +441,7 @@ public partial class MainWindow : Window
             ShowPromptFeedback(task.Detail);
             shownStep = PublishScreenTaskActions(task, shownStep, companion.ShowTaskAction);
             if (task.Running) companion.ShowTaskStatus(task.Detail);
-            else companion.FinishTask(task.Detail);
+            else companion.FinishTask(task);
         }
         async Task<Observation> CaptureStep(bool includeImage, CancellationToken token)
         {
@@ -467,16 +469,28 @@ public partial class MainWindow : Window
                     || !Safety.Matches(response, current.Id, window.Id)
                     || response.TaskId != progress.TaskId || response.Step != progress.Step
                     || response.Plan is not null && !Safety.ValidPlan(response.Plan, observation))
+                {
+                    DiagnosticLog.Record("screen_task_response_discarded", new
+                    { taskId = task.Id, step = progress.Step, reason = "snapshot_or_response_changed" });
                     throw new InvalidOperationException("Discarded stale or mismatched task response.");
+                }
                 nint foreground = Native.GetForegroundWindow();
                 if (foreground != Handle && foreground != companion.PromptHandle && foreground != window.Handle)
+                {
+                    DiagnosticLog.Record("screen_task_response_discarded", new
+                    { taskId = task.Id, step = progress.Step, reason = "foreground_changed" });
                     throw new InvalidOperationException("Focus changed to another app. No action was accepted.");
+                }
                 ModeText.Text = ModeLabel(response.Mode);
                 AnswerText.Text = response.Instruction
                     + (response.Plan is null ? "" : "\n" + ScreenTaskSession.DescribePlan(response.Plan));
                 SpeakButton.IsEnabled = true;
                 RenderCitations(response.Citations);
-                if (response.Status == "next_step" && response.Target is { } target
+                var guidanceTarget = response.Target;
+                if (guidanceTarget is null && SelectedCameraMode == CameraRecoveryInteractionMode.Guide
+                    && response.Plan?.Steps.FirstOrDefault() is { Kind: "action" } firstStep)
+                    guidanceTarget = Safety.BindPlanAction(firstStep, observation);
+                if (response.Status == "next_step" && guidanceTarget is { } target
                     && Safety.ObservedTarget(target, current.Elements))
                 {
                     highlight = new(window, current.Rect, current.CapturedAt, target, observation.ResourceId);
@@ -536,9 +550,14 @@ public partial class MainWindow : Window
             + (task.RemainingWork.Length == 0 ? "" : "\nModel checkpoint (unverified): " + task.RemainingWork)
             + (task.History.Count == 0 ? "" : "\nRecent steps:\n" + string.Join("\n",
                 task.History.Select(step => $"{step.Step}. {step.Action} - {step.Outcome}")));
+        bool resourceHandoff = WindowPicker.SelectedItem is WindowChoice selected
+            && task.CanApproveResourceHandoff(selected.Id);
         ContinueScreenTaskButton.IsEnabled = task.CanContinue && !DesktopAction.IsBusy
-            && WindowPicker.SelectedItem is WindowChoice selected && selected.Id == task.WindowId;
-        ContinueScreenTaskButton.Content = task.ReplanRequired ? "Review boundary & replan" : "Review & continue";
+            && WindowPicker.SelectedItem is WindowChoice current
+            && (current.Id == task.WindowId || resourceHandoff);
+        ContinueScreenTaskButton.Content = resourceHandoff
+            ? "Use selected window & continue"
+            : task.ReplanRequired ? "Review boundary & replan" : "Review & continue";
         StopScreenTaskButton.IsEnabled = task.Running || task.Plan is not null && task.CanContinue;
         ScreenTaskReplyBox.IsEnabled = !task.Running && task.CanContinue;
     }
@@ -560,18 +579,22 @@ public partial class MainWindow : Window
         screenTask?.Stop();
         CancelWork();
         UpdateScreenTaskUi();
-        if (screenTask is { } task) companion.FinishTask(task.Detail);
+        if (screenTask is { } task) companion.FinishTask(task);
     }
 
     private void UpdateCompactTaskUi() => companion?.UpdateTask(
         SelectedCameraMode, screenTask,
         screenTask is { CanContinue: true } task && !DesktopAction.IsBusy
-            && WindowPicker.SelectedItem is WindowChoice selected && selected.Id == task.WindowId,
+            && WindowPicker.SelectedItem is WindowChoice selected
+            && (selected.Id == task.WindowId || task.CanApproveResourceHandoff(selected.Id)),
+        screenTask is { } retained && WindowPicker.SelectedItem is WindowChoice current
+            && retained.CanApproveResourceHandoff(current.Id),
         cameraRecoverySensing is ICameraRecoveryControl);
 
     private void ForgetScreenTask()
     {
         screenTask = null;
+        companion.ClearFeedback();
         ScreenTaskReplyBox.Clear();
         ScreenTaskStatusText.Text = "";
         UpdateScreenTaskUi();
@@ -715,7 +738,8 @@ public partial class MainWindow : Window
             token.ThrowIfCancellationRequested();
             if (!CurrentWork(mine, token) || Native.GetForegroundWindow() != approved.Window.Handle) return false;
             highlight = approved;
-            bool markerShown = companion.ShowActionTarget(approved.Rect, approved.Target.Box);
+            bool markerShown = await companion.MoveToActionTargetAsync(approved.Rect, approved.Target.Box, token);
+            if (!CurrentWork(mine, token) || Native.GetForegroundWindow() != approved.Window.Handle) return false;
             overlay.PointAt(approved.Rect, approved.Target.Box, showBadge: !markerShown);
             if (!overlay.IsVisible) return false;
             approved.HasShown = true;

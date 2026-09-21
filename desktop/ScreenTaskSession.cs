@@ -10,7 +10,8 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
 {
     internal const int HistoryLimit = 16;
     internal const int ObservationAttempts = 6;
-    internal static readonly TimeSpan VerificationTimeout = TimeSpan.FromSeconds(5);
+    // Two stable reads must fit the browser-before/UIA/browser-after inspection budgets.
+    internal static readonly TimeSpan VerificationTimeout = TimeSpan.FromSeconds(30);
     private readonly List<TaskStep> history = [];
     private readonly Queue<string> attemptedStates = new();
     private int version;
@@ -22,7 +23,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
 
     internal string Id { get; } = Guid.NewGuid().ToString();
     internal string Prompt { get; } = prompt;
-    internal string WindowId { get; } = windowId;
+    internal string WindowId { get; private set; } = windowId;
     internal int Step { get; private set; } = 1;
     internal int ActionsTaken { get; private set; }
     internal string Status { get; private set; } = "checkpoint";
@@ -37,6 +38,8 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
     internal bool Running => Status == "running";
     internal bool AwaitingActionEvidence => pendingAction is not null;
     internal bool CanContinue => !Running && Status is not ("unknown" or "cancelled") && Step < 10000;
+    internal bool CanApproveResourceHandoff(string windowId) =>
+        CanContinue && ReplanReason == "resource" && WindowId != windowId && !string.IsNullOrWhiteSpace(windowId);
     internal TaskProgress Progress => new(Id, Step, Status, history.ToArray(), RemainingWork, UserInput,
         Plan, PlanCursor, ReplanReason);
 
@@ -63,6 +66,20 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
             PauseForReplan("mode_changed", "Mode changed. The retained plan is descriptive only; review and request a fresh plan before executing.");
     }
 
+    internal void ApproveResourceHandoff(string windowId)
+    {
+        if (!CanApproveResourceHandoff(windowId))
+            throw new InvalidOperationException("This task is not waiting for an explicitly selected resource.");
+        WindowId = windowId;
+        Plan = null;
+        PlanCursor = 0;
+        replanRequired = true;
+        ReplanReason = "resource_handoff";
+        SetStatus("needs_input",
+            "The selected window is approved for this task. Fresh evidence is required before planning or acting.");
+        DiagnosticLog.Record("screen_task_resource_handoff", new { taskId = Id, step = Step });
+    }
+
     private void PauseForReplan(string reason, string detail, string status = "blocked")
     {
         replanRequired = true;
@@ -78,7 +95,9 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
         PauseForReplan(boundary.Kind,
             (boundary.Kind == "completion_candidate"
                 ? "Completion suggested, not independently verified. Review the current app.\n"
-                : "Plan segment stopped at a boundary. No new resource or permission was acquired.\n")
+                : boundary.Kind == "resource"
+                    ? "This task needs a different window. Select that window, then choose “Use selected window & continue.” MSGuide will not switch windows automatically.\n"
+                    : "Plan segment stopped at a boundary. No new resource or permission was acquired.\n")
             + boundary.Reason + (boundary.Needed.Length == 0 ? "" : "\nNeeded: " + boundary.Needed),
             boundary.Kind == "completion_candidate" ? "review_required" : "needs_input");
     }
@@ -181,6 +200,17 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 throw new InvalidOperationException(
                     "Capture access was denied for the selected window. No observation was accepted. Review the app and its permissions before continuing.", ex);
             }
+            catch (InvalidOperationException ex)
+            {
+                CheckCurrent();
+                DiagnosticLog.Record("screen_task_capture_failed", new
+                {
+                    taskId = Id, step = Step, errorType = ex.GetType().Name,
+                    reason = ex is CaptureResourceChangedException ? "resource_changed_during_capture" : "capture_failed",
+                    elapsedMs = clock.ElapsedMilliseconds
+                });
+                throw;
+            }
             CheckCurrent();
             token.ThrowIfCancellationRequested();
             if (result.WindowId != WindowId || !Safety.Fresh(result.CapturedAt, DateTimeOffset.UtcNow))
@@ -188,7 +218,8 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
             DiagnosticLog.Record("screen_task_capture", new
             {
                 taskId = Id, step = Step, elapsedMs = clock.ElapsedMilliseconds,
-                imageShared = result.ImageBase64 is not null, elements = result.Elements.Length
+                imageShared = result.ImageBase64 is not null, elements = result.Elements.Length,
+                result.AutomationComplete, resourceVerified = result.ResourceId is not null
             });
             return result;
         }
@@ -198,7 +229,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
             var observation = await Observe(Step == 1 || replanRequired, cancellationToken);
             if (!observation.AutomationComplete && allowExecution)
             {
-                SetStatus("blocked", "The accessible controls inspection was incomplete. Use manual screen guidance or a supported surface; no task action was accepted.");
+                SetStatus("blocked", "The selected app did not finish exposing its accessible controls in time. Switch to Guide mode or retry after the app settles; no task action was accepted.");
                 return;
             }
             if (unchangedState == Fingerprint(observation))
@@ -314,7 +345,13 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                             "needs_input");
                         return;
                     }
-                    if (plan.ResourceId is null || observation.ResourceId != plan.ResourceId)
+                    if (plan.ResourceId is null)
+                    {
+                        PauseForReplan("resource_unverified",
+                            "MSGuide could not verify the active page identity. No action was started. Keep one supported browser page visible and capture it again; this is not a report that the page changed.");
+                        return;
+                    }
+                    if (observation.ResourceId != plan.ResourceId)
                     {
                         PauseForReplan("resource_changed", "The selected resource changed or its identity cannot be established locally. No queued step was executed. Review the window/file/site and explicitly replan; a new window requires a new approved request.");
                         return;
@@ -383,48 +420,101 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                 string? candidate = null;
                 bool requiresSemanticEffect = target.Action != "invoke";
                 string outcome = requiresSemanticEffect ? "unknown" : "no_progress";
+                string reason = requiresSemanticEffect ? "effect_not_observed" : "no_stable_change";
+                string? errorType = null;
+                int attempts = 0;
+                var observedIds = new HashSet<string> { observation.Id };
+                void RejectObservation(string rejection, string? failureType = null)
+                {
+                    CheckCurrent();
+                    verification.Token.ThrowIfCancellationRequested();
+                    candidate = null;
+                    outcome = "unknown";
+                    reason = rejection;
+                    errorType = failureType;
+                    DiagnosticLog.Record("screen_task_observation_rejected", new
+                    {
+                        taskId = Id, step = Step, attempt = attempts, reason, errorType,
+                        elapsedMs = verifyClock.ElapsedMilliseconds
+                    });
+                    if (attempts < ObservationAttempts)
+                    {
+                        Detail = "The app is still updating. Rechecking its screen; the action will not be repeated.";
+                        changed();
+                        CheckCurrent();
+                    }
+                }
                 try
                 {
                     for (int attempt = 0; attempt < ObservationAttempts; attempt++)
                     {
                         if (attempt > 0) await delay(TimeSpan.FromMilliseconds(250), verification.Token);
-                        var next = await Observe(false, verification.Token);
-                        if (!next.AutomationComplete || next.Id == observation.Id || next.Id == after?.Id)
-                            throw new InvalidOperationException("Post-action verification was incomplete or reused an observation.");
+                        attempts++;
+                        Observation next;
+                        try { next = await Observe(false, verification.Token); }
+                        catch (CaptureResourceChangedException ex)
+                        {
+                            RejectObservation("resource_changed_during_capture", ex.GetType().Name);
+                            continue;
+                        }
+                        if (!observedIds.Add(next.Id))
+                            throw new InvalidOperationException("Post-action verification reused an observation.");
+                        if (!next.AutomationComplete)
+                        {
+                            RejectObservation("incomplete_observation");
+                            continue;
+                        }
+                        if (observation.ResourceId is not null && next.ResourceId is null)
+                        {
+                            RejectObservation("resource_unverified");
+                            continue;
+                        }
                         after = next;
+                        outcome = requiresSemanticEffect ? "unknown" : "no_progress";
+                        reason = requiresSemanticEffect ? "effect_not_observed" : "no_stable_change";
+                        errorType = null;
                         string fingerprint = Fingerprint(after);
                         if (requiresSemanticEffect && Plan is not null && after.ResourceId != Plan.ResourceId)
                         {
                             ReplanReason = "resource_changed";
+                            reason = "resource_changed";
                             break;
                         }
                         if (EffectObserved(target, observation, after))
-                        { outcome = "effect_observed"; break; }
+                        { outcome = reason = "effect_observed"; break; }
                         if (!requiresSemanticEffect && fingerprint != before && fingerprint == candidate)
-                        { outcome = "screen_changed"; break; }
+                        { outcome = reason = "screen_changed"; break; }
                         candidate = fingerprint != before ? fingerprint : null;
                     }
                 }
                 catch (Exception ex) when (ex is OperationCanceledException or InvalidOperationException)
                 {
                     CheckCurrent();
-                    Record(observation, target, "unknown", after);
-                    DiagnosticLog.Record("screen_task_verification", new
-                    { taskId = Id, step = Step - 1, outcome = "unknown", elapsedMs = verifyClock.ElapsedMilliseconds });
-                    SetStatus("unknown", "The invocation returned but its effect could not be checked within the bounded observation window. Do not retry; review the app manually.");
-                    return;
+                    outcome = "unknown";
+                    reason = ex is OperationCanceledException && verification.IsCancellationRequested
+                        ? "deadline" : "observation_failed";
+                    errorType = ex.GetType().Name;
                 }
                 CheckCurrent();
                 Record(observation, target, outcome, after);
                 DiagnosticLog.Record("screen_task_verification", new
                 {
-                    taskId = Id, step = Step - 1, outcome, elapsedMs = verifyClock.ElapsedMilliseconds
+                    taskId = Id, step = Step - 1, outcome, reason, attempts, errorType,
+                    elapsedMs = verifyClock.ElapsedMilliseconds
                 });
                 if (outcome == "unknown")
                 {
-                    SetStatus("unknown", ReplanReason == "resource_changed"
-                        ? "The resource changed before the control effect could be verified. No queued action will run. Do not retry; review the app manually."
-                        : "The expected control effect was not observed within the bounded observation window. Unrelated screen changes do not verify it. Do not retry; review the app manually.");
+                    string failure = reason switch
+                    {
+                        "deadline" => "Screen verification timed out after 30 seconds.",
+                        "incomplete_observation" => "The app kept returning incomplete controls during screen verification.",
+                        "resource_changed_during_capture" => "The page kept changing during screen verification.",
+                        "resource_unverified" => "The active page could not be identified during screen verification.",
+                        "observation_failed" => "A screen inspection failed before the action's effect could be verified.",
+                        "resource_changed" => "The resource changed before the control effect could be verified.",
+                        _ => "The expected control effect was not observed. Unrelated screen changes do not verify it."
+                    };
+                    SetStatus("unknown", failure + " The action was invoked once and will not be repeated. Do not retry; review the app manually.");
                     return;
                 }
                 if (outcome == "no_progress")
@@ -468,6 +558,11 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
             if (mine == version)
             {
                 bool uncertain = actionInFlight;
+                DiagnosticLog.Record("screen_task_failed", new
+                {
+                    taskId = Id, step = Step, errorType = ex.GetType().Name,
+                    actionPending = uncertain, actions = ActionsTaken
+                });
                 if (pendingAction is { } pending) Record(pending);
                 SetStatus(uncertain ? "unknown" : "failed", uncertain
                     ? "An action may have started. Its outcome is unknown; no retry is allowed."

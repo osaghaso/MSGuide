@@ -439,7 +439,7 @@ internal static class PromptTests
     {
         var handler = new SlowGuidanceHandler();
         using var client = new ApiClient(handler, "synthetic-token");
-        var old = Screen(0) with { CapturedAt = DateTimeOffset.UtcNow.AddSeconds(-53.7) };
+        var old = Screen(0) with { CapturedAt = DateTimeOffset.UtcNow.AddSeconds(-58.7) };
         bool rejected = false;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try { await client.Guide(old, "Synthetic request", CancellationToken.None); }

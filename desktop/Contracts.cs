@@ -216,7 +216,7 @@ public static class Safety
         now >= captured && now - captured < TimeSpan.FromSeconds(60);
 
     internal static TimeSpan GuidanceBudget(DateTimeOffset captured, DateTimeOffset now) =>
-        TimeSpan.FromSeconds(Math.Max(0, 54 - Math.Max(0, (now - captured).TotalSeconds)));
+        TimeSpan.FromSeconds(Math.Max(0, Math.Min(54, 59 - Math.Max(0, (now - captured).TotalSeconds))));
 
     public static bool Matches(Guidance g, string observation, string window) =>
         g.ObservationId == observation && g.WindowId == window && !string.IsNullOrWhiteSpace(g.CorrelationId)

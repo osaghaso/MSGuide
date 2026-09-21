@@ -154,11 +154,16 @@ actionable match and a unique logical identity before creating a fresh target to
 The desktop reuses suitable post-action evidence for the next local binding.
 Routine expected changes do not cause another model call. It runs retained
 steps continuously; missing/changed targets and resource boundaries
-pause for explicit review/replanning. New windows are not selected, permissions
-are not granted, and external resources are not fetched automatically. Generic
-document trees without a proven file/site identity require handoff. Supported
-Edge/Chrome windows can provide a locally hashed page identity from a unique
-browser-chrome HTTP(S) address and visible document surface; scope/address
+pause for explicit review/replanning. New windows are not selected automatically;
+an explicit desktop user selection at a `resource` boundary rebinds the task only
+after the old plan is discarded and fresh evidence is required. Permissions
+are not granted, and external resources are not fetched automatically. Native
+applications use the explicitly selected HWND/process/class/title as their
+resource identity. Supported Edge/Chrome windows use the stricter locally hashed page identity from a unique
+browser-chrome display address and the native active `RootWebArea` identity.
+Browser-elided protocol prefixes are normalized, not treated as failed URL
+parsing; the native page identity is required as well. Exported controls and
+native target lookup are restricted to that page, not browser chrome; scope/address
 changes cannot authorize the rest of an old plan. Guide mode remains non-executing,
 including when approved partial text/images can support a descriptive plan.
 
@@ -176,7 +181,7 @@ the generic desktop loop displays `review_required`, unlike the dedicated local
 camera/demo verifiers. Invalid/absent provider results fail explicitly.
 
 Evidence still expires at 60 seconds. SDK/API/desktop waits are capped at 50/52/54
-seconds and shortened by evidence age, reserving 10/8/6 seconds respectively.
+seconds and shortened by evidence age, reserving 5/3/1 seconds respectively.
 The OpenAI-compatible provider uses a 50-second cap for plan output and retains
 its ten-second cap for legacy single-step requests. Old evidence
 with insufficient headroom fails before inference; results are freshness-checked

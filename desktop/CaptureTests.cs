@@ -23,6 +23,7 @@ internal static class CaptureTests
         "Unsupported window dimensions. Resize the selected window and retry." => "unsupported-dimensions",
         "PNG exceeds the 2 MB limit; select a smaller window." => "image-too-large",
         "Window changed during capture. Capture and review again." => "window-changed",
+        "The selected resource changed during capture. Review it before continuing." => "resource-changed",
         "Cannot allocate a window capture context." => "context-allocation",
         "Cannot allocate a window bitmap." => "bitmap-allocation",
         "This window does not support PrintWindow capture. No desktop fallback is used." => "unsupported",
@@ -58,6 +59,9 @@ internal static class CaptureTests
 
     internal static void RunEvidenceChecks()
     {
+        Require(AutomationEvidence.CaptureScanMilliseconds > AutomationEvidence.ScanMilliseconds
+            && AutomationEvidence.CaptureScanMilliseconds < 30_000);
+        Require(TreeWalker.ControlViewWalker is not null);
         var context = Enumerable.Range(0, 250).Select(index =>
             new ElementInfo("text", $"Synthetic text {index}", [0, 0, 0.1, 0.1],
                 Targetable: false)).ToArray();
@@ -79,16 +83,27 @@ internal static class CaptureTests
         Require(CaptureService.BoundEvidence([button], "", "", true).RequireComplete().Single() == button);
 
         var window = new WindowChoice(new nint(0x1234), 42, "Synthetic browser", "Chrome_WidgetWin_1");
-        string? first = AutomationEvidence.BrowserResourceId(window, "https://example.test/#first");
+        string documentId = AutomationEvidence.ControlId(window, 42, [1, 2, 3])!;
+        string? first = AutomationEvidence.BrowserResourceId(window, "https://example.test/#first", documentId);
         Require(first is not null && first.StartsWith("browser-", StringComparison.Ordinal)
             && !first.Contains("example", StringComparison.Ordinal)
-            && first == AutomationEvidence.BrowserResourceId(window, "https://example.test/#first")
-            && first != AutomationEvidence.BrowserResourceId(window, "https://example.test/#second")
+            && first == AutomationEvidence.BrowserResourceId(window, "https://example.test/#first", documentId)
+            && first == AutomationEvidence.BrowserResourceId(window, "example.test/#first", documentId)
+            && first != AutomationEvidence.BrowserResourceId(window, "https://example.test/#second", documentId)
+            && first != AutomationEvidence.BrowserResourceId(window, "https://example.test/#first",
+                AutomationEvidence.ControlId(window, 42, [1, 2, 4])!)
             && first != AutomationEvidence.BrowserResourceId(window with { Handle = new nint(0x5678) },
-                "https://example.test/#first"));
-        foreach (string unsupported in new[] { "", "example.test", "file:///C:/test", "javascript:alert(1)",
+                "https://example.test/#first", documentId));
+        Require(AutomationEvidence.BrowserAddressKey("http://127.0.0.1:8877/task?run=1")
+            == AutomationEvidence.BrowserAddressKey("127.0.0.1:8877/task?run=1"));
+        Require(AutomationEvidence.BrowserAddressKey("http://example.test:443/path")
+            == AutomationEvidence.BrowserAddressKey("example.test:443/path")
+            && AutomationEvidence.BrowserAddressKey("example.test:443/path")
+                != AutomationEvidence.BrowserAddressKey("example.test/path"));
+        Require(AutomationEvidence.BrowserResourceId(window, "https://example.test/", "") is null);
+        foreach (string unsupported in new[] { "", "not a web address", "file:///C:/test", "javascript:alert(1)",
                      "https://user:password@example.test/", new string('x', 2049) })
-            Require(AutomationEvidence.BrowserResourceId(window, unsupported) is null);
+            Require(AutomationEvidence.BrowserResourceId(window, unsupported, documentId) is null);
         Require(AutomationEvidence.IsBrowserAddressControl("edit", "Address and search bar", false));
         Require(!AutomationEvidence.IsBrowserAddressControl("edit", "Address and search bar", true));
         Require(!AutomationEvidence.IsBrowserAddressControl("text", "Address and search bar", false));
@@ -206,12 +221,73 @@ internal static class CaptureTests
                 Require(rejected);
                 checks.Add($"evidence-disposed-{state}");
             }
+            stage("persistent-companion-feedback");
+            await CheckFeedbackVisibility(ct);
+            checks.Add("dpi-stable-feedback-persists-after-six-seconds-and-prompt-dismissal");
             stage("dense-visible-controls");
             await CheckDenseControls(ct);
             checks.Add("dense-context-does-not-hide-action-controls-or-enable-background-input");
             stage("complete");
         }
         finally { demo.Hide(); demo.Close(); }
+    }
+
+    internal static async Task CheckFeedbackVisibility(CancellationToken ct)
+    {
+        var shell = new CompanionShell(_ => Task.CompletedTask, () => { },
+            _ => Task.CompletedTask, () => { }, () => { }, _ => { });
+        try
+        {
+            nint foreground = Native.GetForegroundWindow();
+            var task = new ScreenTaskSession("Synthetic feedback request", "synthetic-window");
+            await task.RunAsync((_, _) => Task.FromResult(new Observation("synthetic-observation",
+                    "synthetic-window", "Synthetic feedback", DateTimeOffset.UtcNow, 800, 600, "", [], null)),
+                (observation, progress, _) => Task.FromResult(new Guidance("synthetic-correlation",
+                    observation.Id, observation.WindowId, "Select a synthetic account and provide a synthetic queue name.",
+                    "needs_input", null, [], "model", TaskId: progress.TaskId, Step: progress.Step)),
+                (_, _, _) => throw new InvalidOperationException("Feedback fixture must not execute."),
+                false, () => { }, ct);
+            shell.Start();
+            shell.BeginTask();
+            shell.ShowTaskStatus("Working on a synthetic task.");
+            shell.FinishTask(task);
+            await Task.Delay(650, ct);
+            void CheckSizeAndText(string expected)
+            {
+                var cursor = shell.Cursor;
+                var size = cursor.ExpectedPhysicalSize;
+                Require(cursor.IsVisible && cursor.HasVisibleFeedback
+                    && cursor.FeedbackText.Contains(expected, StringComparison.Ordinal)
+                    && Native.GetWindowRect(new WindowInteropHelper(cursor).Handle, out var bounds)
+                    && Math.Abs(bounds.Width - size.Width) <= 1 && Math.Abs(bounds.Height - size.Height) <= 1
+                    && bounds.Height >= 100);
+            }
+            CheckSizeAndText("Needs your input");
+            shell.Cursor.Hide();
+            shell.Prompt.ShowActivated = false;
+            shell.Prompt.Show();
+            await Idle(ct);
+            Require(!shell.Cursor.IsVisible);
+            shell.Prompt.Hide();
+            await Idle(ct);
+            CheckSizeAndText("Actions invoked: 0");
+            var failed = new ScreenTaskSession("Synthetic failed feedback", "synthetic-window");
+            await failed.RunAsync((_, _) => Task.FromResult(new Observation("synthetic-failure",
+                    "synthetic-window", "Synthetic failure", DateTimeOffset.UtcNow, 800, 600, "", [], null)),
+                (_, _, _) => throw new InvalidOperationException("Synthetic provider failure detail must stay out of logs."),
+                (_, _, _) => throw new InvalidOperationException("A failed request cannot execute."),
+                false, () => { }, ct);
+            shell.FinishTask(failed);
+            await Task.Delay(350, ct);
+            CheckSizeAndText("Task failed");
+            shell.ShowResponse("Synthetic failure response that must remain available until cleared.");
+            await Task.Delay(TimeSpan.FromSeconds(6.5), ct);
+            CheckSizeAndText("Synthetic failure response");
+            Require(Native.GetForegroundWindow() == foreground);
+            shell.ClearFeedback();
+            Require(shell.Cursor.IsVisible && !shell.Cursor.HasVisibleFeedback && shell.Cursor.FeedbackText.Length == 0);
+        }
+        finally { shell.Stop(); }
     }
 
     private static async Task CheckDenseControls(CancellationToken ct)

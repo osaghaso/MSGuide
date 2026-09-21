@@ -16,6 +16,7 @@ public partial class MainWindow
             Environment.GetEnvironmentVariable("MSGUIDE_SESSION_SCREEN_CONTEXT") == "1";
         sessionAutomationApproved =
             Environment.GetEnvironmentVariable("MSGUIDE_SESSION_AUTOMATION") == "1";
+        if (sessionAutomationApproved) CameraControlMode.IsChecked = true;
         DeveloperToolsExpander.Visibility = developerToolsEnabled ? Visibility.Visible : Visibility.Collapsed;
         ResetScreenContextUi();
     }

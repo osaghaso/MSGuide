@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Net;
 using System.Net.Http;
@@ -46,8 +47,188 @@ internal static class PlanTests
         new("synthetic-correlation", observation.Id, observation.WindowId, "Synthetic plan.", "next_step",
             null, [], "model", TaskId: task.TaskId, Step: task.Step, Plan: plan);
 
+    private static async Task RunObservationRecoveryAsync(List<string> checks)
+    {
+        foreach (string rejection in new[] { "incomplete", "resource_changed", "unverified" })
+        foreach (int rejectedRead in new[] { 1, 2 })
+        foreach (bool navigates in new[] { false, true })
+        {
+            int invocations = 0, reads = 0, modelCalls = 0;
+            var task = new ScreenTaskSession("Observe a page that is still updating", Window.Id);
+            var plan = Segment(navigates
+                ? [Action(Element()), Action(Element("Next page", runtime: 2))]
+                : [Action(Element())]);
+            await task.RunAsync((image, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                if (invocations == 0) return Task.FromResult(Screen(0, Element(), Element("Next page", runtime: 2)));
+                IntegrationTests.Require(!image);
+                reads++;
+                if (reads == rejectedRead && rejection == "resource_changed")
+                    return Task.FromException<Observation>(new CaptureResourceChangedException());
+                return Task.FromResult(Screen(1) with
+                {
+                    AutomationComplete = reads != rejectedRead || rejection != "incomplete",
+                    ResourceId = reads == rejectedRead && rejection == "unverified"
+                        ? null : navigates ? "resource-next" : Resource
+                });
+            }, (observation, progress, _) =>
+            {
+                modelCalls++;
+                return Task.FromResult(Reply(observation, progress, plan));
+            }, (_, _, _) =>
+            {
+                invocations++;
+                return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+            }, true, () => { }, CancellationToken.None, NoDelay);
+            IntegrationTests.Require(invocations == 1 && modelCalls == 1 && reads == rejectedRead + 2
+                && task.ActionsTaken == 1 && task.PlanCursor == 1 && !task.AwaitingActionEvidence
+                && task.History.Single().Outcome == "screen_changed"
+                && task.History.Single().AfterObservationId is not null
+                && task.Status == (navigates ? "blocked" : "review_required")
+                && (!navigates || task.ReplanRequired && task.ReplanReason == "resource_changed"));
+        }
+        checks.Add("postclick-transient-inspections-retried-with-two-fresh-stable-reads-no-action-replay");
+        checks.Add("postclick-navigation-retains-remaining-plan-behind-explicit-resource-review");
+
+        foreach (string rejection in new[] { "incomplete", "resource_changed", "unverified" })
+        {
+            int invocations = 0, reads = 0;
+            var task = new ScreenTaskSession("Do not guess an unreadable action outcome", Window.Id);
+            var plan = Segment([Action(Element())]);
+            Task<Observation> Capture(bool _, CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                if (invocations == 0) return Task.FromResult(Screen(0));
+                reads++;
+                return rejection == "resource_changed"
+                    ? Task.FromException<Observation>(new CaptureResourceChangedException())
+                    : Task.FromResult(Screen(1) with
+                    {
+                        AutomationComplete = rejection != "incomplete",
+                        ResourceId = rejection == "unverified" ? null : Resource
+                    });
+            }
+            Task<Guidance> Guide(Observation observation, TaskProgress progress, CancellationToken _) =>
+                Task.FromResult(Reply(observation, progress, plan));
+            Task<DesktopActionResult> Execute(Observation _, TargetInfo target, CancellationToken token)
+            {
+                invocations++;
+                return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+            }
+            await task.RunAsync(Capture, Guide, Execute, true, () => { }, CancellationToken.None, NoDelay);
+            string expectedDetail = rejection switch
+            {
+                "incomplete" => "incomplete controls",
+                "resource_changed" => "page kept changing",
+                _ => "page could not be identified"
+            };
+            IntegrationTests.Require(task.Status == "unknown" && invocations == 1
+                && reads == ScreenTaskSession.ObservationAttempts && task.PlanCursor == 0
+                && !task.CanContinue && !task.AwaitingActionEvidence
+                && task.History.Single().Outcome == "unknown"
+                && task.History.Single().AfterObservationId is null
+                && task.Detail.Contains(expectedDetail, StringComparison.Ordinal)
+                && !task.Detail.Contains("timed out", StringComparison.Ordinal));
+            bool replayRejected = false;
+            try { await task.RunAsync(Capture, Guide, Execute, true, () => { }, CancellationToken.None, NoDelay); }
+            catch (InvalidOperationException) { replayRejected = true; }
+            IntegrationTests.Require(replayRejected && invocations == 1
+                && reads == ScreenTaskSession.ObservationAttempts && task.History.Count == 1);
+        }
+        checks.Add("postclick-persistent-inspection-failures-bounded-classified-and-never-replayed");
+
+        foreach (string failure in new[] { "stale", "other_window", "reused", "window_changed", "access_denied" })
+        {
+            int invocations = 0, reads = 0;
+            var initial = Screen(0);
+            var task = new ScreenTaskSession("Do not retry invalid or denied observations", Window.Id);
+            const string privateError = "Synthetic external capture error must not appear in diagnostics.";
+            await task.RunAsync((_, _) =>
+            {
+                if (invocations == 0) return Task.FromResult(initial);
+                reads++;
+                return failure switch
+                {
+                    "window_changed" => Task.FromException<Observation>(new InvalidOperationException(privateError)),
+                    "access_denied" => Task.FromException<Observation>(new UnauthorizedAccessException(privateError)),
+                    "reused" => Task.FromResult(initial),
+                    "other_window" => Task.FromResult(Screen(1) with { WindowId = "other-window" }),
+                    _ => Task.FromResult(Screen(1) with { CapturedAt = DateTimeOffset.UtcNow.AddMinutes(-5) })
+                };
+            }, (observation, progress, _) => Task.FromResult(Reply(observation, progress, Segment([Action(Element())]))),
+                (_, _, _) =>
+                {
+                    invocations++;
+                    return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+                }, true, () => { }, CancellationToken.None, NoDelay);
+            IntegrationTests.Require(task.Status == "unknown" && invocations == 1 && reads == 1
+                && task.PlanCursor == 0 && !task.CanContinue && task.History.Single().Outcome == "unknown"
+                && task.Detail.Contains("inspection failed", StringComparison.Ordinal)
+                && !task.Detail.Contains(privateError, StringComparison.Ordinal));
+        }
+        checks.Add("postclick-stale-reused-wrong-window-and-access-failures-are-not-retried");
+
+        foreach (bool stop in new[] { false, true })
+        {
+            int invocations = 0, reads = 0;
+            using var cancellation = new CancellationTokenSource();
+            var task = new ScreenTaskSession("Cancel while waiting for the screen", Window.Id);
+            await task.RunAsync((_, _) =>
+            {
+                if (invocations > 0) reads++;
+                return Task.FromResult(Screen(invocations) with { AutomationComplete = invocations == 0 });
+            }, (observation, progress, _) => Task.FromResult(Reply(observation, progress, Segment([Action(Element())]))),
+                (_, _, _) =>
+                {
+                    invocations++;
+                    return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+                }, true, () =>
+                {
+                    if (reads != 1 || !task.Running) return;
+                    if (stop) task.Stop(); else cancellation.Cancel();
+                }, cancellation.Token, NoDelay);
+            IntegrationTests.Require(task.Status == "unknown" && invocations == 1 && reads == 1
+                && !task.CanContinue && !task.AwaitingActionEvidence
+                && task.History.Single().Outcome == "unknown");
+        }
+        checks.Add("postclick-observation-retries-honor-stop-and-cancellation-without-replay");
+
+        foreach (bool timeout in new[] { false, true })
+        {
+            int invocations = 0, reads = 0;
+            var task = new ScreenTaskSession("Allow a bounded slow post-click inspection", Window.Id);
+            var clock = Stopwatch.StartNew();
+            await task.RunAsync(async (_, token) =>
+            {
+                if (invocations > 0 && ++reads == 1)
+                    await Task.Delay(timeout ? Timeout.InfiniteTimeSpan : TimeSpan.FromMilliseconds(5200), token);
+                return Screen(invocations);
+            }, (observation, progress, _) => Task.FromResult(Reply(observation, progress, Segment([Action(Element())]))),
+                (_, _, _) =>
+                {
+                    invocations++;
+                    return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+                }, true, () => { }, CancellationToken.None, NoDelay);
+            IntegrationTests.Require(invocations == 1 && task.ActionsTaken == 1
+                && !task.AwaitingActionEvidence
+                && task.Status == (timeout ? "unknown" : "review_required")
+                && reads == (timeout ? 1 : 2)
+                && task.PlanCursor == (timeout ? 0 : 1)
+                && task.History.Single().Outcome == (timeout ? "unknown" : "screen_changed"));
+            if (timeout)
+                IntegrationTests.Require(!task.CanContinue
+                    && clock.Elapsed >= ScreenTaskSession.VerificationTimeout - TimeSpan.FromMilliseconds(100)
+                    && clock.Elapsed < ScreenTaskSession.VerificationTimeout + TimeSpan.FromSeconds(5)
+                    && task.Detail.Contains("timed out after 30 seconds", StringComparison.Ordinal));
+            else IntegrationTests.Require(clock.Elapsed >= TimeSpan.FromSeconds(5));
+        }
+        checks.Add("postclick-slow-read-over-five-seconds-recovers-shared-thirty-second-deadline-still-stops");
+    }
+
     internal static async Task RunAsync(List<string> checks)
     {
+        await RunObservationRecoveryAsync(checks);
         foreach (int length in new[] { 3, 17, 31 })
         {
             int page = 0, modelCalls = 0, invocations = 0, captures = 0, shownStep = 0;
@@ -171,6 +352,14 @@ internal static class PlanTests
             (_, _, _) => throw new InvalidOperationException("Incomplete evidence executed."),
             true, () => { }, CancellationToken.None, NoDelay);
         IntegrationTests.Require(incomplete.Status == "blocked" && incomplete.ActionsTaken == 0);
+        var unverified = new ScreenTaskSession("Do not label missing identity as navigation", Window.Id);
+        await unverified.RunAsync((_, _) => Task.FromResult(Screen(0) with { ResourceId = null }),
+            (observed, progress, _) => Task.FromResult(Reply(observed, progress,
+                Segment([Action(Element())]) with { ResourceId = null })),
+            (_, _, _) => throw new InvalidOperationException("Unverified page executed."),
+            true, () => { }, CancellationToken.None, NoDelay);
+        IntegrationTests.Require(unverified.Status == "blocked" && unverified.ActionsTaken == 0
+            && unverified.ReplanReason == "resource_unverified");
         checks.Add("plan-guide-partial-context-descriptive-only-no-execution");
 
         foreach (string boundary in new[] { "resource", "needs_input", "permission", "observation", "unsupported", "plan_limit" })
@@ -186,6 +375,15 @@ internal static class PlanTests
                 true, () => { }, CancellationToken.None, NoDelay);
             IntegrationTests.Require(calls == 1 && task.Plan == plan && task.PlanCursor == 0
                 && task.Status == "needs_input" && task.Detail.Contains(plan.Boundary.Needed, StringComparison.Ordinal));
+            if (boundary == "resource")
+            {
+                IntegrationTests.Require(task.CanApproveResourceHandoff("next-window")
+                    && !task.CanApproveResourceHandoff(Window.Id)
+                    && task.Detail.Contains("Use selected window & continue", StringComparison.Ordinal));
+                task.ApproveResourceHandoff("next-window");
+                IntegrationTests.Require(task.WindowId == "next-window" && task.Plan is null
+                    && task.ReplanReason == "resource_handoff" && task.CanContinue);
+            }
         }
 
         foreach (string failure in new[] { "missing", "ambiguous", "replaced", "disabled", "password", "renamed", "value_drift", "resource" })
@@ -469,7 +667,8 @@ internal static class PlanTests
             && AutomationEvidence.ControlId(Window, 42, []) is null
             && AutomationEvidence.ControlId(Window, 0, [1]) is null
             && AutomationEvidence.ControlId(Window, 42, [1, 2]) != AutomationEvidence.ControlId(Window, 42, [1, 3])
-            && AutomationEvidence.ResourceId(Window, "Synthetic resource", [Element() with { Role = "document" }]) is null);
+            && AutomationEvidence.ResourceId(Window, "Synthetic resource", [Element() with { Role = "document" }]) is not null
+            && AutomationEvidence.ResourceId(Window, "", []) is null);
     }
 }
 

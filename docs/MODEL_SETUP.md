@@ -168,8 +168,8 @@ submissions now return an explicit sanitized failure, not a success-shaped
 clarification. Model completion is only a suggestion for user/local review.
 
 The 60-second evidence TTL is unchanged. Whole-call limits are the smaller of
-the configured cap and remaining freshness: **50 seconds / 10 seconds reserved**
-for Copilot, **52 / 8** for the API, and **54 / 6** for the desktop. Lock waits,
+the configured cap and remaining freshness: **50 seconds / 5 seconds reserved**
+for Copilot, **52 / 3** for the API, and **54 / 1** for the desktop. Lock waits,
 prior cleanup, session creation, and attachment preparation consume that same
 budget; `send_and_wait(timeout=remaining)` is explicit rather than the SDK's
 60-second default. Post-inference freshness and exact-target checks remain.
@@ -178,8 +178,11 @@ HTTP disconnect, cancellation, and timeout cancel the owned provider turn and
 invalidate its callback. Since cancelling `send_and_wait` alone does not stop
 agent work, cleanup explicitly calls **abort**, then **disconnect**. Accepted
 guidance returns without waiting for teardown; at most one retiring session
-exists, and the next call drains it before creating another. Abort/detach share
-a two-second ceiling. Unconfirmed cleanup stops the owned runtime (up to the
+exists, and the next call drains it before creating another. Abort and detach
+each use the configured shutdown deadline (five seconds by default), not a
+one-second acknowledgement allowance that can reject a healthy runtime.
+Both stages remain bounded and their elapsed times are recorded.
+Unconfirmed cleanup stops the owned runtime (up to the
 configured shutdown timeout, five seconds by default) and blocks further
 requests until restart; cancelled session creation without a returned ID also
 stops that runtime. Remote termination cannot be guaranteed if the SDK/runtime
@@ -203,8 +206,10 @@ present. The desktop sends an initial, same-resource automatic refresh, or expli
 then uses fresh local UIA-only steps/checks instead of another inference per action.
 Execution first presents the grounded target in the foreground with the Windows
 marker; it never falls back to background input. A supported Edge/Chrome page can
-be scoped by a unique browser-chrome address checked locally, not by a URL
-claimed in web content. Generic file/site document surfaces without proven resource identity stop for
+be scoped by a unique canonical browser-chrome display address combined with
+the native active document identity, not by a URL claimed in web content.
+This handles protocol-prefix elision and ignores auxiliary document wrappers;
+the model only receives controls inside that verified page. Generic file/site document surfaces without proven resource identity stop for
 handoff rather than speculative multi-step navigation. No screenshot or task
 history file is created. This removes repeated image work and foreground
 teardown latency, not remote inference or per-plan session creation latency.
@@ -217,9 +222,31 @@ ownership and blocks provider reuse; explicit close can join the pending stop or
 retry after a failed stop has finished, without queuing overlapping stop workers.
 
 By default the provider reuses the user's existing `copilot login` credential
-through the system credential store. It replaces the system prompt, exposes
-only `submit_guidance`, and disables session storage, memory, and infinite
-sessions. If `COPILOT_GITHUB_TOKEN` is explicitly supplied, the provider uses
+through the system credential store. It checks authentication once during
+startup, within the startup deadline; missing/unavailable authentication fails
+startup explicitly before any screen is shared. No credentials are read or
+copied by MSGuide.
+
+Embedded sessions explicitly disable automatic configuration, skills, hooks,
+and custom-instruction discovery, host Git operations and remote custom-agent
+discovery. Because the pinned runtime can still load registered MCP servers
+with configuration discovery disabled, each turn first reads the SDK's server
+inventory and passes all inherited server names in the **session-only disabled
+list**, except an explicitly configured legacy Learn server. Inventory failure
+rejects the request before an unisolated session can be created. The normal
+CLI's personal MCP/plugin setup is not part of a screen-planning request. This isolation is separate from the
+The session-only disabled list also includes `github-mcp-server`, because that
+built-in server is not returned by the configuration inventory. Disabling its
+tool connection does not disable the cached GitHub login used for model access. This isolation is separate from the
+existing keychain login: using `mode="empty"` without an explicit token would
+disable keychain access in the pinned SDK. Any MCP OAuth request that still
+reaches the host is cancelled rather than opening an interactive sign-in flow.
+Only explicitly configured legacy Learn integration is allowed; this does not
+modify or disable integrations in the user's regular CLI.
+
+The provider replaces the system prompt, exposes only `submit_guidance`, and
+disables session storage, memory, and infinite sessions.
+If `COPILOT_GITHUB_TOKEN` is explicitly supplied, the provider uses
 SDK `mode="empty"` instead; the launcher removes that token from the desktop
 process environment, and MSGuide never writes it to disk.
 

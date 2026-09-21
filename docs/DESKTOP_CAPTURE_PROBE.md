@@ -50,8 +50,8 @@ References:
   artifacts after review and never persist preview pixels.
 - New Teams exposed a rich WebView UIA subtree whose provider process differed
   from the selected top-level window process. Production traversal therefore
-  anchors the Raw View walk at the exact selected HWND and permits bounded
-  cross-process descendants. Evidence includes AutomationId, FrameworkId,
+  anchors the Control View walk at the exact selected HWND and permits bounded
+  cross-process descendants while excluding provider layout nodes. Evidence includes AutomationId, FrameworkId,
   enabled/targetable state, and TogglePattern state. Observed Teams IDs included
   `more-options-header`, `AudioSettings`, and `VideoSettings`.
 - `ms-settings:privacy-webcam` opened Settings Home while an existing

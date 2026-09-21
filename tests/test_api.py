@@ -363,7 +363,7 @@ def test_guidance_route_uses_remaining_freshness(client, monkeypatch):
     body["observation"]["capturedAt"] = (now() - timedelta(seconds=20)).isoformat()
     assert client.post("/v1/guidance", json=body).status_code == 200
     assert 51 < observed[0] <= GUIDANCE_TIMEOUT_SECONDS == 52
-    assert 31 < observed[1] <= 32
+    assert 36 < observed[1] <= 37
 
 
 def test_provider_timeout_maps_to_gateway_timeout(client):
@@ -522,7 +522,7 @@ def test_insufficient_freshness_never_starts_provider(client):
     with TestClient(create_app(Config(token="local-test"), guidance_provider=forbidden),
                     headers={"Authorization": "Bearer local-test"}) as c:
         body = evidence(c)
-        body["observation"]["capturedAt"] = (now() - timedelta(seconds=53)).isoformat()
+        body["observation"]["capturedAt"] = (now() - timedelta(seconds=57)).isoformat()
         assert c.post("/v1/guidance", json=body).status_code == 504
         body["observation"]["capturedAt"] = (now() - timedelta(seconds=60)).isoformat()
         assert c.post("/v1/guidance", json=body).status_code == 422

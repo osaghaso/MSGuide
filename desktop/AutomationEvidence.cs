@@ -12,6 +12,8 @@ internal static class AutomationEvidence
     internal const int ScanNodeLimit = 2000;
     internal const int ScanDepthLimit = 64;
     internal const int ScanMilliseconds = 3000;
+    // ponytail: capture gets one slower pass; keep action lookup at 3s unless diagnostics prove it insufficient.
+    internal const int CaptureScanMilliseconds = 6000;
 
     private static readonly HashSet<string> KnownAutomationIds =
     [
@@ -78,8 +80,9 @@ internal static class AutomationEvidence
 
     internal static string? ResourceId(WindowChoice window, string title, ElementInfo[] elements)
     {
-        // Generic UIA document trees do not prove a file/site identity. Use an explicit resource handoff.
-        if (string.IsNullOrWhiteSpace(title) || elements.Any(e => e.Role == "document")) return null;
+        // Native apps are bound to the explicitly selected HWND/process/class/title.
+        // Browsers use the stricter address-and-document identity path instead.
+        if (string.IsNullOrWhiteSpace(title)) return null;
         return "resource-" + ValueDigest(string.Join("|", window.Id, window.ClassName, title));
     }
 
@@ -90,14 +93,15 @@ internal static class AutomationEvidence
         [
             AutomationElement.IsPasswordProperty, AutomationElement.IsOffscreenProperty,
             AutomationElement.IsEnabledProperty, AutomationElement.ProcessIdProperty,
-            AutomationElement.ControlTypeProperty, AutomationElement.BoundingRectangleProperty
+            AutomationElement.ControlTypeProperty, AutomationElement.BoundingRectangleProperty,
+            AutomationElement.AutomationIdProperty
         ];
         foreach (var property in properties) cache.Add(property);
         if (details)
         {
             AutomationProperty[] metadata =
             [
-                AutomationElement.NameProperty, AutomationElement.AutomationIdProperty,
+                AutomationElement.NameProperty,
                 AutomationElement.FrameworkIdProperty, AutomationElement.RuntimeIdProperty,
                 AutomationElement.HelpTextProperty, AutomationElement.ItemStatusProperty,
                 AutomationElement.IsValuePatternAvailableProperty, AutomationElement.IsTogglePatternAvailableProperty,
@@ -126,21 +130,55 @@ internal static class AutomationEvidence
         }
     }
 
-    internal static string? BrowserResourceId(WindowChoice window, string address)
+    internal static string? BrowserAddressKey(string address)
     {
-        if (address.Length > 2048 || !Uri.TryCreate(address, UriKind.Absolute, out var uri)
-            || uri.Scheme is not ("https" or "http") || uri.UserInfo.Length != 0
-            || string.IsNullOrWhiteSpace(uri.Host))
+        address = address.Trim();
+        if (address.Length is 0 or > 2048 || address.Any(char.IsControl)) return null;
+        if (address.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) address = address[8..];
+        else if (address.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) address = address[7..];
+        else if (address.Contains("://", StringComparison.Ordinal)) return null;
+        if (!Uri.TryCreate("msguide://" + address, UriKind.Absolute, out var uri) || uri.UserInfo.Length != 0
+            || string.IsNullOrWhiteSpace(uri.Host)
+            || uri.HostNameType == UriHostNameType.Dns && !uri.Host.Contains('.') && uri.Host != "localhost")
             return null;
-        return "browser-" + ValueDigest(string.Join("|", window.Id, window.ClassName, uri.AbsoluteUri));
+        string host = uri.IdnHost.ToLowerInvariant();
+        if (uri.HostNameType == UriHostNameType.IPv6) host = "[" + host + "]";
+        // A neutral scheme preserves explicit ports without claiming HTTP versus HTTPS.
+        return host + (uri.Port < 0 ? "" : ":" + uri.Port.ToString(CultureInfo.InvariantCulture))
+            + uri.AbsolutePath + uri.Query + uri.Fragment;
     }
+
+    internal static string? BrowserResourceId(WindowChoice window, string address, string documentId)
+    {
+        string? key = BrowserAddressKey(address);
+        return key is not null && Safety.EvidenceId(documentId)
+            ? "browser-" + ValueDigest(string.Join("|", "page-v2", window.Id, window.ClassName, documentId, key))
+            : null;
+    }
+
+    internal sealed record BrowserScope(string ResourceId, string AddressKey,
+        string DocumentId, AutomationElement Document);
 
     internal static bool IsBrowserAddressControl(string role, string name, bool insideDocument) =>
         !insideDocument && role == "edit" && name is "Address and search bar" or "Address bar";
 
-    internal static string? ReadBrowserResourceId(WindowChoice window, CancellationToken token)
+    internal static string? ReadBrowserResourceId(WindowChoice window, CancellationToken token) =>
+        ReadBrowserScope(window, token)?.ResourceId;
+
+    internal static BrowserScope? ReadBrowserScope(WindowChoice window, CancellationToken token)
     {
-        try { return ReadBrowserResourceCore(window, token); }
+        try
+        {
+            var clock = Stopwatch.StartNew();
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                var scope = ReadBrowserResourceCore(window, token, clock, out bool pagePending);
+                if (scope is not null || !pagePending || clock.ElapsedMilliseconds + 100 >= ScanMilliseconds)
+                    return scope;
+                if (token.WaitHandle.WaitOne(100)) token.ThrowIfCancellationRequested();
+            }
+            return null;
+        }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) when (ex is ElementNotAvailableException or InvalidOperationException
             or COMException or UnauthorizedAccessException or ArgumentException)
@@ -150,8 +188,10 @@ internal static class AutomationEvidence
         }
     }
 
-    private static string? ReadBrowserResourceCore(WindowChoice window, CancellationToken token)
+    private static BrowserScope? ReadBrowserResourceCore(
+        WindowChoice window, CancellationToken token, Stopwatch clock, out bool pagePending)
     {
+        pagePending = false;
         if (!IsSupportedBrowser(window) || !window.Matches()
             || !Native.GetWindowRect(window.Handle, out var rect)) return null;
         var privacy = CaptureCache();
@@ -159,58 +199,83 @@ internal static class AutomationEvidence
         var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
         if (root.Cached.ProcessId != (int)window.ProcessId) return null;
         var walker = TreeWalker.RawViewWalker;
-        var clock = Stopwatch.StartNew();
-        int visited = 0, documents = 0, addresses = 0;
+        int visited = 0, documents = 0, pageRoots = 0, addresses = 0;
         bool incomplete = false;
-        string? resource = null;
+        string? addressKey = null, documentId = null;
         AutomationElement? addressControl = null;
-        void Walk(AutomationElement node, int depth)
+        AutomationElement? document = null;
+        void Walk(AutomationElement node, int depth, bool insideDocument)
         {
             token.ThrowIfCancellationRequested();
             if (++visited > ScanNodeLimit || depth > ScanDepthLimit || clock.ElapsedMilliseconds >= ScanMilliseconds)
             { incomplete = true; return; }
             var value = node.Cached;
             if (value.IsPassword || value.IsOffscreen) return;
-            if (value.ControlType == ControlType.Document)
+            if (value.ControlType == ControlType.Document) insideDocument = true;
+            if (value.ControlType == ControlType.Document || value.AutomationId == "RootWebArea")
             {
-                if (Safety.AutomationBox(value.BoundingRectangle, rect) is not null) documents++;
-                return; // Never accept an address-like field supplied by web content.
+                if (Safety.AutomationBox(value.BoundingRectangle, rect) is not null)
+                {
+                    documents++;
+                    if (value.AutomationId == "RootWebArea")
+                    {
+                        pageRoots++;
+                        document = node;
+                        documentId = ControlId(window, value.ProcessId, node.GetRuntimeId());
+                    }
+                }
+                if (value.AutomationId == "RootWebArea") return;
             }
             if (value.ControlType == ControlType.TabItem) return;
-            if (value.ControlType == ControlType.Edit && value.IsEnabled
+            if (!insideDocument && value.ControlType == ControlType.Edit && value.IsEnabled
                 && Safety.AutomationBox(value.BoundingRectangle, rect) is not null)
             {
                 var field = node.GetUpdatedCache(details);
                 if (!field.Cached.IsPassword && !field.Cached.IsOffscreen
-                    && IsBrowserAddressControl("edit", field.Cached.Name, insideDocument: false))
+                    && IsBrowserAddressControl("edit", field.Cached.Name, insideDocument))
                 {
                     addresses++;
                     addressControl = field;
                     if (!field.Current.IsPassword
                         && field.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern)
                         && pattern is ValuePattern address)
-                        resource = BrowserResourceId(window, address.Current.Value);
+                        addressKey = BrowserAddressKey(address.Current.Value);
                 }
             }
             var child = walker.GetFirstChild(node, privacy);
             while (child is not null && !incomplete)
             {
-                Walk(child, depth + 1);
+                Walk(child, depth + 1, insideDocument);
                 if (incomplete) break;
                 child = walker.GetNextSibling(child, privacy);
             }
         }
-        Walk(root, 0);
+        Walk(root, 0, insideDocument: false);
         token.ThrowIfCancellationRequested();
+        DiagnosticLog.Record("browser_resource_inspection", new
+        {
+            visited, documents, pageRoots, addresses, incomplete,
+            addressVerified = addressKey is not null, documentVerified = documentId is not null,
+            elapsedMs = clock.ElapsedMilliseconds
+        });
+        pagePending = !incomplete && addresses == 1 && addressKey is not null && pageRoots == 0;
         if (incomplete || clock.ElapsedMilliseconds >= ScanMilliseconds
-            || addresses != 1 || documents != 1 || addressControl is null || resource is null
+            || addresses != 1 || pageRoots != 1 || addressControl is null || addressKey is null
+            || document is null || documentId is null
             || !window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
             return null;
         var current = addressControl.Current;
-        return !current.IsPassword && !current.IsOffscreen && current.IsEnabled
-            && addressControl.TryGetCurrentPattern(ValuePattern.Pattern, out var lastPattern)
-            && lastPattern is ValuePattern last
-            && BrowserResourceId(window, last.Current.Value) == resource ? resource : null;
+        if (current.IsPassword || current.IsOffscreen || !current.IsEnabled
+            || !addressControl.TryGetCurrentPattern(ValuePattern.Pattern, out var lastPattern)
+            || lastPattern is not ValuePattern last || BrowserAddressKey(last.Current.Value) != addressKey)
+            return null;
+        var page = document.Current;
+        if (page.IsPassword || page.IsOffscreen || page.AutomationId != "RootWebArea"
+            || Safety.AutomationBox(page.BoundingRectangle, rect) is null
+            || ControlId(window, page.ProcessId, document.GetRuntimeId()) != documentId)
+            return null;
+        string? resource = BrowserResourceId(window, last.Current.Value, documentId);
+        return resource is null ? null : new(resource, addressKey, documentId, document);
     }
 
     internal static bool ResourceMatches(WindowChoice window, string expected, CancellationToken token) =>
@@ -336,7 +401,13 @@ internal static class AutomationEvidence
         var details = CaptureCache(details: true);
         var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
         if (root.Cached.ProcessId != (int)window.ProcessId) return null;
-        if (resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken)) return null;
+        if (resourceId?.StartsWith("browser-", StringComparison.Ordinal) == true)
+        {
+            var scope = ReadBrowserScope(window, cancellationToken);
+            if (scope?.ResourceId != resourceId) return null;
+            root = scope.Document.GetUpdatedCache(privacy);
+        }
+        else if (resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken)) return null;
         var walker = TreeWalker.RawViewWalker;
         var clock = Stopwatch.StartNew();
         int visited = 0;

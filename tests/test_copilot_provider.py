@@ -128,7 +128,9 @@ class FakeSession:
 
 class FakeClient:
     def __init__(self, output, delay=0, fail_start=False, fail_after_output=False,
-                 create_delay=0, abort_delay=0, disconnect_delay=0, **kwargs):
+                 create_delay=0, abort_delay=0, disconnect_delay=0,
+                 authenticated=True, auth_delay=0, auth_failure=False,
+                 inherited_servers=None, discovery_failure=False, **kwargs):
         self.output = output
         self.delay = delay
         self.fail_start = fail_start
@@ -139,6 +141,13 @@ class FakeClient:
         self.sessions = []
         self.create_delay = create_delay
         self.abort_delay, self.disconnect_delay = abort_delay, disconnect_delay
+        self.authenticated, self.auth_delay, self.auth_failure = authenticated, auth_delay, auth_failure
+        self.auth_checks = 0
+        self.auth_entered = asyncio.Event()
+        self.inherited_servers = list(inherited_servers or [])
+        self.discovery_failure = discovery_failure
+        self.discovery_calls = 0
+        self.rpc = SimpleNamespace(mcp=SimpleNamespace(discover=self.discover_mcp))
 
     async def start(self):
         self.started += 1
@@ -149,6 +158,22 @@ class FakeClient:
         self.stopped += 1
         for session in self.sessions:
             session.agent_active = False
+
+    async def get_auth_status(self):
+        self.auth_checks += 1
+        self.auth_entered.set()
+        if self.auth_delay:
+            await asyncio.sleep(self.auth_delay)
+        if self.auth_failure:
+            raise RuntimeError("private authentication response")
+        return SimpleNamespace(isAuthenticated=self.authenticated)
+
+    async def discover_mcp(self, request):
+        self.discovery_calls += 1
+        if self.discovery_failure:
+            raise RuntimeError("private discovery details")
+        assert request.working_directory is not None
+        return SimpleNamespace(servers=[SimpleNamespace(name=name) for name in self.inherited_servers])
 
     async def create_session(self, **options):
         await asyncio.sleep(self.create_delay)
@@ -204,6 +229,7 @@ def test_explicit_github_token_is_passed_to_runtime_client(tmp_path):
 
     assert clients[0].kwargs["github_token"] == "github_pat_test"
     assert clients[0].kwargs["mode"] == "empty"
+    assert clients[0].kwargs["use_logged_in_user"] is False
 
 
 @pytest.mark.asyncio
@@ -218,11 +244,13 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     }
     model, client = provider(tmp_path, output)
     await model.start()
+    await model.start()
     first = await model("Help me", observation(image=True))
     second = await model("Help again", observation())
     await model.close()
 
     assert client.started == client.stopped == 1
+    assert client.auth_checks == 1
     assert len(client.sessions) == 2
     assert all(session.disconnected for session in client.sessions)
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
@@ -231,11 +259,25 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     assert first.target.action == "invoke"
     assert first.citations[0].source == "https://learn.microsoft.com/example"
     assert client.kwargs["mode"] == "copilot-cli"
+    assert client.kwargs["use_logged_in_user"] is True
     options = client.sessions[0].options
     assert list(options["available_tools"]) == ["custom:submit_guidance"]
     assert options["enable_session_store"] is False
     assert options["infinite_sessions"] == {"enabled": False}
     assert options["memory"] == {"enabled": False}
+    assert options["enable_config_discovery"] is False
+    assert options["enable_file_hooks"] is False
+    assert options["enable_host_git_operations"] is False
+    assert options["enable_skills"] is False
+    assert options["custom_agents_local_only"] is True
+    assert options["enable_on_demand_instruction_discovery"] is False
+    assert options["skip_custom_instructions"] is True
+    assert options["disabled_mcp_servers"] == ["github-mcp-server"]
+    assert "mcp_servers" not in options
+    assert options["on_mcp_auth_request"](
+        {"serverName": "unrelated", "serverUrl": "https://private.invalid", "requestId": "private"},
+        {"sessionId": "private"},
+    ) == {"kind": "cancelled"}
     assert options["reasoning_effort"] == "xhigh"
     assert options["context_tier"] == "long_context"
     payload, attachments = client.sessions[0].sent
@@ -255,6 +297,73 @@ async def test_persistent_client_and_short_lived_validated_sessions(tmp_path):
     assert client.sessions[1].sent[1] == []
     assert all(0 < session.sent_timeout <= 50 for session in client.sessions)
     assert all(session.aborted and not session.agent_active for session in client.sessions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["signed_out", "invalid_status", "error", "timeout", "cancelled"])
+async def test_auth_preflight_fails_before_sessions_and_cleans_runtime(tmp_path, failure):
+    model, client = provider(
+        tmp_path, None,
+        authenticated=False if failure == "signed_out" else "true" if failure == "invalid_status" else True,
+        auth_failure=failure == "error",
+        auth_delay=10 if failure in {"timeout", "cancelled"} else 0,
+    )
+    object.__setattr__(model.config, "startup_timeout_seconds", 0.1)
+    starting = asyncio.create_task(model.start())
+    await client.auth_entered.wait()
+    if failure == "cancelled":
+        starting.cancel()
+    expected = asyncio.CancelledError if failure == "cancelled" else CopilotProviderFailure
+    with pytest.raises(expected) as error:
+        await asyncio.wait_for(starting, 1)
+    if failure != "cancelled":
+        assert error.value.code == "startup" and "private" not in str(error.value)
+    assert client.auth_checks == 1 and client.started == client.stopped == 1
+    assert not client.sessions and not model._started and not model._runtime_owned
+    await model.close()
+    assert client.stopped == 1
+
+
+def test_mcp_sign_in_requests_are_cancelled_without_logging_identity(tmp_path):
+    log = tmp_path / "auth.log"
+    copilot_provider.diagnostics.configure(str(log))
+    try:
+        result = CopilotProvider._reject_mcp_auth(
+            {"serverName": "private-server", "serverUrl": "https://private.invalid",
+             "requestId": "private-request", "staticClientConfig": {"clientSecret": "private-secret"}},
+            {"sessionId": "private-session"},
+        )
+    finally:
+        copilot_provider.diagnostics.configure(None)
+    assert result == {"kind": "cancelled"}
+    contents = log.read_text(encoding="utf-8")
+    assert "copilot_mcp_auth_rejected" in contents
+    assert "private" not in contents
+
+
+@pytest.mark.asyncio
+async def test_every_session_explicitly_blocks_new_inherited_mcp_servers(tmp_path):
+    output = {"observationId": "obs-1", "stepId": "step-2", "status": "needs_input",
+              "targetId": None, "instruction": "Synthetic guidance.", "citationIds": []}
+    model, client = provider(tmp_path, output, inherited_servers=["user-mcp", "workspace-mcp", "plugin-mcp"])
+    async with model:
+        await model("Synthetic check", observation())
+        client.inherited_servers.append("new-mcp")
+        await model("Another synthetic check", observation())
+    assert client.auth_checks == 1 and client.discovery_calls == 2
+    assert client.sessions[0].options["disabled_mcp_servers"] == ["github-mcp-server", "plugin-mcp", "user-mcp", "workspace-mcp"]
+    assert client.sessions[1].options["disabled_mcp_servers"] == ["github-mcp-server", "new-mcp", "plugin-mcp", "user-mcp", "workspace-mcp"]
+    assert all(session.options["enable_config_discovery"] is False for session in client.sessions)
+
+
+@pytest.mark.asyncio
+async def test_failed_mcp_inventory_cannot_create_an_unisolated_session(tmp_path):
+    model, client = provider(tmp_path, None, discovery_failure=True)
+    async with model:
+        with pytest.raises(CopilotProviderFailure) as failure:
+            await model("Synthetic check", observation())
+        assert failure.value.code == "runtime" and "private" not in str(failure.value)
+        assert not client.sessions and model._started
 
 
 @pytest.mark.asyncio
@@ -444,7 +553,7 @@ async def test_agency_mcp_is_opt_in_exact_and_read_only(tmp_path):
     clients = []
 
     def factory(**kwargs):
-        client = FakeClient(output, **kwargs)
+        client = FakeClient(output, inherited_servers=["msft-learn", "unrelated-mcp"], **kwargs)
         clients.append(client)
         return client
 
@@ -466,6 +575,7 @@ async def test_agency_mcp_is_opt_in_exact_and_read_only(tmp_path):
     mcp = options["mcp_servers"]["msft-learn"]
     assert mcp["command"] == "agency" and mcp["args"] == ["mcp", "msft-learn"]
     assert tuple(mcp["tools"]) == AGENCY_LEARN_READ_ONLY_TOOLS
+    assert options["disabled_mcp_servers"] == ["github-mcp-server", "unrelated-mcp"]
     assert list(options["available_tools"]) == [
         "custom:submit_guidance",
         *[f"mcp:msft-learn-{name}" for name in AGENCY_LEARN_READ_ONLY_TOOLS],
@@ -701,7 +811,7 @@ async def test_semantic_input_mismatch_never_returns_an_action(tmp_path, action,
 @pytest.mark.asyncio
 async def test_remaining_freshness_includes_setup_and_explicit_sdk_timeout(tmp_path):
     model, client = provider(tmp_path, None, create_delay=0.05, delay=5)
-    observed = observation().model_copy(update={"capturedAt": now() - timedelta(seconds=49.7)})
+    observed = observation().model_copy(update={"capturedAt": now() - timedelta(seconds=54.7)})
     async with model:
         started = asyncio.get_running_loop().time()
         with pytest.raises(CopilotProviderFailure) as failure:
@@ -718,7 +828,7 @@ async def test_remaining_freshness_includes_setup_and_explicit_sdk_timeout(tmp_p
 async def test_no_inference_when_freshness_has_no_headroom(tmp_path):
     model, client = provider(tmp_path, valid_output())
     async with model:
-        observed = observation().model_copy(update={"capturedAt": now() - timedelta(seconds=51)})
+        observed = observation().model_copy(update={"capturedAt": now() - timedelta(seconds=55)})
         with pytest.raises(CopilotProviderFailure) as failure:
             await model("help", observed)
         assert failure.value.code == "timeout"
@@ -741,6 +851,19 @@ async def test_accepted_result_does_not_wait_for_slow_teardown_and_cleanup_is_si
     assert len(client.sessions) == 2
     assert all(session.aborted and session.disconnected for session in client.sessions)
     assert not model._owned_cleanup
+
+
+@pytest.mark.asyncio
+async def test_each_cleanup_stage_can_use_its_shutdown_budget_without_poisoning_next_request(tmp_path):
+    model, client = provider(tmp_path, valid_output(), abort_delay=0.1, disconnect_delay=0.1)
+    object.__setattr__(model.config, "shutdown_timeout_seconds", 0.15)
+    async with model:
+        for _ in range(2):
+            result = await model("Synthetic check", observation())
+            await model._cleanup_task
+            assert result.status == "next_step" and model._started and not model._cleanup_failed
+    assert len(client.sessions) == 2 and client.stopped == 1
+    assert all(session.aborted and session.disconnected for session in client.sessions)
 
 
 @pytest.mark.asyncio

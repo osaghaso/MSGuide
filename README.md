@@ -43,7 +43,7 @@ Keep direct dependency intent in `requirements.txt` / `requirements-dev.txt`. Re
 
 [scripts/Start-MSGuide.ps1](scripts/Start-MSGuide.ps1) builds the desktop, starts a single-worker loopback API on **port 8765**, checks readiness, and opens the companion. Readiness has a 60-second budget, leaving headroom beyond the provider's 30-second startup deadline; failures identify the readiness stage and diagnostic log. Normal launch shows a click-through Windows-logo buddy beside the pointer. Press `Ctrl+Alt+M` to open the interactive compact prompt with current Guide/Fix mode, retained plan/boundary, clarification reply, continuation, and Stop. **Details** still holds manual capture review and expanded controls; the buddy itself stays click-through and non-activating.
 
-An approved generic observation requests a structured **plan segment**: up to **32 ordered steps**, ending at suggested completion or an explicit resource, information, permission, observation, unsupported-operation, or plan-limit boundary. The entire plan is validated before its first action. In **Fix it for me**, one model call can drive multiple steps using fresh local UIA checks, not one model call per click. Execution continues without an eight-action or two-minute pause and verifies every action. After a segment makes safe progress, `plan_limit` and `observation` boundaries automatically refresh the same approved resource and request the next segment. The 32-step response limit is not an execution checkpoint. A changed resource, missing/changed target, incomplete evidence, required input/permission, unsupported operation, cancellation, no progress, or unknown outcome still stops the run. An empty plan never triggers repeated automatic planning. **Review & continue** is for resumable interruptions, not routine step counts; suggested completion still requires review. The existing 10,000-decision protocol ceiling remains a safeguard against pathological runs.
+An approved generic observation requests a structured **plan segment**: up to **32 ordered steps**, ending at suggested completion or an explicit resource, information, permission, observation, unsupported-operation, or plan-limit boundary. The entire plan is validated before its first action. In **Fix it for me**, one model call can drive multiple steps using fresh local UIA checks, not one model call per click. Execution continues without an eight-action or two-minute pause and verifies every action. After a segment makes safe progress, `plan_limit` and `observation` boundaries automatically refresh the same approved resource and request the next segment. The 32-step response limit is not an execution checkpoint. A changed resource, missing/changed target, incomplete evidence, required input/permission, unsupported operation, cancellation, no progress, or unknown outcome still stops the run. At a `resource` boundary, the user can explicitly select the required window and choose **Use selected window & continue**; this clears the old plan and forces fresh capture and planning while retaining task history. An empty plan never triggers repeated automatic planning. **Review & continue** is for resumable interruptions, not routine step counts; suggested completion still requires review. The existing 10,000-decision protocol ceiling remains a safeguard against pathological runs.
 
 A task retains its original request, plan/cursor, task/step IDs, last 16 action outcomes, and bounded clarification text in memory. Repeated controls are allowed on progressed states; every step is uniquely rebound locally and its native target/state is checked again. Deferred writes require an empty writable non-password field; observed writes require the unchanged reviewed value digest. Unknown outcomes and cancelled queued work cannot resume. Generic goal completion remains **not independently verified**, even after observed control effects and a model completion suggestion.
 
@@ -53,12 +53,28 @@ before relaunching an updated build. If registration conflicts, the new copy
 keeps Details visible instead of hiding with no usable hotkey.
 
 Generic Fix-mode actions are presented **in the foreground**: the target is
-outlined and the Windows-logo marker moves onto it before invocation. The app
+outlined and the Windows-logo marker flies onto it before invocation. The app
 can return focus from its own companion to the approved window, but never steals
 focus from an unrelated application or falls back to background input. Switching
 away, cancellation, or a stale target prevents the action.
 
 The launcher creates an ephemeral local token, writes no token to disk, and removes model credentials from the desktop child's environment. On exit it stops its owned server. Bounded rotating diagnostics under `%LOCALAPPDATA%\MSGuide\logs` connect task/step IDs with capture, guidance, invocation, verification, and stop timings; they exclude prompts, labels, typed values, screenshots, and model prose.
+
+Progress and results remain visible until you clear them or start a new request.
+Closing the compact prompt restores the retained status bubble. Use **Ctrl+Alt+M**
+for the full explanation, required input, plan, and action history. A result
+label distinguishes **Needs your input**, **Task failed**, **Task blocked**,
+**Outcome unknown**, and **Completion needs review**; action counts do not imply
+the entire task succeeded.
+
+Logs remain enabled by the launcher:
+- `%LOCALAPPDATA%\MSGuide\logs\desktop.log`: action invocation/verification,
+  terminal task state, action count, error type, task/step IDs and durations.
+- `%LOCALAPPDATA%\MSGuide\logs\backend.log`: model/API outcomes, sanitized failure
+  codes, authentication/cleanup state and correlated timing.
+
+Detailed response/error text remains in the UI, not the diagnostic files, since
+external messages can contain private screen content or credentials.
 
 - `-Port 8766`: choose a different free port (1024–65535); existing processes are never stopped to free a port.
 - `-SkipBuild`: reuse an existing desktop binary; omit after source changes.
@@ -116,11 +132,14 @@ For the deterministic developer harness, start with `.\scripts\Start-MSGuide.ps1
 4. Use **Check next step**, review/send the fresh capture, and repeat for **View logs → Open troubleshooting → Mark resolved**. The final demo screen says **Issue resolved**.
 5. Use **Pause / clear**, **Dismiss**, Escape, minimize, or Exit to cancel work and clear the current evidence/transcript. Already transmitted data cannot be recalled.
 
-Editing the prompt replaces the old task. Changing the selected window or moving/resizing it invalidates current evidence. Evidence still expires after 60 seconds: SDK/API/desktop guidance waits use the **remaining** lifetime, with 10/8/6 seconds reserved respectively. They do not extend evidence validity. Native actions are caller-bounded to eight seconds; a hung COM call cannot be interrupted safely and blocks new actions until it returns or MSGuide is restarted.
+Editing the prompt replaces the old task. Changing the selected window or moving/resizing it invalidates current evidence. Evidence still expires after 60 seconds: SDK/API/desktop guidance waits use the **remaining** lifetime, with 5/3/1 seconds reserved respectively. They do not extend evidence validity. Native actions are caller-bounded to eight seconds; a hung COM call cannot be interrupted safely and blocks new actions until it returns or MSGuide is restarted.
 
-The initial plan request and an explicitly requested replan can share an approved screenshot; steps inside the segment and post-action checks stay **local UIA-only**, reusing suitable post-action evidence for the next binding. Verification retries observations, not actions: up to six reads within five seconds. Semantic actions require their expected effect; only `invoke` can use a stable screen change, which is not causal or goal proof. Logical `controlId` survives label/position changes for verification; the separate `targetId` still binds the exact reviewed state before invocation.
+The initial plan request and an explicitly requested replan can share an approved screenshot; steps inside the segment and post-action checks stay **local UIA-only**, reusing suitable post-action evidence for the next binding. Verification retries observations, not actions: up to six reads within a shared 30-second deadline. Incomplete controls, a page changing during capture, or temporarily missing page identity can be re-inspected while loading; they never authorize the next action. Invalid/denied observations still stop immediately. Persistent inspection failures remain unknown with their actual reason, not a misleading timeout message. Semantic actions require their expected effect; only `invoke` can use a stable screen change, which is not causal or goal proof. A confirmed resource change pauses remaining steps for explicit review and replanning. Logical `controlId` survives label/position changes for verification; the separate `targetId` still binds the exact reviewed state before invocation.
 
-Queued execution requires a stable selected-window resource scope. Supported English Microsoft Edge and Chrome windows can establish a page scope from one visible HTTP(S) address control in browser chrome, outside page documents, with one visible document surface. The address is hashed locally and rechecked before actions; ambiguous, unsupported, or changed page identity still stops execution. Other document trees without proven file/site identity require handoff. New windows are not selected automatically. SDK sessions remain isolated, and remaining plan/history is untrusted context, not cached execution authority.
+Queued execution requires a stable selected-window resource scope. Native applications are bound to the explicitly selected HWND, process, class, and title; a title or window change stops queued execution. Supported English Microsoft Edge and Chrome windows use the stricter binding between the active native `RootWebArea` document and canonical displayed browser address. Browsers may omit `http://` or `https://` in that field; the scheme is not guessed. Auxiliary browser document wrappers are not mistaken for separate pages. Capture and target lookup stay inside the verified page, not browser tabs or side panes. The combined identity is hashed locally and rechecked before actions; ambiguous, unsupported, or changed page identity still stops execution. New windows are never selected automatically; only an explicit user selection at a `resource` boundary can rebind the task, discard its old plan, and authorize fresh capture and replanning. SDK sessions remain isolated, and remaining plan/history is untrusted context, not cached execution authority.
+
+Fresh browsers get bounded passive accessibility warm-up; MSGuide does not
+mistake an uninitialized page tree for proof that navigation occurred.
 
 UIA inspection caches bounded per-node properties and prioritizes actionable
 controls plus scope markers in the 200-element export. Shortening decorative

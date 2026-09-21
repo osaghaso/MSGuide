@@ -267,7 +267,8 @@ async def test_slow_valid_startup_and_sanitized_startup_diagnostics(tmp_path, mo
     await model.close()
     assert [event for event, _ in events if event.startswith("copilot_start")] == ["copilot_starting", "copilot_started"]
     assert events[0][1]["deadlineSeconds"] == 0.2
-    assert events[1][1]["elapsedMs"] >= 50
+    assert next(fields for event, fields in events if event == "copilot_started")["elapsedMs"] >= 50
+    assert next(fields for event, fields in events if event == "copilot_auth_checked") == {"authenticated": True}
 
 
 @pytest.mark.asyncio

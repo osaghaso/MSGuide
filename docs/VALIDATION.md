@@ -1,6 +1,61 @@
 # Validation and known blockers
 
-## Latest recorded evidence — September 15, 2026
+## Live browser execution — September 21, 2026
+
+**The full `browser-e2e` path passed** on the owned local Edge fixture after the
+desktop became interactive. The actual production MainWindow captured the page,
+requested a live Copilot plan, visibly presented and invoked all three buttons
+in order, observed each action, and reached completion review. An independent
+Playwright read confirmed `["one", "two", "three"]` and the visible
+`All three steps finished` result. Playwright did not click the task buttons.
+
+Cold browser checks also exposed and fixed renderer accessibility initialization:
+the first inspection could have an address but no page root. Bounded passive
+inspection of native document wrappers allowed `RootWebArea` to appear on the
+next pass, without changing browser settings or using another inspector first.
+Page content is never accepted as the browser's address control.
+
+The Windows marker now takes a short cancellable flight before each native
+action, following the public Clicky interaction reference. Its system pointer,
+foreground and exact-target checks remain separate from the visual effect.
+The final backend suite passed 355 tests and the desktop/probe Release build
+and self-tests passed without warnings.
+
+This is a real model/browser/native-input acceptance result for the synthetic
+fixture, not a claim of arbitrary websites, privileged cloud changes, or feature
+parity with Clicky's private releases. A separate run refused to start when the
+test lacked foreground; another safely discarded a response after focus changed.
+Those safety stops are not converted into successful executions.
+
+## Browser identity repair — September 20, 2026
+
+The reported zero-action `resource_changed` stop was reproduced in an isolated
+real Edge window. Its address control omitted the protocol prefix, and browser
+chrome exposed auxiliary `Document` nodes alongside the page. The old check
+therefore returned no resource identity before the first planned action.
+
+The corrected scope combines the canonical displayed address with the native
+active `RootWebArea` identity. Capture and target lookup are confined to that
+page. Missing initial identity now reports `resource_unverified`, rather than
+claiming navigation occurred. A stray plain-text prefix in `src/guidance.py`
+was also removed because it prevented a fresh backend from importing.
+
+- Release build and desktop self-tests passed; the backend suite passed 355 tests.
+- A real local Edge fixture passed identity/capture checks, obtained a three-step
+  plan from the configured live model, and reacquired every native target.
+  This was the explicitly read-only `browser-plan-readonly` path: synthetic UIA
+  metadata only, no screenshots or input.
+- **At the time of this run, full visible browser acceptance was blocked.**
+  Windows did not provide foreground access; the computer-use engine also
+  refused to risk focus disturbance. No foreground workaround or Azure action
+  was performed. This is not a successful click-through acceptance result.
+
+See [the browser acceptance commands](../desktop/README.md#browser-acceptance)
+for the interactive test. It must be run on an unlocked desktop with the owned
+test browser foreground. Earlier native/fixture results below remain historical
+evidence, not proof of the changed browser path.
+
+## Recorded evidence — September 15, 2026
 
 | Check | Result | Scope |
 | --- | --- | --- |

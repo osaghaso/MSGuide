@@ -39,8 +39,8 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 - Full window bounds use physical coordinates, matching the bitmap and normalized UIA boxes. PNGs are limited to 1280 pixels on the longest side and 2,000,000 bytes. Large physical allocations are rejected. Captures stay in memory; the application writes no screenshots, transcripts, tokens, UI text, prompts, or model output to disk. Bounded rotating operational diagnostics contain only timestamps, endpoints, dimensions/counts, lifecycle stages, status/error codes, exception types, and correlation IDs under `%LOCALAPPDATA%\MSGuide\logs`. .NET/WPF may retain temporary managed/native copies until collection; this is not a forensic memory-erasure guarantee.
 - UI Automation names are collected with bounded traversal, not pixel OCR. Offscreen/password subtrees and disabled target controls are excluded. **This is not image redaction**: screenshot pixels and other accessible text can still contain passwords or sensitive information. There is no redaction editor. Do not approve sensitive content; discard it. A backend model may process approved content remotely even though the client connects only to loopback.
 - Some GPU, elevated, protected, minimized, or unresponsive windows cannot be captured. Blank/uniform images are rejected heuristically (not guaranteed detection). UIA can be unavailable or incomplete. Inspect the preview rather than assuming capture success means all pixels are valid.
-- Capture/UIA calls can block inside native providers. Capture callers wait at most 30 seconds; action callers at most **eight seconds**, including target lookup. Generic inspection and lookup use privacy-first per-node caches and a selected-root raw-tree walk, capped at 2000 nodes, depth 64, and three seconds between native calls; an incomplete search cannot claim a unique match. At most one native action is outstanding. Cancellation before invocation seals the invocation gate; after invocation starts, timeout/cancellation means **unknown outcome**, not failure-to-act. Late returns never advance a task, and new actions/captures are blocked while the worker remains active. Cooperative tokens cannot interrupt a hung COM call: permanent hangs require restarting MSGuide; process isolation remains deferred.
-- Snapshot TTL is 60 seconds, measured conservatively from the earliest capture evidence, not after encoding/inspection. SDK/API/desktop guidance waits reserve 10/8/6 seconds of the remaining TTL (caps 50/52/54 seconds). Focus/window/target checks still run immediately before action. Moves, resizes, minimization, disappearance, approval revocation, edits, and supersession cancel current work. Exact response/task/step IDs and semantic input are checked; low-confidence, password, offscreen, ambiguous, changed-value, and mismatched targets are rejected.
+- Capture/UIA calls can block inside native providers. Capture callers wait at most 30 seconds; action callers at most **eight seconds**, including target lookup. Generic inspection and lookup use privacy-first per-node caches and a selected-root raw-tree walk, capped at 2000 nodes and depth 64. Initial capture allows six seconds for slow supported UIA providers; action lookup remains capped at three seconds. An incomplete search cannot claim a unique match. At most one native action is outstanding. Cancellation before invocation seals the invocation gate; after invocation starts, timeout/cancellation means **unknown outcome**, not failure-to-act. Late returns never advance a task, and new actions/captures are blocked while the worker remains active. Cooperative tokens cannot interrupt a hung COM call: permanent hangs require restarting MSGuide; process isolation remains deferred.
+- Snapshot TTL is 60 seconds, measured conservatively from the earliest capture evidence, not after encoding/inspection. SDK/API/desktop guidance waits reserve 5/3/1 seconds of the remaining TTL (caps 50/52/54 seconds), so normal capture work does not consume the full Copilot allowance. Focus/window/target checks still run immediately before action. Moves, resizes, minimization, disappearance, approval revocation, edits, and supersession cancel current work. Exact response/task/step IDs and semantic input are checked; low-confidence, password, offscreen, ambiguous, changed-value, and mismatched targets are rejected.
 - Native overlay placement uses physical desktop coordinates and a PerMonitorV2 manifest; WPF draws the border in local DIPs. Negative origins and scale math have executable checks, but mixed-DPI monitor rendering/straddling windows still require runtime verification. Capture exclusion via `SetWindowDisplayAffinity` is best effort, not a security guarantee.
 - Citation URLs never open automatically; only a user click opens an HTTPS source. Other schemes display as non-clickable text. HTTPS does not imply that a source is trusted.
 - No tray dependency, enterprise sign-in, authorized enterprise retrieval, always-on voice, OCR engine, arbitrary keystrokes/coordinates, dragging, unrestricted automation, durable job system, or deployment is included.
@@ -61,6 +61,9 @@ eight-action or two-minute checkpoint. After a segment makes progress, a
 requests the next plan automatically, but only while the same identified resource
 remains completely inspectable. Empty plans cannot trigger an inference loop.
 Other boundaries or failed grounding require review, with a reason and needed input.
+At a `resource` boundary, selecting the required window and choosing
+**Use selected window & continue** explicitly rebinds the retained task, clears
+the old plan, and requires fresh capture and planning while preserving action history.
 Per-operation deadlines and the 10,000-decision protocol ceiling remain. Mode changes
 revoke old queued authority; unknown and cancelled work cannot resume. New prompts,
 Pause/clear, dismissal and exit discard context; there is no durable task store.
@@ -69,8 +72,16 @@ Initial planning, same-resource automatic refreshes, and explicitly reviewed
 replanning may include an approved screenshot. Inside a segment, binding and verification use local UIA-only
 observations, reusing suitable post-action evidence for the next step. No new
 model call is made for a routine expected control change. After invocation,
-verification makes at most six reads within five seconds, waiting 250 ms only
-between reads. Toggle, value replacement, selection, expansion/collapse, and
+verification makes at most six reads within one shared 30-second deadline, waiting
+250 ms only between reads. The deadline accommodates two complete
+browser-before/UIA/browser-after inspections instead of expiring within a single
+legal scan. Incomplete controls, missing page identity, and resource changes during
+capture are re-inspected while the page settles. Rejected reads clear any stable
+change candidate; only fresh, complete, identified observations can verify progress.
+They never cause another invocation. Stale, reused, wrong-window or denied
+observations are not retried. A verified new resource still pauses the remaining
+plan for explicit review and replanning; it does not reuse old-page targets.
+Toggle, value replacement, selection, expansion/collapse, and
 scroll actions require their expected semantic effect; unrelated UI changes
 cannot substitute for it. If that effect is still missing after the bounded
 checks, the outcome is `unknown` and continuation is disabled. Only `invoke`,
@@ -89,23 +100,40 @@ Deferred target intents match exact role/label/action and any declared metadata,
 never fuzzy text or first-match selectors. Deferred writes require an empty field;
 observed writes require the unchanged prior value hash.
 
-Resource scope is conservative: selected HWND identity and current evidence must
-remain stable. Edge/Chrome page scopes require one visible HTTP(S) address field
-in browser chrome (not content supplied by a document), one visible document
-surface, and matching fresh address evidence. Only an opaque hash leaves this
-local identity check; raw addresses are not logged. Changed/ambiguous addresses,
-multiple document surfaces and unsupported browser layouts require handoff.
-Other generic document trees still cannot establish file/site identity. New windows/resources,
-permissions and credentials are not acquired automatically. Guide mode can
+Resource scope is conservative: a native app's selected HWND, process, class,
+title, and current evidence must remain stable. Edge/Chrome page scopes require one visible address field in
+browser chrome (not content supplied by a document), one native `RootWebArea`
+page, and matching fresh native document identity. Address normalization handles
+browser-elided HTTP(S) prefixes without claiming a guessed transport scheme.
+Both the native document and canonical displayed address are hashed into the
+scope. Auxiliary browser document wrappers are ignored, and capture/target
+lookup are confined to the verified page rather than tabs or side panes.
+Only opaque identities leave this check; raw addresses are not logged.
+Changed/ambiguous page identities and unsupported browser layouts require handoff.
+On a fresh browser, inspecting native document wrappers can initialize its
+renderer accessibility tree. MSGuide permits four passive inspection attempts
+within one shared three-second budget, never input or a settings change.
+Page-provided address-like fields remain excluded from resource identity.
+New windows/resources,
+permissions and credentials are not acquired automatically. A user may explicitly
+select a new window at a `resource` boundary; the task then discards the old plan
+and obtains fresh evidence before replanning. Guide mode can
 describe approved partial text/images, but incomplete evidence cannot execute.
 
 Before generic invocation, the approved app must be foreground. Focus may be
 returned from this companion, not taken from an unrelated application. A
-click-through outline and Windows-logo marker identify the exact target for a
-250 ms presentation beat before the native action. The native worker rechecks
+click-through outline and Windows-logo marker identify the exact target with
+a short, cancellable curved flight and a 250 ms presentation beat before the native action. The native worker rechecks
 foreground, identity, resource, capability and freshness; failed presentation,
 cancellation or focus loss never produces background input. The system pointer
 is not moved and no coordinate click is injected.
+
+The public [Clicky reference](https://github.com/farzaa/clicky/tree/a80fa80721a8aebe51a170a7780705024ebc6e46)
+uses a screenshot, conversational response and animated pointing overlay.
+Its public code does not execute clicks; its README says newer features are
+private. MSGuide follows the visible point-before-action interaction in its
+Windows implementation, while Fix mode remains a separately grounded executor.
+No macOS implementation, API keys, cloud speech services or analytics were copied.
 
 The exported 200 elements prioritize actions and document/known scope markers.
 Text/context cropping is reported separately from traversal failure; it does not
@@ -123,10 +151,32 @@ Capture-access denials retain a `failed` checkpoint before invocation, or an
 `unknown` outcome while checking an invoked action; uncertain actions are not
 replayed. Companion action results use their recorded step numbers, not the
 invocation count, including across continuation and the rolling history bound.
-The buddy no longer auto-hides final task states; the compact prompt and Details
+The buddy no longer auto-hides responses or final task states; the compact prompt and Details
 retain the plan/cursor, boundary and needed input. They share the same mode,
 continue/reply and Stop handlers, not separate task engines. Current evidence is disposed on
 stop; bounded task text stays only until explicit clearing/replacement/exit.
+
+Feedback sizing is held in logical WPF units and converted once per placement
+to physical pixels for the active DPI. Native resize notifications must not
+be fed back as new requested dimensions: that previously collapsed a result
+bubble to two pixels on a scaled display. Height is measured from the bounded
+wrapped message, and prompt dismissal restores retained feedback without
+activating the cursor window. Explicit Pause/clear or a new prompt clears it.
+
+`desktop.log` records `screen_task_action`, `screen_task_verification`,
+`screen_task_state`, `screen_task_stopped`, and `screen_task_failed`, with
+task/step IDs, action counts, outcomes and exception types. Rejected post-action
+reads emit `screen_task_observation_rejected` with attempt, reason and elapsed time;
+capture failures and UIA provider errors retain only sanitized exception types.
+Final verification includes the attempt count and distinguishes the shared deadline
+from persistent incomplete controls, changing/unidentified pages or failed inspections.
+Backend failures
+are correlated in `backend.log`. These logs deliberately exclude full response
+or exception messages; readable details are retained in the compact prompt.
+The native capture harness checks actual window dimensions across timer ticks,
+prompt dismissal, and more than six seconds of response visibility.
+Run `MSGuide.Desktop.exe --feedback-test --test-results <path>` for that focused
+native UI check without a backend, screenshot, or live model.
 
 The camera and demo adapters keep their independent local state/verifiers and
 approval rules. Camera UIA actions share the single-in-flight native action
@@ -136,13 +186,37 @@ the executor: `/v1/actions/*` and `/v1/jobs/*` are still the unrelated in-memory
 
 ## Runnable checks and verification
 
+### Browser acceptance
+
+`tests\fixtures\browser-task.html` is an owned synthetic page with three ordered
+buttons and an independently readable completion state. Serve that directory
+only on loopback, open the page in a fresh headed browser with
+`?run=<32 lowercase hexadecimal characters>`, and use the exact resulting HWND.
+The test refuses other URLs, titles, or browser windows before sharing evidence.
+
+The executable supports `--browser-e2e-test --browser-hwnd <handle> --fixture-url
+<http://127.0.0.1:port/browser-task.html?run=...> --test-results <path>` from the
+authenticated model-backend environment. This invokes the actual MainWindow task
+path, model planning, visible native actions, and fresh completion evidence.
+It needs an unlocked interactive desktop where the owned companion or browser
+can be foreground. Normal window activation may be refused; the harness does
+not force focus or weaken the foreground guard.
+
+`--browser-plan-test` with the same arguments is explicitly **read-only**:
+it exercises native page capture, the real model, and native target rebinding
+using synthetic UIA metadata only, without screenshots or input. A passing
+`browser-plan-readonly` report is not a passing visible end-to-end action test.
+
 Run `desktop\bin\Debug\net10.0-windows10.0.19041.0\MSGuide.Desktop.exe --self-test` (or `dotnet run --project desktop\MSGuide.Desktop.csproj -- --self-test`). This exits 0 on success, 1 on failure, without showing a window or connecting to the backend. Checks cover loopback URL rejection, unsafe citation schemes, freshness boundaries, response echo mismatch, malformed target boxes, and physical target mapping at 100/125/150/200% scale with a negative desktop origin.
 
 Self-tests also run the actual generic loop with synthetic observations and fake
 guidance/actions: multi-step history, legitimate repeated controls, no progress,
 continuous execution beyond eight actions, bounded history, all stop states,
 Guide-mode non-execution, semantic value/scroll effects, cancellation/supersession,
-unrelated UI churn with missing/late semantic effects, capture-access failures
+unrelated UI churn with missing/late semantic effects, transient/persistent incomplete
+or changing-page captures, stable-read reset across rejected evidence, explicit
+navigation boundaries, slow reads beyond five seconds and the shared 30-second
+verification deadline, capture-access failures
 before/after invocation, result notifications across continuation/history rollover,
 and a fake hung native worker. A delayed HTTP handler verifies cancellation at the
 remaining freshness deadline. Camera state/consent tests use fixtures only.

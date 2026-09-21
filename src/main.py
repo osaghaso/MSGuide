@@ -43,7 +43,7 @@ from src.policy import PolicyEngine
 from src.retrieval import RetrieverMock
 
 GUIDANCE_TIMEOUT_SECONDS = 52.0
-GUIDANCE_FRESHNESS_HEADROOM_SECONDS = 8.0
+GUIDANCE_FRESHNESS_HEADROOM_SECONDS = 3.0
 
 
 def now():

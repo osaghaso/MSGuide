@@ -33,6 +33,7 @@ internal static class SelfTests
             ("Unsupported window dimensions. Resize the selected window and retry.", "unsupported-dimensions"),
             ("PNG exceeds the 2 MB limit; select a smaller window.", "image-too-large"),
             ("Window changed during capture. Capture and review again.", "window-changed"),
+            ("The selected resource changed during capture. Review it before continuing.", "resource-changed"),
             ("Cannot allocate a window capture context.", "context-allocation"),
             ("Cannot allocate a window bitmap.", "bitmap-allocation"),
             ("This window does not support PrintWindow capture. No desktop fallback is used.", "unsupported"),
@@ -47,6 +48,9 @@ internal static class SelfTests
             Check(new CaptureTests.CaptureFailure(new InvalidOperationException(message + " synthetic external text")).Message == "unclassified");
         }
         Check(new CaptureTests.CaptureFailure(new InvalidOperationException("synthetic external text")).Message == "unclassified");
+        Check(new CaptureTests.CaptureFailure(new CaptureResourceChangedException()).Message == "resource-changed");
+        Check(ScreenTaskSession.VerificationTimeout.TotalMilliseconds
+            >= 2 * (2 * AutomationEvidence.ScanMilliseconds + AutomationEvidence.CaptureScanMilliseconds) + 250);
         foreach (string url in new[] { "http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000" })
             Check(Safety.ApiUri(url).IsLoopback);
         foreach (string url in new[] { "https://127.0.0.1", "http://example.com", "http://127.0.0.1.evil.test", "http://user:secret@127.0.0.1", "http://127.0.0.1/api", "file:///tmp", "http://127.0.0.1/?token=x" })
@@ -88,8 +92,17 @@ internal static class SelfTests
         placed = CompanionPlacement.NearCursor(
             new Native.POINT { X = -1910, Y = 10 }, workArea, 390, 154);
         Check(placed.Left == -1888 && placed.Top == 22);
-        foreach (double scale in new[] { 1d, 1.5d, 2d })
+        var flightStart = new System.Windows.Point(-800, -200);
+        var flightEnd = new System.Windows.Point(400, 200);
+        Check(CompanionPlacement.FlightPoint(flightStart, flightEnd, 0) == flightStart);
+        Check(CompanionPlacement.FlightPoint(flightStart, flightEnd, 1) == flightEnd);
+        Check(CompanionPlacement.FlightPoint(flightStart, flightEnd, 0.5).Y < 0);
+        foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
         {
+            var feedbackSize = CompanionPlacement.PhysicalSize(new System.Windows.Size(390, 154),
+                new System.Windows.DpiScale(scale, scale));
+            Check(feedbackSize.Width == Math.Ceiling(390 * scale)
+                && feedbackSize.Height == Math.Ceiling(154 * scale));
             int size = (int)(48 * scale);
             var targetPoint = new Native.POINT { X = -900, Y = -400 };
             placed = CompanionPlacement.NearCursor(targetPoint,
@@ -102,6 +115,12 @@ internal static class SelfTests
             ["✓ 1. invoke “Open”", "✓ 2. select “Details”"],
             "Thinking about action 3…") ==
             "Thinking about action 3…\n✓ 1. invoke “Open”\n✓ 2. select “Details”");
+        Check(CursorCompanionWindow.ResultText("needs_input", "Choose a synthetic item.", 0)
+            == "Needs your input\nActions invoked: 0\nChoose a synthetic item.");
+        Check(CursorCompanionWindow.ResultText("failed", "Synthetic error.", 1)
+            == "Task failed\nActions invoked: 1\nSynthetic error.");
+        Check(CursorCompanionWindow.ResultText("review_required", "Review the result.", 3)
+            .StartsWith("Completion needs review\nActions invoked: 3", StringComparison.Ordinal));
         var element = new ElementInfo("button", "View logs", [0.1, 0.2, 0.3, 0.1]);
         var targetInfo = new TargetInfo(element.Label, element.Box, 0.95, Action: null);
         Check(Safety.ObservedTarget(targetInfo, [element]));
@@ -148,8 +167,8 @@ internal static class SelfTests
         Check(AutomationEvidence.ScrollDirections(100, 100).SequenceEqual(["left", "up"]));
         Check(AutomationEvidence.ScrollDirections(double.NaN, -1).Length == 0);
         Check(Safety.GuidanceBudget(now, now) == TimeSpan.FromSeconds(54));
-        Check(Safety.GuidanceBudget(now.AddSeconds(-53.5), now) == TimeSpan.FromMilliseconds(500));
-        Check(Safety.GuidanceBudget(now.AddSeconds(-54), now) == TimeSpan.Zero);
+        Check(Safety.GuidanceBudget(now.AddSeconds(-58.5), now) == TimeSpan.FromMilliseconds(500));
+        Check(Safety.GuidanceBudget(now.AddSeconds(-59), now) == TimeSpan.Zero);
         Check(MainWindow.PreserveScreenActionApproval(1, 1, true,
             CameraRecoveryInteractionMode.Control, actionableTarget));
         Check(!MainWindow.PreserveScreenActionApproval(1, 1, true,

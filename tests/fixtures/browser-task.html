@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<title>MSGuide browser acceptance</title>
+<style>
+  body { font: 20px system-ui; margin: 48px; max-width: 850px; color: #182433; background: #fff; }
+  button { font: inherit; padding: 18px 24px; margin: 12px 12px 12px 0; }
+  #result { padding: 20px; border: 2px solid #0078d4; margin-top: 24px; }
+  li { margin: 8px 0; }
+</style>
+<h1>MSGuide browser acceptance</h1>
+<p>This local synthetic page contains no account, cloud resource, or personal data.</p>
+<p>Complete the three numbered buttons in order. Each button changes only this page.</p>
+<button id="step-one">Complete step one</button>
+<button id="step-two">Complete step two</button>
+<button id="step-three">Complete step three</button>
+<ol id="events" aria-live="polite"></ol>
+<p id="result" role="status">Ready for step one</p>
+<script>
+  const run = new URLSearchParams(location.search).get("run");
+  if (!/^[a-f0-9]{32}$/.test(run || "")) throw new Error("A synthetic run identifier is required.");
+  document.title = `MSGuide browser acceptance ${run}`;
+  const steps = ["one", "two", "three"];
+  window.completedSteps = [];
+  for (const [index, step] of steps.entries()) {
+    document.getElementById(`step-${step}`).addEventListener("click", event => {
+      if (window.completedSteps.length !== index) {
+        document.getElementById("result").textContent = "FAILED: unexpected step order";
+        return;
+      }
+      window.completedSteps.push(step);
+      event.currentTarget.disabled = true;
+      const entry = document.createElement("li");
+      entry.textContent = `Step ${step} completed`;
+      document.getElementById("events").append(entry);
+      document.getElementById("result").textContent = index === 2
+        ? "All three steps finished"
+        : `Ready for step ${steps[index + 1]}`;
+    });
+  }
+</script>
+</html>

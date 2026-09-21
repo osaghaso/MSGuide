@@ -20,7 +20,7 @@ from copilot import (
     ToolResult,
     ToolSet,
 )
-from copilot.rpc import PermissionDecisionApproveOnce, PermissionDecisionReject
+from copilot.rpc import MCPDiscoverRequest, PermissionDecisionApproveOnce, PermissionDecisionReject
 from pydantic import Field, StrictInt, ValidationError, field_validator, model_validator
 
 from src import diagnostics
@@ -40,7 +40,7 @@ AGENCY_LEARN_READ_ONLY_TOOLS = (
 )
 MAX_INSTRUCTION_CHARS = 3800
 COPILOT_INFERENCE_TIMEOUT_SECONDS = 50.0
-COPILOT_FRESHNESS_HEADROOM_SECONDS = 10.0
+COPILOT_FRESHNESS_HEADROOM_SECONDS = 5.0
 COPILOT_CLEANUP_TIMEOUT_SECONDS = 2.0
 COPILOT_STARTUP_TIMEOUT_SECONDS = 30.0
 ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
@@ -275,15 +275,14 @@ class CopilotProvider:
         client_options = {
             "mode": "empty" if config.github_token is not None else "copilot-cli",
             "base_directory": str(config.base_directory),
+            "use_logged_in_user": config.github_token is None,
             "session_idle_timeout_seconds": config.session_idle_timeout_seconds,
         }
         if config.github_token is not None:
             client_options["github_token"] = config.github_token
         cli_path = config.resolved_cli_path()
         if cli_path is not None:
-            client_options["connection"] = RuntimeConnection.for_stdio(
-                path=str(cli_path)
-            )
+            client_options["connection"] = RuntimeConnection.for_stdio(path=str(cli_path))
         self._client = client_factory(
             **client_options
         )
@@ -311,26 +310,41 @@ class CopilotProvider:
             diagnostics.record("copilot_starting", deadlineSeconds=self.config.startup_timeout_seconds)
             self._runtime_owned = True
             self._starting_task = asyncio.current_task()
+            stage = "runtime_start"
             try:
                 async with asyncio.timeout(self.config.startup_timeout_seconds) as deadline:
                     await self._client.start()
+                    stage = "authentication"
+                    authentication = await self._client.get_auth_status()
+                    authenticated = authentication.isAuthenticated is True
+                    diagnostics.record("copilot_auth_checked", authenticated=authenticated)
+                    if not authenticated:
+                        raise CopilotProviderFailure(
+                            "startup",
+                            "Copilot sign-in is required before starting MSGuide. "
+                            "Sign in to the configured Copilot CLI once, then restart MSGuide.",
+                        )
                 if deadline.expired():
                     raise TimeoutError
                 if self._closing or self._starting_task.cancelling():
                     raise asyncio.CancelledError
                 self._started = True
+            except CopilotProviderFailure:
+                diagnostics.record("copilot_start_failed", stage=stage, errorCode="authentication_required",
+                                   elapsedMs=round((asyncio.get_running_loop().time() - started) * 1000))
+                raise
             except TimeoutError:
-                diagnostics.record("copilot_start_failed", stage="runtime_start", errorCode="timeout",
+                diagnostics.record("copilot_start_failed", stage=stage, errorCode="timeout",
                                    elapsedMs=round((asyncio.get_running_loop().time() - started) * 1000))
                 raise CopilotProviderFailure(
                     "startup", "Copilot provider start timed out"
                 ) from None
             except asyncio.CancelledError:
-                diagnostics.record("copilot_start_failed", stage="runtime_start", errorCode="cancelled",
+                diagnostics.record("copilot_start_failed", stage=stage, errorCode="cancelled",
                                    elapsedMs=round((asyncio.get_running_loop().time() - started) * 1000))
                 raise
             except Exception as exc:
-                diagnostics.record("copilot_start_failed", stage="runtime_start",
+                diagnostics.record("copilot_start_failed", stage=stage,
                                    errorType=type(exc).__name__,
                                    elapsedMs=round((asyncio.get_running_loop().time() - started) * 1000))
                 raise CopilotProviderFailure(
@@ -423,6 +437,7 @@ class CopilotProvider:
         available_tools = ToolSet().add_custom(SUBMIT_GUIDANCE_TOOL)
         session_options = {
             "model": self.config.model,
+            "working_directory": str(Path.cwd()),
             "reasoning_effort": self.config.reasoning_effort,
             "context_tier": self.config.context_tier,
             "system_message": {"mode": "replace", "content": SYSTEM_INSTRUCTIONS},
@@ -432,7 +447,16 @@ class CopilotProvider:
             "infinite_sessions": {"enabled": False},
             "enable_session_store": False,
             "memory": {"enabled": False},
+            # Keep keychain authentication without inheriting the interactive CLI's integrations.
+            "enable_config_discovery": False,
+            "enable_file_hooks": False,
+            "enable_host_git_operations": False,
+            "enable_skills": False,
+            "custom_agents_local_only": True,
+            "enable_on_demand_instruction_discovery": False,
+            "skip_custom_instructions": True,
             "on_permission_request": self._permission_handler(allow_retrieval=not plan_requested),
+            "on_mcp_auth_request": self._reject_mcp_auth,
         }
         agency = self.config.agency_microsoft_learn
         if agency.enabled and not plan_requested:
@@ -450,8 +474,21 @@ class CopilotProvider:
 
         session = None
         send_task = None
-        stage = "create_session"
+        stage = "isolate_session"
         try:
+            discovered = await self._client.rpc.mcp.discover(
+                MCPDiscoverRequest(working_directory=session_options["working_directory"])
+            )
+            explicit_servers = set(session_options.get("mcp_servers", {}))
+            # The built-in GitHub server is not returned by the configuration inventory.
+            session_options["disabled_mcp_servers"] = sorted(
+                {"github-mcp-server"} | {
+                    server.name for server in discovered.servers if server.name not in explicit_servers
+                }
+            )
+            diagnostics.record("copilot_session_isolated",
+                               disabledMcpServers=len(session_options["disabled_mcp_servers"]))
+            stage = "create_session"
             session = await self._client.create_session(**session_options)
             diagnostics.record("copilot_session_created")
             attachments = []
@@ -589,12 +626,14 @@ class CopilotProvider:
 
     async def _retire_session(self, session) -> None:
         started = asyncio.get_running_loop().time()
-        limit = min(COPILOT_CLEANUP_TIMEOUT_SECONDS, self.config.shutdown_timeout_seconds) / 2
+        limit = self.config.shutdown_timeout_seconds
         for stage, operation in (("abort", session.abort), ("disconnect", session.disconnect)):
+            stage_started = asyncio.get_running_loop().time()
             succeeded = await self._bounded_cleanup(operation(), limit)
             if not succeeded:
                 self._cleanup_failed = True
-            diagnostics.record("copilot_cleanup", stage=stage, succeeded=succeeded)
+            diagnostics.record("copilot_cleanup", stage=stage, succeeded=succeeded,
+                               elapsedMs=round((asyncio.get_running_loop().time() - stage_started) * 1000))
         await asyncio.sleep(0)
         if any(not task.done() for task in self._owned_cleanup):
             self._cleanup_failed = True
@@ -717,6 +756,11 @@ class CopilotProvider:
             )
 
         return decide
+
+    @staticmethod
+    def _reject_mcp_auth(request, context):
+        diagnostics.record("copilot_mcp_auth_rejected")
+        return {"kind": "cancelled"}
 
     @staticmethod
     def _request_payload(

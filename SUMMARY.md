@@ -1,20 +1,20 @@
 # Current status
 
-September 18, 2026. **Desktop-first local prototype. Synthetic checks are not
+September 21, 2026. **Desktop-first local prototype. Synthetic checks are not
 live-app or live-model acceptance.** Use [README.md](README.md) for the current
 behavior and setup; dated evidence remains in the scenario runbooks.
 
 | Area | Evidence / limit |
 | --- | --- |
 | Windows WPF shell | Cursor companion and compact prompt, with Guide/Fix modes. Guide mode never executes actions. |
-| Capture and control | Selected-window capture and cached, action-priority UIA evidence. Generic actions visibly mark the target and require foreground execution. Edge/Chrome page identity is checked through browser chrome; unsupported, ambiguous or uncertain states remain blocked. |
+| Capture and control | Selected-window capture and cached, action-priority UIA evidence. Generic actions visibly mark the target and require foreground execution. Edge/Chrome page identity combines the browser-chrome display address and native active document; unsupported, ambiguous or uncertain states remain blocked. |
 | Task planning and progress | Approved observations produce ordered plan segments. Fix mode runs continuously without eight-action or two-minute checkpoints; every action is freshly grounded and observed locally. Plan-limit/observation boundaries refresh automatically after progress on the same approved resource. Genuine resource/input/permission changes and uncertain outcomes still stop. Generic model-suggested completion requires review. |
 | Default guidance | Deterministic built-in MSGuide Demo workflow only; unit-tested, no remote calls. |
 | Optional models | Explicit Copilot SDK and OpenAI-compatible providers. Consent, bounded deadlines and cancellation remain required; fake-provider regressions do not prove live grounding or latency. |
 | Voice | Local Whisper `small.en`, selected microphone, bounded in-memory recording and reviewed transcripts. Windows speech is used for optional playback, not production dictation. |
 | Backend and mock actions | Loopback bearer boundary and public sample retrieval. `/v1/actions/*` and `/v1/jobs/*` are simulations; the desktop is the real semantic-action executor. |
 | CI and dependencies | Windows CI installs hash-locked Python dependencies and restores locked NuGet packages before backend/desktop synthetic checks. Python locks target CPython 3.11 x64; `global.json` selects the .NET SDK. A checked-in workflow is not evidence of a hosted CI pass. |
-| Native acceptance | Camera/voice evidence from September 16 is scoped to its documented environment. Earlier capture/foreground failures and pending acceptance are preserved in the validation history. New behavior needs its own matching live evidence. |
+| Native acceptance | September 21: actual live-model planning, visible native actions and independently verified completion passed on the owned three-button Edge fixture. Cold accessibility initialization is handled without browser-setting changes. Earlier camera/voice evidence and foreground failures retain their documented scope; this is not arbitrary-app acceptance. |
 | Pilot / deployment | Not complete, not approved, no production deployment. |
 
 ## Start here

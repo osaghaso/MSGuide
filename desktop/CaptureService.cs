@@ -112,7 +112,8 @@ public static class CaptureService
             var captured = DateTimeOffset.UtcNow;
             string resourceTitle = Native.Title(window.Handle);
             bool browser = AutomationEvidence.IsSupportedBrowser(window);
-            string? browserResource = browser ? AutomationEvidence.ReadBrowserResourceId(window, ct) : null;
+            var browserScope = browser ? AutomationEvidence.ReadBrowserScope(window, ct) : null;
+            string? browserResource = browserScope?.ResourceId;
             BitmapSource? preview = null;
             png = [];
             if (includeImage)
@@ -130,14 +131,15 @@ public static class CaptureService
                 if (png.Length > 2_000_000) throw new InvalidOperationException("PNG exceeds the 2 MB limit; select a smaller window.");
             }
             var (elements, text, note, complete) = ReadAutomation(window, rect, ct,
-                maxDepth: AutomationEvidence.ScanDepthLimit);
+                maxDepth: AutomationEvidence.ScanDepthLimit,
+                maxMilliseconds: AutomationEvidence.CaptureScanMilliseconds,
+                scopedRoot: browserScope?.Document);
             ct.ThrowIfCancellationRequested();
             if (!window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
                 throw new InvalidOperationException("Window changed during capture. Capture and review again.");
-            if (resourceTitle != Native.Title(window.Handle))
-                throw new InvalidOperationException("The selected resource changed during capture. Review it before continuing.");
-            if (browser && browserResource != AutomationEvidence.ReadBrowserResourceId(window, ct))
-                throw new InvalidOperationException("The browser resource changed during capture. Review it before continuing.");
+            if (resourceTitle != Native.Title(window.Handle)
+                || browser && browserResource != AutomationEvidence.ReadBrowserResourceId(window, ct))
+                throw new CaptureResourceChangedException();
             return new(window, rect, captured, png, preview, elements, text, note, complete,
                 browser ? browserResource : AutomationEvidence.ResourceId(window, resourceTitle, elements), resourceTitle);
         }
@@ -172,15 +174,18 @@ public static class CaptureService
     }
 
     internal static AutomationReadResult ReadAutomation(
-        WindowChoice window, Native.RECT rect, CancellationToken ct, int maxDepth = 18)
+        WindowChoice window, Native.RECT rect, CancellationToken ct, int maxDepth = 18,
+        int maxMilliseconds = AutomationEvidence.ScanMilliseconds, AutomationElement? scopedRoot = null)
     {
         if (maxDepth is < 1 or > 64) throw new ArgumentOutOfRangeException(nameof(maxDepth));
+        if (maxMilliseconds is < 100 or > 10_000) throw new ArgumentOutOfRangeException(nameof(maxMilliseconds));
         var elements = new List<ElementInfo>();
         var text = new List<string>();
         var clock = Stopwatch.StartNew();
         int visited = 0, chars = 0;
         bool complete = true, textTruncated = false;
         string outcome = "complete";
+        string? errorType = null;
         string note = "Bounded UI Automation evidence only (not pixel OCR). Password/offscreen subtrees excluded; cross-process descendants are included only beneath the selected HWND root; image is NOT redacted.";
         try
         {
@@ -190,12 +195,15 @@ public static class CaptureService
             var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
             if (root.Cached.ProcessId != (int)window.ProcessId)
                 throw new InvalidOperationException("UI Automation root identity changed.");
-            var walker = TreeWalker.RawViewWalker;
+            if (scopedRoot is not null) root = scopedRoot.GetUpdatedCache(privacy);
+            // Control View excludes provider layout nodes that make large apps such as Visual Studio
+            // exceed the bounded scan while retaining the semantic controls that can authorize actions.
+            var walker = TreeWalker.ControlViewWalker;
             void Walk(AutomationElement node, int depth)
             {
                 ct.ThrowIfCancellationRequested();
                 if (++visited > AutomationEvidence.ScanNodeLimit || depth > maxDepth
-                    || clock.ElapsedMilliseconds >= AutomationEvidence.ScanMilliseconds)
+                    || clock.ElapsedMilliseconds >= maxMilliseconds)
                 {
                     complete = false;
                     outcome = depth > maxDepth ? "depth_limit"
@@ -204,7 +212,7 @@ public static class CaptureService
                 }
                 var value = node.Cached;
                 // Do not read Name, Value, TextPattern or descendants of password controls.
-                // Cross-process descendants are permitted only through this exact HWND-rooted Raw View tree.
+                // Cross-process descendants are permitted only through this exact HWND-rooted Control View tree.
                 if (value.IsPassword || value.IsOffscreen) return;
                 var box = Safety.AutomationBox(value.BoundingRectangle, rect);
                 if (box is not null)
@@ -261,7 +269,7 @@ public static class CaptureService
                     }
                 }
                 ct.ThrowIfCancellationRequested();
-                if (clock.ElapsedMilliseconds >= AutomationEvidence.ScanMilliseconds)
+                if (clock.ElapsedMilliseconds >= maxMilliseconds)
                 {
                     complete = false;
                     outcome = "time_limit";
@@ -274,12 +282,12 @@ public static class CaptureService
                     return;
                 }
                 while (child is not null && visited < AutomationEvidence.ScanNodeLimit
-                    && clock.ElapsedMilliseconds < AutomationEvidence.ScanMilliseconds)
+                    && clock.ElapsedMilliseconds < maxMilliseconds)
                 {
                     Walk(child, depth + 1);
                     ct.ThrowIfCancellationRequested();
                     if (visited >= AutomationEvidence.ScanNodeLimit
-                        || clock.ElapsedMilliseconds >= AutomationEvidence.ScanMilliseconds)
+                        || clock.ElapsedMilliseconds >= maxMilliseconds)
                     {
                         complete = false;
                         outcome = visited >= AutomationEvidence.ScanNodeLimit ? "node_limit" : "time_limit";
@@ -296,6 +304,7 @@ public static class CaptureService
         {
             complete = false;
             outcome = "provider_error";
+            errorType = ex.GetType().Name;
             note += " This application exposed incomplete/no accessible text; review carefully.";
         }
         var ambiguousIds = elements.Where(e => e.ControlId is not null)
@@ -310,6 +319,7 @@ public static class CaptureService
         {
             visited, retained = result.Elements.Length, result.Complete, result.ContextTruncated,
             outcome = complete && !result.Complete ? "control_limit" : outcome,
+            errorType,
             elapsedMs = clock.ElapsedMilliseconds
         });
         return result;
@@ -329,6 +339,9 @@ public static class CaptureService
         return new(retained, text, note, complete) { ContextTruncated = truncated };
     }
 }
+
+internal sealed class CaptureResourceChangedException()
+    : InvalidOperationException("The selected resource changed during capture. Review it before continuing.");
 
 internal sealed record AutomationReadResult(
     ElementInfo[] Elements, string Text, string Note, bool Complete)

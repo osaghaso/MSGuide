@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -58,6 +59,20 @@ internal static class WindowsLogoVisual
 
 internal static class CompanionPlacement
 {
+    internal static Size PhysicalSize(Size logical, DpiScale dpi) =>
+        new(Math.Ceiling(logical.Width * dpi.DpiScaleX), Math.Ceiling(logical.Height * dpi.DpiScaleY));
+
+    internal static Point FlightPoint(Point start, Point destination, double progress)
+    {
+        double t = Math.Clamp(progress, 0, 1);
+        t = t * t * (3 - 2 * t);
+        var control = new Point((start.X + destination.X) / 2,
+            (start.Y + destination.Y) / 2 - Math.Min(60, (destination - start).Length * 0.15));
+        double remaining = 1 - t;
+        return new Point(remaining * remaining * start.X + 2 * remaining * t * control.X + t * t * destination.X,
+            remaining * remaining * start.Y + 2 * remaining * t * control.Y + t * t * destination.Y);
+    }
+
     internal static Native.RECT NearCursor(
         Native.POINT cursor, Native.RECT work, int width, int height,
         int offsetX = 22, int offsetY = 12)
@@ -101,11 +116,11 @@ internal sealed class CursorCompanionWindow : Window
     private readonly TextBlock message;
     private readonly Ellipse activityRing;
     private readonly DispatcherTimer tracking = new() { Interval = TimeSpan.FromMilliseconds(16) };
-    private readonly DispatcherTimer autoHide = new() { Interval = TimeSpan.FromSeconds(6) };
     private readonly List<string> taskActions = [];
     private string taskStatus = "";
-    private bool expanded;
+    private Size requestedSize = new(48, 48);
     private Native.POINT? actionPoint;
+    private int actionVersion;
     private double currentX = double.NaN;
     private double currentY = double.NaN;
     private nint Handle => new WindowInteropHelper(this).Handle;
@@ -147,7 +162,7 @@ internal sealed class CursorCompanionWindow : Window
 
         message = new TextBlock
         {
-            MaxWidth = 320,
+            MaxWidth = 300,
             MaxHeight = 126,
             TextWrapping = TextWrapping.Wrap,
             TextTrimming = TextTrimming.CharacterEllipsis,
@@ -156,6 +171,8 @@ internal sealed class CursorCompanionWindow : Window
             FontSize = 13,
             LineHeight = 18
         };
+        System.Windows.Automation.AutomationProperties.SetLiveSetting(message,
+            System.Windows.Automation.AutomationLiveSetting.Polite);
         bubble = new Border
         {
             Margin = new Thickness(8, 2, 0, 2),
@@ -187,7 +204,6 @@ internal sealed class CursorCompanionWindow : Window
             HwndSource.FromHwnd(Handle)?.AddHook(Hook);
         };
         tracking.Tick += (_, _) => Position();
-        autoHide.Tick += (_, _) => ShowIdle();
     }
 
     private nint Hook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
@@ -199,22 +215,22 @@ internal sealed class CursorCompanionWindow : Window
 
     public void ShowIdle()
     {
+        actionVersion++;
         actionPoint = null;
-        autoHide.Stop();
-        expanded = false;
+        taskActions.Clear();
+        taskStatus = "";
+        message.Text = "";
         bubble.Visibility = Visibility.Collapsed;
         activityRing.Visibility = Visibility.Collapsed;
         activityRing.BeginAnimation(RenderTransformProperty, null);
-        Width = 48;
-        Height = 48;
+        SetRequestedSize(48, 48);
         ShowCompanion();
     }
 
     public void ShowProcessing()
     {
+        actionVersion++;
         actionPoint = null;
-        autoHide.Stop();
-        expanded = true;
         message.Text = "Thinking about the app you invoked MSGuide from...";
         bubble.Visibility = Visibility.Visible;
         activityRing.Visibility = Visibility.Visible;
@@ -222,8 +238,7 @@ internal sealed class CursorCompanionWindow : Window
         activityRing.RenderTransform = rotation;
         rotation.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(0, 360,
             new Duration(TimeSpan.FromSeconds(1))) { RepeatBehavior = RepeatBehavior.Forever });
-        Width = 390;
-        Height = 76;
+        SetRequestedSize(390, 100);
         ShowCompanion();
     }
 
@@ -247,7 +262,6 @@ internal sealed class CursorCompanionWindow : Window
         taskStatus = status;
         ShowTask();
         activityRing.Visibility = Visibility.Collapsed;
-        autoHide.Stop();
     }
 
     public void ShowTaskStatus(string status)
@@ -258,9 +272,8 @@ internal sealed class CursorCompanionWindow : Window
 
     private void ShowTask()
     {
+        actionVersion++;
         actionPoint = null;
-        autoHide.Stop();
-        expanded = true;
         message.MaxHeight = 250;
         message.Text = TaskText(taskActions, taskStatus);
         bubble.Visibility = Visibility.Visible;
@@ -269,30 +282,56 @@ internal sealed class CursorCompanionWindow : Window
         activityRing.RenderTransform = rotation;
         rotation.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(0, 360,
             new Duration(TimeSpan.FromSeconds(1))) { RepeatBehavior = RepeatBehavior.Forever });
-        Width = 390;
-        Height = Math.Min(280, 82 + taskActions.Count * 24);
+        FitMessage();
         ShowCompanion();
     }
 
     internal static string TaskText(IEnumerable<string> actions, string status) =>
         string.Join("\n", actions.Prepend(status));
 
+    internal static string ResultText(string status, string detail, int actions) =>
+        (status switch
+        {
+            "needs_input" => "Needs your input",
+            "failed" => "Task failed",
+            "blocked" => "Task blocked",
+            "unknown" => "Outcome unknown - check the app",
+            "cancelled" => "Task cancelled",
+            "no_progress" => "No progress - task paused",
+            "review_required" => "Completion needs review",
+            _ => "Task paused"
+        }) + $"\nActions invoked: {actions}\n{detail}";
+
     public void ShowResponse(string text)
     {
+        actionVersion++;
         actionPoint = null;
-        expanded = true;
         activityRing.Visibility = Visibility.Collapsed;
         message.MaxHeight = 126;
         message.Text = string.IsNullOrWhiteSpace(text) ? "MSGuide is ready." : text;
         bubble.Visibility = Visibility.Visible;
-        Width = 390;
-        Height = 154;
+        FitMessage();
         ShowCompanion();
-        autoHide.Stop();
-        autoHide.Start();
     }
 
-    private void ShowCompanion()
+    private void SetRequestedSize(double width, double height)
+    {
+        requestedSize = new(width, height);
+        Width = width;
+        Height = height;
+    }
+
+    private void FitMessage()
+    {
+        message.Measure(new Size(message.MaxWidth, double.PositiveInfinity));
+        SetRequestedSize(390, Math.Clamp(Math.Ceiling(message.DesiredSize.Height) + 28, 100, 280));
+    }
+
+    internal Size ExpectedPhysicalSize => CompanionPlacement.PhysicalSize(requestedSize, VisualTreeHelper.GetDpi(this));
+    internal bool HasVisibleFeedback => bubble.Visibility == Visibility.Visible && message.Text.Length > 0;
+    internal string FeedbackText => message.Text;
+
+    internal void ShowCompanion()
     {
         if (!IsVisible) Show();
         Position();
@@ -302,37 +341,73 @@ internal sealed class CursorCompanionWindow : Window
     public bool ShowActionTarget(Native.RECT window, double[] box)
     {
         if (!Safety.ValidBox(box)) return false;
+        actionVersion++;
         var target = Safety.PhysicalTarget(window, box);
         actionPoint = new Native.POINT
         {
             X = (int)Math.Round(target.X + target.Width / 2),
             Y = (int)Math.Round(target.Y + target.Height / 2)
         };
-        autoHide.Stop();
-        expanded = false;
         bubble.Visibility = Visibility.Collapsed;
         activityRing.Visibility = Visibility.Visible;
-        Width = Height = 48;
+        SetRequestedSize(48, 48);
         ShowCompanion();
         return IsVisible && Position();
     }
 
+    public async Task<bool> MoveToActionTargetAsync(Native.RECT window, double[] box, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (!Safety.ValidBox(box)) return false;
+        int mine = ++actionVersion;
+        var target = Safety.PhysicalTarget(window, box);
+        var destination = new Point(target.X + target.Width / 2, target.Y + target.Height / 2);
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var start = new Point(double.IsNaN(currentX) ? destination.X : currentX + 24 * dpi.DpiScaleX,
+            double.IsNaN(currentY) ? destination.Y : currentY + 24 * dpi.DpiScaleY);
+        bubble.Visibility = Visibility.Collapsed;
+        activityRing.Visibility = Visibility.Visible;
+        SetRequestedSize(48, 48);
+        actionPoint = new() { X = (int)Math.Round(start.X), Y = (int)Math.Round(start.Y) };
+        ShowCompanion();
+        double duration = Math.Clamp((destination - start).Length / 1600, 0.15, 0.5);
+        var clock = Stopwatch.StartNew();
+        try
+        {
+            while (clock.Elapsed.TotalSeconds < duration)
+            {
+                token.ThrowIfCancellationRequested();
+                if (mine != actionVersion) return false;
+                var position = CompanionPlacement.FlightPoint(start, destination, clock.Elapsed.TotalSeconds / duration);
+                actionPoint = new() { X = (int)Math.Round(position.X), Y = (int)Math.Round(position.Y) };
+                if (!Position()) return false;
+                await Task.Delay(16, token);
+            }
+            token.ThrowIfCancellationRequested();
+            if (mine != actionVersion) return false;
+            return ShowActionTarget(window, box);
+        }
+        finally
+        {
+            if (mine == actionVersion) actionPoint = null;
+        }
+    }
+
     private bool Position()
     {
+        var physical = ExpectedPhysicalSize;
+        int width = (int)physical.Width;
+        int height = (int)physical.Height;
         if (actionPoint is { } point)
         {
-            var dpi = VisualTreeHelper.GetDpi(this);
-            int markerWidth = (int)Math.Ceiling(48 * dpi.DpiScaleX);
-            int markerHeight = (int)Math.Ceiling(48 * dpi.DpiScaleY);
-            if (!CompanionPlacement.TryAtPoint(point, markerWidth, markerHeight, out var anchored,
-                -markerWidth / 2, -markerHeight / 2)) return false;
+            if (!CompanionPlacement.TryAtPoint(point, width, height, out var anchored,
+                -width / 2, -height / 2)) return false;
             currentX = anchored.Left;
             currentY = anchored.Top;
             return Native.SetWindowPos(Handle, new nint(-1), anchored.Left, anchored.Top,
                 anchored.Width, anchored.Height, 0x10);
         }
-        int width = expanded ? 390 : 48;
-        int height = expanded ? (int)Height : 48;
+        bool expanded = requestedSize.Width > 48;
         int offsetX = expanded ? 22 : 35;
         int offsetY = expanded ? 12 : 25;
         if (!CompanionPlacement.TryCurrent(width, height, out var rect, offsetX, offsetY)) return false;
@@ -353,8 +428,8 @@ internal sealed class CursorCompanionWindow : Window
 
     public void Stop()
     {
+        actionVersion++;
         tracking.Stop();
-        autoHide.Stop();
         Close();
     }
 }
@@ -520,9 +595,12 @@ internal sealed class CompanionPromptWindow : Window
         try { prompt.Text = draft; }
         finally { updatingDraft = false; }
         ask.IsEnabled = true;
-        if (CompanionPlacement.TryCurrent((int)Width, (int)Height, out var rect))
+        Width = 470;
+        Height = taskPanel.Visibility == Visibility.Visible ? 440 : 164;
+        new WindowInteropHelper(this).EnsureHandle();
+        var physical = CompanionPlacement.PhysicalSize(new Size(Width, Height), VisualTreeHelper.GetDpi(this));
+        if (CompanionPlacement.TryCurrent((int)physical.Width, (int)physical.Height, out var rect))
         {
-            new WindowInteropHelper(this).EnsureHandle();
             Native.SetWindowPos(Handle, new nint(-1), rect.Left, rect.Top, rect.Width, rect.Height, 0x10);
         }
         Show();
@@ -541,7 +619,7 @@ internal sealed class CompanionPromptWindow : Window
     internal string ModeDescription => modeText.Text;
 
     internal void UpdateTask(CameraRecoveryInteractionMode mode, ScreenTaskSession? task,
-        bool canContinue, bool controlAvailable)
+        bool canContinue, bool resourceHandoff, bool controlAvailable)
     {
         bool fix = mode == CameraRecoveryInteractionMode.Control;
         modeText.Text = fix ? "FIX IT FOR ME - approved actions only" : "GUIDE ME - no automatic actions";
@@ -554,7 +632,9 @@ internal sealed class CompanionPromptWindow : Window
         taskText.Text = task is null ? "" : task.Status + " - " + task.Detail
             + (task.Plan is null ? "" : "\n" + ScreenTaskSession.DescribePlan(task.Plan, task.PlanCursor));
         ContinueTaskButton.IsEnabled = canContinue && continueTask is not null;
-        ContinueTaskButton.Content = task?.ReplanRequired == true ? "Review boundary & replan" : "Review & continue";
+        ContinueTaskButton.Content = resourceHandoff
+            ? "Use selected window & continue"
+            : task?.ReplanRequired == true ? "Review boundary & replan" : "Review & continue";
         StopTaskButton.IsEnabled = task is not null && (task.Running || task.Plan is not null && task.CanContinue);
         TaskReply.IsEnabled = task?.CanContinue == true;
     }
@@ -589,12 +669,18 @@ internal sealed class CompanionShell
         Func<string, Task> continueTask, Action stopTask, Action switchMode, Action<string> editDraft)
     {
         prompt = new CompanionPromptWindow(submit, showDetails, continueTask, stopTask, switchMode, editDraft);
+        prompt.IsVisibleChanged += (_, _) =>
+        {
+            if (active && !prompt.IsVisible) cursor.ShowCompanion();
+        };
     }
 
     public nint PromptHandle => new WindowInteropHelper(prompt).Handle;
     internal CompanionPromptWindow Prompt => prompt;
-    public void UpdateTask(CameraRecoveryInteractionMode mode, ScreenTaskSession? task, bool canContinue, bool controlAvailable)
-        => prompt.UpdateTask(mode, task, canContinue, controlAvailable);
+    internal CursorCompanionWindow Cursor => cursor;
+    public void UpdateTask(CameraRecoveryInteractionMode mode, ScreenTaskSession? task,
+        bool canContinue, bool resourceHandoff, bool controlAvailable)
+        => prompt.UpdateTask(mode, task, canContinue, resourceHandoff, controlAvailable);
     public void Start() { active = true; cursor.ShowIdle(); }
     public void Invoke(string draft)
     {
@@ -603,12 +689,22 @@ internal sealed class CompanionShell
         prompt.Invoke(draft);
     }
     public void ShowProcessing() { if (active) cursor.ShowProcessing(); }
-    public bool ShowActionTarget(Native.RECT window, double[] box) => active && cursor.ShowActionTarget(window, box);
+    public Task<bool> MoveToActionTargetAsync(Native.RECT window, double[] box, CancellationToken token) =>
+        active ? cursor.MoveToActionTargetAsync(window, box, token) : Task.FromResult(false);
     public void ShowResponse(string text) { if (active) cursor.ShowResponse(text); }
     public void BeginTask() { if (active) cursor.BeginTask(); }
     public void ShowTaskAction(int number, string action) { if (active) cursor.ShowTaskAction(number, action); }
     public void ShowTaskStatus(string status) { if (active) cursor.ShowTaskStatus(status); }
-    public void FinishTask(string status) { if (active) cursor.FinishTask(status); }
+    public void FinishTask(ScreenTaskSession task)
+    {
+        if (active) cursor.FinishTask(CursorCompanionWindow.ResultText(task.Status, task.Detail, task.ActionsTaken));
+    }
+    public void ClearFeedback()
+    {
+        if (!active) return;
+        cursor.ShowIdle();
+        if (prompt.IsVisible) cursor.Hide();
+    }
     public void Stop()
     {
         active = false;
