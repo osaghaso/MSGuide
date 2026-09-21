@@ -11,7 +11,7 @@
 </style>
 <h1>MSGuide browser acceptance</h1>
 <p>This local synthetic page contains no account, cloud resource, or personal data.</p>
-<p>Complete the three numbered buttons in order. Each button changes only this page.</p>
+<p>Complete the three numbered buttons in order. Each button advances this local page's navigation state.</p>
 <button id="step-one">Complete step one</button>
 <button id="step-two">Complete step two</button>
 <button id="step-three">Complete step three</button>
@@ -30,6 +30,7 @@
         return;
       }
       window.completedSteps.push(step);
+      history.replaceState(null, "", `#step-${step}`);
       event.currentTarget.disabled = true;
       const entry = document.createElement("li");
       entry.textContent = `Step ${step} completed`;

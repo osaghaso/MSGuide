@@ -283,6 +283,36 @@ internal static class CaptureTests
             shell.ShowResponse("Synthetic failure response that must remain available until cleared.");
             await Task.Delay(TimeSpan.FromSeconds(6.5), ct);
             CheckSizeAndText("Synthetic failure response");
+            var completed = new ScreenTaskSession("Synthetic completed feedback", "synthetic-window");
+            await completed.RunAsync((_, _) => Task.FromResult(new Observation("synthetic-completion",
+                    "synthetic-window", "Synthetic completion", DateTimeOffset.UtcNow, 800, 600, "", [], null)),
+                (observation, progress, _) => Task.FromResult(new Guidance("synthetic-correlation",
+                    observation.Id, observation.WindowId, "Synthetic goal is visibly complete.",
+                    "completion_candidate", null, [], "model", TaskId: progress.TaskId, Step: progress.Step)),
+                (_, _, _) => throw new InvalidOperationException("Feedback fixture must not execute."),
+                false, () => { }, ct);
+            shell.FinishTask(completed);
+            await Task.Delay(TimeSpan.FromSeconds(4.2), ct);
+            CheckSizeAndText("Completion needs review");
+            shell.Cursor.Hide();
+            shell.Prompt.Show();
+            await Task.Delay(TimeSpan.FromSeconds(1.2), ct);
+            Require(!shell.Cursor.IsVisible && !shell.Cursor.HasVisibleFeedback
+                && shell.Cursor.FeedbackText.Length == 0 && completed.Status == "review_required"
+                && completed.Detail.Contains("Synthetic goal", StringComparison.Ordinal));
+            shell.Prompt.Hide();
+            await Idle(ct);
+            Require(shell.Cursor.IsVisible && !shell.Cursor.HasVisibleFeedback
+                && shell.Cursor.ExpectedPhysicalSize == CompanionPlacement.PhysicalSize(new Size(48, 48),
+                    System.Windows.Media.VisualTreeHelper.GetDpi(shell.Cursor)));
+            shell.FinishTask(completed);
+            shell.ShowTaskStatus("Synthetic new task is still running.");
+            await Task.Delay(TimeSpan.FromSeconds(5.2), ct);
+            CheckSizeAndText("Synthetic new task is still running.");
+            shell.FinishTask(completed);
+            shell.ShowResponse("Synthetic newer error must not expire with the previous completion.");
+            await Task.Delay(TimeSpan.FromSeconds(5.2), ct);
+            CheckSizeAndText("Synthetic newer error");
             Require(Native.GetForegroundWindow() == foreground);
             shell.ClearFeedback();
             Require(shell.Cursor.IsVisible && !shell.Cursor.HasVisibleFeedback && shell.Cursor.FeedbackText.Length == 0);

@@ -110,6 +110,7 @@ internal static class CompanionPlacement
 
 internal sealed class CursorCompanionWindow : Window
 {
+    internal static readonly TimeSpan CompletionFeedbackLifetime = TimeSpan.FromSeconds(5);
     private readonly Grid root;
     private readonly Border badge;
     private readonly Border bubble;
@@ -118,6 +119,7 @@ internal sealed class CursorCompanionWindow : Window
     private readonly DispatcherTimer tracking = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private readonly List<string> taskActions = [];
     private string taskStatus = "";
+    private long? completionShownAt;
     private Size requestedSize = new(48, 48);
     private Native.POINT? actionPoint;
     private int actionVersion;
@@ -203,7 +205,13 @@ internal sealed class CursorCompanionWindow : Window
             Native.SetWindowDisplayAffinity(Handle, Native.MSGuideDisplayAffinity);
             HwndSource.FromHwnd(Handle)?.AddHook(Hook);
         };
-        tracking.Tick += (_, _) => Position();
+        tracking.Tick += (_, _) =>
+        {
+            if (completionShownAt is { } started
+                && Stopwatch.GetElapsedTime(started) >= CompletionFeedbackLifetime)
+                ResetFeedback();
+            Position();
+        };
     }
 
     private nint Hook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
@@ -215,6 +223,13 @@ internal sealed class CursorCompanionWindow : Window
 
     public void ShowIdle()
     {
+        ResetFeedback();
+        ShowCompanion();
+    }
+
+    private void ResetFeedback()
+    {
+        completionShownAt = null;
         actionVersion++;
         actionPoint = null;
         taskActions.Clear();
@@ -224,11 +239,11 @@ internal sealed class CursorCompanionWindow : Window
         activityRing.Visibility = Visibility.Collapsed;
         activityRing.BeginAnimation(RenderTransformProperty, null);
         SetRequestedSize(48, 48);
-        ShowCompanion();
     }
 
     public void ShowProcessing()
     {
+        completionShownAt = null;
         actionVersion++;
         actionPoint = null;
         message.Text = "Thinking about the app you invoked MSGuide from...";
@@ -257,11 +272,12 @@ internal sealed class CursorCompanionWindow : Window
         ShowTask();
     }
 
-    public void FinishTask(string status)
+    public void FinishTask(string status, bool completed)
     {
         taskStatus = status;
         ShowTask();
         activityRing.Visibility = Visibility.Collapsed;
+        if (completed) completionShownAt = Stopwatch.GetTimestamp();
     }
 
     public void ShowTaskStatus(string status)
@@ -272,6 +288,7 @@ internal sealed class CursorCompanionWindow : Window
 
     private void ShowTask()
     {
+        completionShownAt = null;
         actionVersion++;
         actionPoint = null;
         message.MaxHeight = 250;
@@ -304,6 +321,7 @@ internal sealed class CursorCompanionWindow : Window
 
     public void ShowResponse(string text)
     {
+        completionShownAt = null;
         actionVersion++;
         actionPoint = null;
         activityRing.Visibility = Visibility.Collapsed;
@@ -341,6 +359,7 @@ internal sealed class CursorCompanionWindow : Window
     public bool ShowActionTarget(Native.RECT window, double[] box)
     {
         if (!Safety.ValidBox(box)) return false;
+        completionShownAt = null;
         actionVersion++;
         var target = Safety.PhysicalTarget(window, box);
         actionPoint = new Native.POINT
@@ -359,6 +378,7 @@ internal sealed class CursorCompanionWindow : Window
     {
         token.ThrowIfCancellationRequested();
         if (!Safety.ValidBox(box)) return false;
+        completionShownAt = null;
         int mine = ++actionVersion;
         var target = Safety.PhysicalTarget(window, box);
         var destination = new Point(target.X + target.Width / 2, target.Y + target.Height / 2);
@@ -428,6 +448,7 @@ internal sealed class CursorCompanionWindow : Window
 
     public void Stop()
     {
+        completionShownAt = null;
         actionVersion++;
         tracking.Stop();
         Close();
@@ -697,7 +718,9 @@ internal sealed class CompanionShell
     public void ShowTaskStatus(string status) { if (active) cursor.ShowTaskStatus(status); }
     public void FinishTask(ScreenTaskSession task)
     {
-        if (active) cursor.FinishTask(CursorCompanionWindow.ResultText(task.Status, task.Detail, task.ActionsTaken));
+        if (active) cursor.FinishTask(
+            CursorCompanionWindow.ResultText(task.Status, task.Detail, task.ActionsTaken),
+            completed: task.Status == "review_required");
     }
     public void ClearFeedback()
     {

@@ -58,8 +58,12 @@ The loop retains the prompt, plan/cursor, task ID, step, last 16 action results 
 bounded clarification text in memory. Fix mode executes continuously without an
 eight-action or two-minute checkpoint. After a segment makes progress, a
 `plan_limit` or `observation` boundary refreshes the approved screenshot and
-requests the next plan automatically, but only while the same identified resource
-remains completely inspectable. Empty plans cannot trigger an inference loop.
+requests the next plan automatically. A confirmed page/resource change within
+the selected HWND also captures a fresh screenshot and replans without another
+approval prompt; old-page queued targets never carry over. The new page must be
+completely inspectable and identified. A completion guess from the previous page
+is rechecked against fresh evidence rather than accepted as the final result.
+Empty plans cannot trigger an inference loop.
 Other boundaries or failed grounding require review, with a reason and needed input.
 At a `resource` boundary, selecting the required window and choosing
 **Use selected window & continue** explicitly rebinds the retained task, clears
@@ -68,7 +72,7 @@ Per-operation deadlines and the 10,000-decision protocol ceiling remain. Mode ch
 revoke old queued authority; unknown and cancelled work cannot resume. New prompts,
 Pause/clear, dismissal and exit discard context; there is no durable task store.
 
-Initial planning, same-resource automatic refreshes, and explicitly reviewed
+Initial planning, same-window automatic refreshes, and explicitly reviewed
 replanning may include an approved screenshot. Inside a segment, binding and verification use local UIA-only
 observations, reusing suitable post-action evidence for the next step. No new
 model call is made for a routine expected control change. After invocation,
@@ -79,8 +83,10 @@ legal scan. Incomplete controls, missing page identity, and resource changes dur
 capture are re-inspected while the page settles. Rejected reads clear any stable
 change candidate; only fresh, complete, identified observations can verify progress.
 They never cause another invocation. Stale, reused, wrong-window or denied
-observations are not retried. A verified new resource still pauses the remaining
-plan for explicit review and replanning; it does not reuse old-page targets.
+observations are not retried. Automatic replanning uses the same bounded retry
+policy for its new screenshot, never another invocation. A verified new page
+invalidates the remaining old plan and triggers a fresh one; manual steps and
+input/permission/unsupported/new-window boundaries still require user intervention.
 Toggle, value replacement, selection, expansion/collapse, and
 scroll actions require their expected semantic effect; unrelated UI changes
 cannot substitute for it. If that effect is still missing after the bounded
@@ -100,8 +106,9 @@ Deferred target intents match exact role/label/action and any declared metadata,
 never fuzzy text or first-match selectors. Deferred writes require an empty field;
 observed writes require the unchanged prior value hash.
 
-Resource scope is conservative: a native app's selected HWND, process, class,
-title, and current evidence must remain stable. Edge/Chrome page scopes require one visible address field in
+Task scope stays bound to the selected HWND, process and class. Each individual
+plan is bound to its observed resource; a title/page change requires fresh capture
+and planning, not reuse of that plan's targets. Edge/Chrome page scopes require one visible address field in
 browser chrome (not content supplied by a document), one native `RootWebArea`
 page, and matching fresh native document identity. Address normalization handles
 browser-elided HTTP(S) prefixes without claiming a guessed transport scheme.
@@ -109,12 +116,13 @@ Both the native document and canonical displayed address are hashed into the
 scope. Auxiliary browser document wrappers are ignored, and capture/target
 lookup are confined to the verified page rather than tabs or side panes.
 Only opaque identities leave this check; raw addresses are not logged.
-Changed/ambiguous page identities and unsupported browser layouts require handoff.
+Changed page identities trigger automatic replanning; unidentified/ambiguous
+pages and unsupported browser layouts cannot authorize another action.
 On a fresh browser, inspecting native document wrappers can initialize its
 renderer accessibility tree. MSGuide permits four passive inspection attempts
 within one shared three-second budget, never input or a settings change.
 Page-provided address-like fields remain excluded from resource identity.
-New windows/resources,
+New windows, resources outside the approved task,
 permissions and credentials are not acquired automatically. A user may explicitly
 select a new window at a `resource` boundary; the task then discards the old plan
 and obtains fresh evidence before replanning. Guide mode can
@@ -151,8 +159,11 @@ Capture-access denials retain a `failed` checkpoint before invocation, or an
 `unknown` outcome while checking an invoked action; uncertain actions are not
 replayed. Companion action results use their recorded step numbers, not the
 invocation count, including across continuation and the rolling history bound.
-The buddy no longer auto-hides responses or final task states; the compact prompt and Details
-retain the plan/cursor, boundary and needed input. They share the same mode,
+The buddy hides only the completion (`review_required`) message after five seconds,
+leaving the Windows marker. Progress, errors and required-input messages do not expire.
+The compact prompt and Details retain the plan/cursor, result, boundary and needed input.
+New activity cancels the completion expiry; hiding/reopening the prompt cannot
+resurrect an expired completion message. They share the same mode,
 continue/reply and Stop handlers, not separate task engines. Current evidence is disposed on
 stop; bounded task text stays only until explicit clearing/replacement/exit.
 
@@ -166,15 +177,17 @@ activating the cursor window. Explicit Pause/clear or a new prompt clears it.
 `desktop.log` records `screen_task_action`, `screen_task_verification`,
 `screen_task_state`, `screen_task_stopped`, and `screen_task_failed`, with
 task/step IDs, action counts, outcomes and exception types. Rejected post-action
-reads emit `screen_task_observation_rejected` with attempt, reason and elapsed time;
+reads emit `screen_task_observation_rejected` with attempt, reason and elapsed time
+(`phase: replan` distinguishes screenshot refresh from post-action verification);
 capture failures and UIA provider errors retain only sanitized exception types.
 Final verification includes the attempt count and distinguishes the shared deadline
 from persistent incomplete controls, changing/unidentified pages or failed inspections.
+`screen_task_plan_refreshed` records automatic replanning readiness without UI text.
 Backend failures
 are correlated in `backend.log`. These logs deliberately exclude full response
 or exception messages; readable details are retained in the compact prompt.
 The native capture harness checks actual window dimensions across timer ticks,
-prompt dismissal, and more than six seconds of response visibility.
+prompt dismissal, five-second completion-only expiry, and persistent newer feedback.
 Run `MSGuide.Desktop.exe --feedback-test --test-results <path>` for that focused
 native UI check without a backend, screenshot, or live model.
 
@@ -189,7 +202,9 @@ the executor: `/v1/actions/*` and `/v1/jobs/*` are still the unrelated in-memory
 ### Browser acceptance
 
 `tests\fixtures\browser-task.html` is an owned synthetic page with three ordered
-buttons and an independently readable completion state. Serve that directory
+buttons and an independently readable completion state. Each button also changes
+the page's URL fragment, exercising automatic capture/replanning across real
+browser resource changes rather than only same-page control updates. Serve that directory
 only on loopback, open the page in a fresh headed browser with
 `?run=<32 lowercase hexadecimal characters>`, and use the exact resulting HWND.
 The test refuses other URLs, titles, or browser windows before sharing evidence.
@@ -214,15 +229,15 @@ guidance/actions: multi-step history, legitimate repeated controls, no progress,
 continuous execution beyond eight actions, bounded history, all stop states,
 Guide-mode non-execution, semantic value/scroll effects, cancellation/supersession,
 unrelated UI churn with missing/late semantic effects, transient/persistent incomplete
-or changing-page captures, stable-read reset across rejected evidence, explicit
-navigation boundaries, slow reads beyond five seconds and the shared 30-second
+or changing-page captures, stable-read reset across rejected evidence, automatic
+same-window navigation, real input/permission/new-window boundaries, slow reads beyond five seconds and the shared 30-second
 verification deadline, capture-access failures
 before/after invocation, result notifications across continuation/history rollover,
 and a fake hung native worker. A delayed HTTP handler verifies cancellation at the
 remaining freshness deadline. Camera state/consent tests use fixtures only.
 Plan regressions assert one model call for complete three-, 17-, and 31-step runs,
-automatic continuation across 32-step plan limits and same-resource observation
-boundaries, scope/cancellation checks before refreshed inference, every-step
+automatic continuation across 32-step plan limits and page changes, stale-plan
+rejection and scope/cancellation checks before refreshed inference, every-step
 verification, whole-plan rejection of a malformed third
 step, resource/target drift, cancelled/unknown queues, stable logical identity,
 partial Guide context and actual compact-control handlers. No test opens the

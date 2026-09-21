@@ -52,12 +52,17 @@ internal static class BrowserTaskTests
             if (!execute) { stage("readonly-complete-no-actions-executed"); return; }
             checks.Add("live-model-plan-native-browser-three-actions-visible-and-observed");
             stage("browser-independent-final-state");
+            var finalPage = await Task.Run(() => AutomationEvidence.ReadBrowserScope(browser, deadline.Token),
+                deadline.Token);
             using var final = await CaptureService.Capture(browser, deadline.Token, includeImage: false);
-            IntegrationTests.Require(final.AutomationComplete && final.ResourceId == resource
+            IntegrationTests.Require(finalPage is not null
+                && finalPage.AddressKey == AutomationEvidence.BrowserAddressKey(address + "#step-three")
+                && final.AutomationComplete && final.ResourceId == finalPage.ResourceId && final.ResourceId != resource
                 && final.Elements.Any(element => element.Label == "All three steps finished")
                 && final.Elements.Count(element => element.Label.StartsWith("Complete step ", StringComparison.Ordinal)
                     && element.Role == "button" && !element.IsEnabled) == 3);
             checks.Add("fresh-browser-evidence-confirms-all-three-steps");
+            checks.Add("real-browser-page-changes-continue-without-approval-or-old-page-target-reuse");
             stage("complete");
         }
         finally { window.Close(); }
@@ -118,7 +123,8 @@ public partial class MainWindow
         await CaptureAndGuideAsync();
         token.ThrowIfCancellationRequested();
         IntegrationTests.Require(screenTask is { ActionsTaken: 3, Status: "review_required" }
-            && screenTask.Plan?.ResourceId == resource && screenTask.PlanCursor == screenTask.Plan.Steps.Length
+            && screenTask.Plan is { ResourceId: not null } && screenTask.Plan.ResourceId != resource
+            && screenTask.PlanCursor == screenTask.Plan.Steps.Length
             && screenTask.History.Count == 3
             && screenTask.History.All(step => step.AfterObservationId is not null
                 && step.Outcome is "screen_changed" or "effect_observed"));

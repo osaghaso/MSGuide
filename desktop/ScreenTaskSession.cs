@@ -223,6 +223,66 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
             });
             return result;
         }
+        async Task<Observation?> RefreshPlan(string reason, Observation previous)
+        {
+            replanRequired = true;
+            ReplanReason = reason;
+            Detail = "Capturing the updated screen and planning the next steps automatically...";
+            DiagnosticLog.Record("screen_task_plan_boundary", new
+            {
+                taskId = Id, planId = Plan?.PlanId, cursor = PlanCursor,
+                reason, status = Status, automatic = true
+            });
+            changed();
+            CheckCurrent();
+            using var refresh = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            refresh.CancelAfter(VerificationTimeout);
+            var observedIds = new HashSet<string> { previous.Id };
+            string rejection = "incomplete_observation";
+            var clock = Stopwatch.StartNew();
+            try
+            {
+                for (int attempt = 1; attempt <= ObservationAttempts; attempt++)
+                {
+                    if (attempt > 1) await delay(TimeSpan.FromMilliseconds(250), refresh.Token);
+                    try
+                    {
+                        var next = await Observe(true, refresh.Token);
+                        if (!observedIds.Add(next.Id))
+                            throw new InvalidOperationException("Automatic replanning reused an observation.");
+                        rejection = !next.AutomationComplete ? "incomplete_observation"
+                            : next.ResourceId is null ? "resource_unverified" : "";
+                        if (rejection.Length == 0)
+                        {
+                            if (Plan is not null && next.ResourceId != Plan.ResourceId)
+                                ReplanReason = "resource_changed";
+                            DiagnosticLog.Record("screen_task_plan_refreshed", new
+                            {
+                                taskId = Id, step = Step, reason = ReplanReason, attempt,
+                                imageShared = next.ImageBase64 is not null, elapsedMs = clock.ElapsedMilliseconds
+                            });
+                            return next;
+                        }
+                    }
+                    catch (CaptureResourceChangedException) { rejection = "resource_changed_during_capture"; }
+                    CheckCurrent();
+                    refresh.Token.ThrowIfCancellationRequested();
+                    DiagnosticLog.Record("screen_task_observation_rejected", new
+                    {
+                        taskId = Id, step = Step, phase = "replan", attempt,
+                        reason = rejection, elapsedMs = clock.ElapsedMilliseconds
+                    });
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                CheckCurrent();
+                rejection = "refresh_timeout";
+            }
+            PauseForReplan(rejection,
+                "The updated screen could not be captured completely with a verified page identity. No new plan or action was started. Review the app before continuing.");
+            return null;
+        }
         try
         {
             if (UserInput.Length > 0) replanRequired = true;
@@ -275,6 +335,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                         Plan = null;
                         PlanCursor = 0;
                         replanRequired = false;
+                        ReplanReason = "";
                         if (response.Status != "next_step" || response.Target is null)
                         {
                             Step++;
@@ -309,30 +370,15 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                     }
                     if (PlanCursor == plan.Steps.Length)
                     {
-                        if (plan.Steps.Length > 0 && plan.Boundary.Kind is "plan_limit" or "observation")
+                        bool resourceChanged = observation.ResourceId != plan.ResourceId;
+                        if (plan.Steps.Length > 0
+                            && (plan.Boundary.Kind is "plan_limit" or "observation"
+                                || resourceChanged && plan.Boundary.Kind == "completion_candidate"))
                         {
-                            replanRequired = true;
-                            ReplanReason = plan.Boundary.Kind;
-                            Detail = "The planned steps were observed. Refreshing the same resource to continue...";
-                            DiagnosticLog.Record("screen_task_plan_boundary", new
-                            {
-                                taskId = Id, planId = plan.PlanId, cursor = PlanCursor,
-                                reason = ReplanReason, status = Status, automatic = true
-                            });
-                            changed();
-                            observation = await Observe(true, cancellationToken);
-                            if (!observation.AutomationComplete)
-                            {
-                                PauseForReplan("incomplete_observation",
-                                    "The refreshed controls inspection was incomplete. No further step was planned or executed; review the app.");
-                                return;
-                            }
-                            if (plan.ResourceId is null || observation.ResourceId != plan.ResourceId)
-                            {
-                                PauseForReplan("resource_changed",
-                                    "The resource changed while refreshing the plan. No new model request or action was started; review the new resource.");
-                                return;
-                            }
+                            var refreshed = await RefreshPlan(
+                                resourceChanged ? "resource_changed" : plan.Boundary.Kind, observation);
+                            if (refreshed is null) return;
+                            observation = refreshed;
                             continue;
                         }
                         FinishPlan();
@@ -353,8 +399,10 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                     }
                     if (observation.ResourceId != plan.ResourceId)
                     {
-                        PauseForReplan("resource_changed", "The selected resource changed or its identity cannot be established locally. No queued step was executed. Review the window/file/site and explicitly replan; a new window requires a new approved request.");
-                        return;
+                        var refreshed = await RefreshPlan("resource_changed", observation);
+                        if (refreshed is null) return;
+                        observation = refreshed;
+                        continue;
                     }
                     target = Safety.BindPlanAction(planned, observation);
                     if (target is null)
@@ -523,22 +571,23 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                     SetStatus("no_progress", "No stable progress was observed after the action. It was not retried. Review the app before continuing.");
                     return;
                 }
+                bool pageChanged = observation.ResourceId is not null && after!.ResourceId != observation.ResourceId;
                 observation = after!;
                 if (Plan is not null)
-                {
                     PlanCursor++;
-                    if (observation.ResourceId != Plan.ResourceId)
-                    {
-                        PauseForReplan("resource_changed", "The action reached a different or unidentified resource. Remaining steps were retained but not executed. Review the new resource before explicitly replanning.");
-                        return;
-                    }
+                else if (pageChanged && Step < 10000)
+                {
+                    var refreshed = await RefreshPlan("resource_changed", observation);
+                    if (refreshed is null) return;
+                    observation = refreshed;
                 }
                 Detail = outcome == "effect_observed"
                     ? "The control effect was observed; the overall task goal is still unverified."
                     : "A stable screen change was observed, not proof of the action's effect or task completion.";
                 changed();
             }
-            if (Plan is not null && PlanCursor == Plan.Steps.Length) FinishPlan();
+            if (Plan is not null && PlanCursor == Plan.Steps.Length
+                && observation.ResourceId == Plan.ResourceId) FinishPlan();
             else if (Step >= 10000)
                 SetStatus("blocked", "The task reached its 10,000-decision ceiling. Its checkpoint is retained for review, but continuing requires a new request. Goal completion is unverified.");
         }

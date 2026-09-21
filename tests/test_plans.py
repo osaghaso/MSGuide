@@ -52,8 +52,11 @@ def segment(count=3, boundary="completion_candidate"):
 
 def make_provider(kind, output, tmp_path):
     if kind == "copilot":
-        value = {**output, "observationId": "obs-1", "stepId": "step-2"}
-        client = FakeClient(value)
+        client = FakeClient(lambda body: {
+            **output,
+            "observationId": body["serverApproved"]["observationId"],
+            "stepId": body["serverApproved"]["stepId"],
+        })
         return CopilotProvider(
             CopilotProviderConfig(model="synthetic-model", base_directory=tmp_path),
             approved_context, client_factory=lambda **_: client,
@@ -170,22 +173,53 @@ async def test_boundaries_return_needed_resource_without_actions(kind, boundary,
 
 
 @pytest.mark.parametrize("kind", ["copilot", "openai"])
-def test_api_preserves_plan_segment_and_local_mock_actions_remain_unused(kind, tmp_path):
+@pytest.mark.parametrize("navigated", [False, True])
+def test_api_preserves_plan_segment_and_local_mock_actions_remain_unused(kind, navigated, tmp_path):
     model, sent = make_provider(kind, {"instruction": "A whole plan.", "status": "next_step", "plan": segment()}, tmp_path)
     config = Config(token="synthetic-plan-token", guidance_provider="copilot-sdk" if kind == "copilot" else "openai-compatible",
                     model_config=None if kind == "copilot" else approved())
+    evidence = observed(image=True)
+    progress = None
+    if navigated:
+        old_plan = plan_for(PlanInput.model_validate(segment()), evidence)
+        progress = {
+            "taskId": "11111111-1111-4111-8111-111111111111", "step": 2, "status": "running",
+            "history": [{"step": 1, "observationId": "obs-before", "afterObservationId": "obs-after",
+                         "targetId": "continue", "label": "Continue", "action": "invoke", "outcome": "screen_changed"}],
+            "remainingWork": "Complete the original goal on the new page.", "userInput": "",
+            "plan": old_plan.model_dump(mode="json"), "planCursor": 1, "replanReason": "resource_changed",
+        }
+        evidence = evidence.model_copy(update={
+            "resourceId": "resource-next",
+            "elements": [evidence.elements[0].model_copy(update={"controlId": "control-next"})],
+        })
     with TestClient(create_app(config, guidance_provider=model),
                     headers={"Authorization": "Bearer synthetic-plan-token"}) as client:
         sid = client.post("/v1/sessions").json()["sessionId"]
         response = client.post("/v1/guidance", json={
             "sessionId": sid, "consent": True, "prompt": "Synthetic task", "planSegments": True,
-            "observation": observed(image=True).model_dump(mode="json"),
+            "observation": evidence.model_dump(mode="json"), "task": progress,
         })
         assert response.status_code == 200, response.text
         result = response.json()
         assert len(sent) == 1 and len(result["plan"]["steps"]) == 3 and result["target"] is None
-        assert result["plan"]["resourceId"] == "resource-synthetic"
+        assert result["plan"]["resourceId"] == evidence.resourceId
+        assert result["plan"]["steps"][0]["controlId"] == evidence.elements[0].controlId
         assert not client.app.state.runner.jobs
+        if kind == "copilot":
+            payload = json.loads(sent[0].sent[0])
+            policy = sent[0].options["system_message"]["content"]
+        else:
+            payload = json.loads(sent[0]["messages"][1]["content"][-1]["text"])
+            policy = sent[0]["messages"][0]["content"]
+        policy = " ".join(policy.split())
+        assert "without asking for approval just to recapture or continue" in policy
+        assert "old-page targets are never reused" in policy
+        assert "permission for a genuine new grant" in policy
+        if navigated:
+            assert payload["untrustedTask"] == progress
+            assert payload["untrustedObservation"]["resourceId"] == "resource-next"
+            assert result["taskId"] == progress["taskId"] and result["step"] == 2
 
 
 @pytest.mark.parametrize("drift", ["window", "resource", "control", "value", "incomplete"])

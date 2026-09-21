@@ -192,8 +192,10 @@ The WPF client, not the model or `/v1/jobs`, executes actions. Only **Fix it for
 me** plus the launch grant can auto-execute; Guide mode never does. Runs no longer
 pause after eight actions or two minutes: every queued action is freshly checked
 and observed. After progress, `plan_limit` and `observation` boundaries request a
-new plan automatically only after refreshing the same approved, completely
-inspectable resource. Empty plans, actual resource changes and input/permission
+new plan automatically after refreshing the selected window. Normal page/resource
+changes within that window also recapture and replan without repeated approval,
+using only complete identified evidence; old-page targets are discarded.
+Empty plans, unknown page identity and actual input/permission/new-window
 boundaries still stop; per-operation deadlines and the 10,000-decision protocol
 ceiling remain. Boundary reasons/needed input are visible in
 the compact prompt and Details; unknown/cancelled queued actions cannot resume.
@@ -202,7 +204,7 @@ ValuePattern or ScrollPattern evidence and explicit inputs. No coordinate,
 keyboard, shell, or unknown-outcome retry fallback exists.
 
 Screenshot bytes are attached only when approved `Observation.imageBase64` is
-present. The desktop sends an initial, same-resource automatic refresh, or explicitly reviewed replanning image,
+present. The desktop sends an initial, same-window automatic refresh, or explicitly reviewed replanning image,
 then uses fresh local UIA-only steps/checks instead of another inference per action.
 Execution first presents the grounded target in the foreground with the Windows
 marker; it never falls back to background input. A supported Edge/Chrome page can

@@ -62,34 +62,34 @@ internal static class PlanTests
             {
                 token.ThrowIfCancellationRequested();
                 if (invocations == 0) return Task.FromResult(Screen(0, Element(), Element("Next page", runtime: 2)));
-                IntegrationTests.Require(!image);
-                reads++;
-                if (reads == rejectedRead && rejection == "resource_changed")
+                if (!image) reads++;
+                if (!image && reads == rejectedRead && rejection == "resource_changed")
                     return Task.FromException<Observation>(new CaptureResourceChangedException());
                 return Task.FromResult(Screen(1) with
                 {
-                    AutomationComplete = reads != rejectedRead || rejection != "incomplete",
-                    ResourceId = reads == rejectedRead && rejection == "unverified"
+                    AutomationComplete = image || reads != rejectedRead || rejection != "incomplete",
+                    ResourceId = !image && reads == rejectedRead && rejection == "unverified"
                         ? null : navigates ? "resource-next" : Resource
                 });
             }, (observation, progress, _) =>
             {
                 modelCalls++;
-                return Task.FromResult(Reply(observation, progress, plan));
+                return Task.FromResult(Reply(observation, progress, modelCalls == 1
+                    ? plan : Segment([]) with { ResourceId = observation.ResourceId }));
             }, (_, _, _) =>
             {
                 invocations++;
                 return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
             }, true, () => { }, CancellationToken.None, NoDelay);
-            IntegrationTests.Require(invocations == 1 && modelCalls == 1 && reads == rejectedRead + 2
-                && task.ActionsTaken == 1 && task.PlanCursor == 1 && !task.AwaitingActionEvidence
+            IntegrationTests.Require(invocations == 1 && modelCalls == (navigates ? 2 : 1) && reads == rejectedRead + 2
+                && task.ActionsTaken == 1 && task.PlanCursor == (navigates ? 0 : 1) && !task.AwaitingActionEvidence
                 && task.History.Single().Outcome == "screen_changed"
                 && task.History.Single().AfterObservationId is not null
-                && task.Status == (navigates ? "blocked" : "review_required")
-                && (!navigates || task.ReplanRequired && task.ReplanReason == "resource_changed"));
+                && task.Status == "review_required"
+                && (!navigates || task.Plan?.ResourceId == "resource-next"));
         }
         checks.Add("postclick-transient-inspections-retried-with-two-fresh-stable-reads-no-action-replay");
-        checks.Add("postclick-navigation-retains-remaining-plan-behind-explicit-resource-review");
+        checks.Add("postclick-navigation-replans-automatically-without-replaying-observed-actions");
 
         foreach (string rejection in new[] { "incomplete", "resource_changed", "unverified" })
         {
@@ -226,9 +226,173 @@ internal static class PlanTests
         checks.Add("postclick-slow-read-over-five-seconds-recovers-shared-thirty-second-deadline-still-stops");
     }
 
+    private static async Task RunAutomaticNavigationAsync(List<string> checks)
+    {
+        foreach (string boundary in new[] { "queued", "observation", "completion_candidate" })
+        {
+            int page = 0, calls = 0, images = 0;
+            var task = new ScreenTaskSession("Finish three pages without approval pauses", Window.Id);
+            string ResourceFor(int current) => $"resource-page-{current}";
+            await task.RunAsync((image, _) =>
+            {
+                if (image) images++;
+                return Task.FromResult(Screen(page, Element(), Element("Stale queued action", runtime: 2)) with
+                {
+                    ResourceId = ResourceFor(page),
+                    ImageBase64 = image ? Convert.ToBase64String(new byte[] { (byte)page }) : null
+                });
+            }, (observation, progress, _) =>
+            {
+                calls++;
+                IntegrationTests.Require(calls == page + 1 && progress.TaskId == task.Id
+                    && progress.Step == page + 1 && progress.Status == "running" && progress.UserInput.Length == 0
+                    && observation.ImageBase64 == Convert.ToBase64String(new byte[] { (byte)page }));
+                if (page > 0)
+                    IntegrationTests.Require(progress.ReplanReason == "resource_changed"
+                        && progress.Plan?.ResourceId == ResourceFor(page - 1) && progress.PlanCursor == 1
+                        && progress.History.Length == page && progress.History[^1].AfterObservationId is not null);
+                var plan = page == 3 ? Segment([])
+                    : boundary == "queued" ? Segment([Action(Element()), Action(Element("Stale queued action", runtime: 2))])
+                    : Segment([Action(Element())], boundary);
+                return Task.FromResult(Reply(observation, progress, plan with { ResourceId = observation.ResourceId }));
+            }, (observation, target, _) =>
+            {
+                IntegrationTests.Require(target.Label == "Continue" && page < 3
+                    && observation.ResourceId == ResourceFor(page) && task.Plan?.ResourceId == observation.ResourceId);
+                page++;
+                return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+            }, true, () => IntegrationTests.Require(task.Status is "running" or "review_required"),
+                CancellationToken.None, NoDelay);
+            IntegrationTests.Require(page == 3 && calls == 4 && images == 4 && task.ActionsTaken == 3
+                && task.Status == "review_required" && task.Plan?.ResourceId == ResourceFor(3)
+                && task.History.All(step => step.Outcome == "screen_changed"));
+        }
+        int legacyActions = 0, legacyCalls = 0, legacyImages = 0;
+        var legacy = new ScreenTaskSession("Continue a legacy request across page changes", Window.Id);
+        await legacy.RunAsync((image, _) =>
+        {
+            if (image) legacyImages++;
+            return Task.FromResult(Screen(legacyActions) with
+            { ResourceId = legacyActions == 0 ? Resource : "resource-next" });
+        }, (observation, progress, _) =>
+        {
+            legacyCalls++;
+            if (legacyActions > 0)
+                IntegrationTests.Require(progress.ReplanReason == "resource_changed"
+                    && progress.History.Single().Outcome == "screen_changed");
+            var element = observation.Elements[0];
+            return Task.FromResult(new Guidance("synthetic", observation.Id, observation.WindowId,
+                "Synthetic legacy navigation.", legacyActions == 0 ? "next_step" : "completion_candidate",
+                legacyActions == 0 ? new(element.Label, element.Box, element.Confidence, element.TargetId,
+                    Action: element.Action, ControlId: element.ControlId) : null,
+                [], "model", TaskId: progress.TaskId, Step: progress.Step));
+        }, (_, _, _) =>
+        {
+            legacyActions++;
+            return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+        }, true, () => { }, CancellationToken.None, NoDelay);
+        IntegrationTests.Require(legacyActions == 1 && legacyCalls == 2 && legacyImages == 2
+            && legacy.Status == "review_required");
+        checks.Add("page-navigation-and-legacy-recapture-continue-without-manual-approval");
+        checks.Add("old-page-queued-actions-and-completion-guesses-never-cross-page-boundaries");
+
+        foreach (string rejection in new[] { "none", "incomplete", "unverified", "changing" })
+        {
+            int actions = 0, images = 0, calls = 0;
+            var task = new ScreenTaskSession("Refresh a page that changes during capture", Window.Id);
+            await task.RunAsync((image, _) =>
+            {
+                if (image) images++;
+                bool rejected = image && images == 2 && rejection != "none";
+                if (rejected && rejection == "changing")
+                    return Task.FromException<Observation>(new CaptureResourceChangedException());
+                return Task.FromResult(Screen(actions) with
+                {
+                    AutomationComplete = !rejected || rejection != "incomplete",
+                    ResourceId = rejected && rejection == "unverified" ? null
+                        : image && images >= 2 ? "resource-next" : Resource
+                });
+            }, (observation, progress, _) =>
+            {
+                calls++;
+                if (calls == 2)
+                    IntegrationTests.Require(progress.ReplanReason == "resource_changed"
+                        && observation.ResourceId == "resource-next" && observation.AutomationComplete);
+                return Task.FromResult(Reply(observation, progress, calls == 1
+                    ? Segment([Action(Element())], "observation")
+                    : Segment([]) with { ResourceId = observation.ResourceId }));
+            }, (_, _, _) =>
+            {
+                actions++;
+                return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+            }, true, () => { }, CancellationToken.None, NoDelay);
+            IntegrationTests.Require(actions == 1 && calls == 2 && images == (rejection == "none" ? 2 : 3)
+                && task.Status == "review_required" && task.History.Single().Outcome == "screen_changed");
+        }
+        checks.Add("automatic-refresh-retries-loading-and-accepts-a-fresh-identified-page-in-the-same-window");
+
+        foreach (string boundary in new[] { "resource", "needs_input", "permission", "unsupported" })
+        foreach (bool manual in new[] { false, true })
+        {
+            int actions = 0, calls = 0, images = 0;
+            var task = new ScreenTaskSession("Respect real handoff boundaries after navigation", Window.Id);
+            var steps = new List<PlanAction> { Action(Element()) };
+            if (manual) steps.Add(new("manual", "Explicit user assistance is required."));
+            var plan = Segment(steps.ToArray(), boundary);
+            await task.RunAsync((image, _) =>
+            {
+                if (image) images++;
+                return Task.FromResult(Screen(actions) with { ResourceId = actions == 0 ? Resource : "resource-next" });
+            }, (observation, progress, _) =>
+            {
+                calls++;
+                return Task.FromResult(Reply(observation, progress, plan));
+            }, (_, _, _) =>
+            {
+                actions++;
+                return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+            }, true, () => { }, CancellationToken.None, NoDelay);
+            IntegrationTests.Require(actions == 1 && calls == 1 && images == 1 && task.Status == "needs_input"
+                && task.ReplanReason == boundary && task.PlanCursor == 1);
+        }
+        checks.Add("navigation-does-not-bypass-input-permission-manual-or-new-window-boundaries");
+
+        foreach (bool stalePlan in new[] { false, true })
+        {
+            int actions = 0, calls = 0, images = 0;
+            var task = new ScreenTaskSession("Reject stale plans after automatic refresh", Window.Id);
+            var first = Segment([Action(Element()), Action(Element("Old action", runtime: 2))]);
+            using var cancellation = new CancellationTokenSource();
+            await task.RunAsync((image, _) =>
+            {
+                if (image) images++;
+                return Task.FromResult(Screen(actions, Element(), Element("Old action", runtime: 2)) with
+                { ResourceId = actions == 0 ? Resource : "resource-next" });
+            }, (observation, progress, _) =>
+            {
+                calls++;
+                return Task.FromResult(Reply(observation, progress, first));
+            }, (_, _, _) =>
+            {
+                actions++;
+                return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
+            }, true, () =>
+            {
+                if (!stalePlan && task.ReplanReason == "resource_changed" && task.Running)
+                    cancellation.Cancel();
+            }, cancellation.Token, NoDelay);
+            IntegrationTests.Require(actions == 1 && calls == (stalePlan ? 2 : 1)
+                && images == (stalePlan ? 2 : 1) && task.PlanCursor == 1
+                && task.Status == (stalePlan ? "failed" : "cancelled")
+                && task.History.Single().Outcome == "screen_changed");
+        }
+        checks.Add("automatic-page-replanning-rejects-old-scope-plans-and-honors-cancellation-before-capture");
+    }
+
     internal static async Task RunAsync(List<string> checks)
     {
         await RunObservationRecoveryAsync(checks);
+        await RunAutomaticNavigationAsync(checks);
         foreach (int length in new[] { 3, 17, 31 })
         {
             int page = 0, modelCalls = 0, invocations = 0, captures = 0, shownStep = 0;
@@ -300,7 +464,7 @@ internal static class PlanTests
         }
         checks.Add("plan-limit-and-observation-refresh-automatically-after-safe-progress");
 
-        foreach (string interruption in new[] { "resource", "incomplete", "cancelled" })
+        foreach (string interruption in new[] { "unidentified", "other_window", "incomplete", "changing", "cancelled" })
         {
             int page = 0, calls = 0, images = 0;
             using var cancellation = new CancellationTokenSource();
@@ -308,10 +472,13 @@ internal static class PlanTests
             var plan = Segment([Action(Element())], "observation");
             await task.RunAsync((image, _) =>
             {
-                bool refresh = image && ++images == 2;
+                bool refresh = image && ++images >= 2;
+                if (refresh && interruption == "changing")
+                    return Task.FromException<Observation>(new CaptureResourceChangedException());
                 return Task.FromResult(Screen(page) with
                 {
-                    ResourceId = refresh && interruption == "resource" ? "resource-other" : Resource,
+                    WindowId = refresh && interruption == "other_window" ? "other-window" : Window.Id,
+                    ResourceId = refresh && interruption == "unidentified" ? null : Resource,
                     AutomationComplete = !refresh || interruption != "incomplete"
                 });
             }, (observation, progress, _) =>
@@ -328,7 +495,10 @@ internal static class PlanTests
                     cancellation.Cancel();
             }, cancellation.Token, NoDelay);
             IntegrationTests.Require(calls == 1 && page == 1 && task.PlanCursor == 1
-                && task.Status == (interruption == "cancelled" ? "cancelled" : "blocked"));
+                && task.Status == (interruption == "cancelled" ? "cancelled"
+                    : interruption == "other_window" ? "failed" : "blocked")
+                && images == (interruption == "cancelled" ? 1
+                    : interruption == "other_window" ? 2 : ScreenTaskSession.ObservationAttempts + 1));
         }
         checks.Add("automatic-replanning-stops-before-new-inference-on-scope-loss-or-cancellation");
 
@@ -386,7 +556,7 @@ internal static class PlanTests
             }
         }
 
-        foreach (string failure in new[] { "missing", "ambiguous", "replaced", "disabled", "password", "renamed", "value_drift", "resource" })
+        foreach (string failure in new[] { "missing", "ambiguous", "replaced", "disabled", "password", "renamed", "value_drift" })
         {
             int page = 0, calls = 0, actions = 0;
             var first = Element();
@@ -411,8 +581,7 @@ internal static class PlanTests
                         "value_drift" => [first, second with { ValueHash = AutomationEvidence.ValueDigest("unexpected"), ValueLength = 10 }],
                         _ => elements
                     };
-                return Task.FromResult(Screen(page, elements) with
-                { ResourceId = failure == "resource" && page > 0 ? "resource-other" : Resource });
+                return Task.FromResult(Screen(page, elements));
             }, (observation, progress, _) =>
             {
                 calls++;

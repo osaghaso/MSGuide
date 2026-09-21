@@ -1,5 +1,29 @@
 # Validation and known blockers
 
+## Automatic navigation and completion feedback — September 21, 2026
+
+The production task-loop regressions now cover multiple page/resource changes
+within one selected window without approval pauses: fresh screenshots and plans,
+retained task/history, no old-page target reuse, and final-page completion review.
+Input, permission, manual/new-window handoffs, failed grounding, cancellation and
+unknown outcomes remain stops. The isolated desktop build and all 42 self-test
+groups passed. Both model providers and the API passed 312 targeted tests,
+including historical old-page plans alongside newly scoped observations.
+
+The focused native feedback check passed: completion remains visible after
+4.2 seconds and expires after five seconds, including while the prompt is open.
+The marker and task details remain, expired feedback is not restored, and newer
+progress/error messages do not expire with the old completion timer. Foreground
+was unchanged.
+
+The browser fixture now changes its URL fragment after each button. Its updated
+live-model/native-action run verified the owned page identity but stopped at
+`browser-awaiting-user-foreground` before planning or invoking any action.
+Foreground checks were not bypassed. Thus the automatic navigation changes have
+production-loop coverage, but this updated live-browser scenario is not yet a
+passing end-to-end acceptance result. The successful earlier run below used the
+original same-page fixture.
+
 ## Live browser execution — September 21, 2026
 
 **The full `browser-e2e` path passed** on the owned local Edge fixture after the

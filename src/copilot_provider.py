@@ -69,8 +69,8 @@ non-password writable field, not an append or a keystroke. For scroll supply one
 scrollDirection; it moves one small semantic increment. Do not supply either input for other
 actions. Observed non-actionable text is context only, never an execution target.
 When planRequested is true, return status next_step, null root targetId, and a structured plan.
-Return all safely describable steps in this SAME selected window/resource up to the next
-resource, information, permission, observation, or unsupported-operation boundary. Do not
+Return all safely describable steps in the SAME selected window up to the next
+information, permission, observation, unsupported-operation or external-resource boundary. Do not
 return just one click when subsequent steps can be described. A plan has at most 32 steps.
 Each step has kind action or manual and instruction (at most 500 characters). An action
 uses exactly one approved targetId/targetIndex OR an exact semantic intent with role,
@@ -82,10 +82,15 @@ non-password field. Supply value/scrollDirection only for the respective action.
 Manual steps must be last. Finish with boundary {kind, reason, needed}. Kinds are
 completion_candidate, resource, needs_input, permission, observation, unsupported, plan_limit.
 Every non-completion boundary must explain what is needed next. At 32 steps use plan_limit,
-not completion. After observed progress, plan_limit and observation refresh the same approved
-resource automatically; use needs_input, permission or resource when human input or new authority
-is needed. Permission, new window/site/file, credentials and external resources require
-explicit handoff; do not fetch or grant them. Even completion_candidate is only a suggestion.
+not completion. After observed progress, plan_limit and observation automatically capture the
+selected window and request a fresh plan. Normal page changes within that window also trigger
+automatic capture and replanning; old-page targets are never reused. Continue the original goal
+from current evidence and history, without asking for approval just to recapture or continue.
+Use observation when navigation needs a new screen, not resource or permission. Use needs_input
+for missing user information, permission for a genuine new grant, and resource for another
+window or resources outside the approved task. Credentials and external resources still require
+explicit handoff; do not fetch or grant them. Even completion_candidate is only a suggestion
+and requires evidence from the final page, not an earlier page's expected outcome.
 Use an empty plan with a boundary when no safe next step is available. Do not silently fall
 back to single-step output for a plan request. Partial UIA may support descriptions, not execution.
 """

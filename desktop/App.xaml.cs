@@ -68,9 +68,10 @@ public partial class App : Application
                 else if (feedback)
                 {
                     stage = "persistent-companion-feedback";
-                    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(40));
                     await CaptureTests.CheckFeedbackVisibility(deadline.Token);
                     checks.Add("dpi-stable-outcomes-prompt-restoration-and-no-response-timeout");
+                    checks.Add("completion-only-five-second-expiry-keeps-details-and-never-hides-newer-feedback");
                 }
                 else if (control) await ControlTests.Run(checks, value => stage = value);
                 else if (controlComponent) await ControlTests.Run(checks, value => stage = value, component: true);

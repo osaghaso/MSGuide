@@ -51,6 +51,7 @@ internal static class SelfTests
         Check(new CaptureTests.CaptureFailure(new CaptureResourceChangedException()).Message == "resource-changed");
         Check(ScreenTaskSession.VerificationTimeout.TotalMilliseconds
             >= 2 * (2 * AutomationEvidence.ScanMilliseconds + AutomationEvidence.CaptureScanMilliseconds) + 250);
+        Check(CursorCompanionWindow.CompletionFeedbackLifetime == TimeSpan.FromSeconds(5));
         foreach (string url in new[] { "http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000" })
             Check(Safety.ApiUri(url).IsLoopback);
         foreach (string url in new[] { "https://127.0.0.1", "http://example.com", "http://127.0.0.1.evil.test", "http://user:secret@127.0.0.1", "http://127.0.0.1/api", "file:///tmp", "http://127.0.0.1/?token=x" })

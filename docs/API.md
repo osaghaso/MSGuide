@@ -130,8 +130,13 @@ Boundary kinds are `completion_candidate`, `resource`, `needs_input`,
 characters; `needed` is at most 1000 and mandatory/nonblank except for completion
 suggestions. A 32-step segment cannot claim completion; it must expose a boundary.
 After observed progress, `plan_limit` and `observation` automatically request a
-fresh plan on the same approved, completely inspectable resource. Other boundary
-kinds still stop for review. An empty plan never causes automatic replanning;
+fresh plan from the selected window. Normal page changes also trigger a new
+screenshot and plan without another approval; `observation`, not `resource` or
+`permission`, describes such navigation. The new page must be complete and
+identified, and each returned plan must match its new `resourceId`. The previous
+plan in `task` is descriptive history only. Completion guesses from the old page
+require fresh review by the planner. Actual input/permission/unsupported/new-window
+boundaries still stop. An empty plan never causes automatic replanning;
 the existing 10,000-decision protocol ceiling remains.
 
 Action intents use exact `role`, `label`, supported `action`, and optional exact
@@ -153,8 +158,10 @@ actionable match and a unique logical identity before creating a fresh target to
 
 The desktop reuses suitable post-action evidence for the next local binding.
 Routine expected changes do not cause another model call. It runs retained
-steps continuously; missing/changed targets and resource boundaries
-pause for explicit review/replanning. New windows are not selected automatically;
+steps continuously; page/resource changes within the selected window cause fresh
+capture and replanning, never reuse of an old-page target. Missing/changed targets
+and actual input/permission/external-resource boundaries still pause.
+New windows are not selected automatically;
 an explicit desktop user selection at a `resource` boundary rebinds the task only
 after the old plan is discarded and fresh evidence is required. Permissions
 are not granted, and external resources are not fetched automatically. Native

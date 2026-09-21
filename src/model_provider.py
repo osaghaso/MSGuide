@@ -41,18 +41,24 @@ can be acted on. For set_value return the explicit full-field replacement value 
 characters); do not append. For scroll return one listed scrollDirection for one small increment.
 For other actions omit value and scrollDirection. Unsupported steps are blocked, not completed.
 When planRequested is true, return status next_step and plan matching planSchema, without
-a root targetIndex/value/scrollDirection. Describe all steps within the selected window and
-resource until the next resource, missing information, permission, observation or unsupported
+a root targetIndex/value/scrollDirection. Describe all steps within the selected window
+until the next external resource, missing information, permission, observation or unsupported
 operation boundary, not just one click. Plans are limited to 32 steps; at that bound use
 plan_limit, never completion_candidate. After observed progress, plan_limit and observation
-refresh the same approved resource automatically; use needs_input, permission or resource
-when human input or new authority is needed. Each action uses an observed targetIndex OR an exact
+automatically capture the selected window and request a fresh plan. Normal page changes within
+that window also trigger automatic capture and replanning; old-page targets are never reused.
+Continue the original goal from current evidence and history, without asking for approval just
+to recapture or continue. Use observation when navigation needs a new screen, not resource or
+permission. Use needs_input for missing user information, permission for a genuine new grant,
+and resource for another window or resources outside the approved task. Completion requires
+evidence from the final page, not an earlier page's expected outcome.
+Each action uses an observed targetIndex OR an exact
 semantic intent (role, label, action, optional automationId/frameworkId, expected toggleState
 for toggles and isSelected false for selection). Never invent an opaque ID or coordinate.
 Future intents require unique fresh complete local grounding; they are not execution authority.
 Deferred set_value steps can replace only an EMPTY writable non-password field. Manual steps
 must be last. Every boundary needs a reason and, unless completion_candidate, what is needed
-next. Do not cross to another window/site/file, fetch resources or grant permissions.
+next. Do not select another window, acquire external resources, supply credentials or grant permissions.
 Return an empty plan with an explicit boundary if necessary. Partial approved evidence may
 support descriptive guidance but never execution. Do not substitute legacy single-step output.
 """
