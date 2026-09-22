@@ -18,12 +18,12 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 
 - `MSGUIDE_LOCAL_TOKEN`: required for `/v1` calls; inherited from the launcher, never embedded or persisted by this client.
 - `MSGUIDE_API_URL`: default `http://127.0.0.1:8000`. Only a literal loopback HTTP origin or `localhost` is accepted; localhost is pinned to 127.0.0.1. Proxies and redirects are disabled to prevent forwarding the token.
-- `MSGUIDE_HOTKEY`: optional, default `Ctrl+Alt+M`; examples `Ctrl+Shift+G` or `Alt+Shift+M`. Normal launch keeps the full workspace hidden and shows a click-through Windows-logo buddy 35 pixels right and 25 pixels below the pointer. The hotkey remembers the foreground app and opens a compact prompt beside the pointer. Its thinking and response bubble tracks the pointer at roughly 60 FPS, flips at screen edges, and never intercepts clicks. **Details** opens the full workspace for manual review, settings, and action approval. A registration conflict is reported in Details.
+- `MSGUIDE_HOTKEY`: optional, default `Ctrl+Alt+M`; examples `Ctrl+Shift+G` or `Alt+Shift+M`. The hotkey remembers the foreground app and opens the compact prompt. Camera recovery, Settings, permission approval, and manual screen review remain inside this view. There is no normal Details window. The logo can follow the pointer or stay pinned; a registration conflict keeps the compact prompt visible with a taskbar entry.
 - Expected backend: `GET /health` with status `ok`, version `0.2.0`, mode `demo`/`model`; authenticated `POST /v1/sessions` and `POST /v1/guidance`. No legacy assist/action routes are called.
 
 ## Try the supported workflow
 
-1. Start the local backend and desktop through the parent launcher. The Windows-logo buddy appears beside the pointer; the full workspace does not open first. Press `Ctrl+Alt+M` over the foreground app, choose Guide/Fix in the compact prompt, enter a question, and press Enter. Reopen it for the retained plan, boundary, clarification, continuation, and Stop. The buddy stays click-through. **Details** provides manual review and expanded controls: **DEMO** is deterministic sample guidance; **MODEL** is the configured provider, not enterprise authorization.
+1. Start the local backend and desktop through the parent launcher. Press `Ctrl+Alt+M` over the foreground app, choose Guide/Fix in the compact prompt, enter a question, and press Enter. Camera requests stay in the compact view for progress and approvals. **Settings** and manual screen review also use this view: **DEMO** is deterministic sample guidance; **MODEL** is the configured provider, not enterprise authorization.
 2. Click **Open demo**. A separate **MSGuide Demo** window shows a synthetic build dashboard; only **View logs** is initially available.
 3. Invoke the companion with the hotkey, type “Help me find the build error”, select **MSGuide Demo**, and click **Capture / review**.
 4. Inspect the actual image (expand full-size inspection if needed) and UI Automation text/element metadata. Pixel sharing defaults **off**. Check consent, optionally enable image sharing for a vision provider, then click **Send approved snapshot**. No capture is uploaded without this click.
@@ -44,6 +44,103 @@ Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository roo
 - Native overlay placement uses physical desktop coordinates and a PerMonitorV2 manifest; WPF draws the border in local DIPs. Negative origins and scale math have executable checks, but mixed-DPI monitor rendering/straddling windows still require runtime verification. Capture exclusion via `SetWindowDisplayAffinity` is best effort, not a security guarantee.
 - Citation URLs never open automatically; only a user click opens an HTTPS source. Other schemes display as non-clickable text. HTTPS does not imply that a source is trusted.
 - No tray dependency, enterprise sign-in, authorized enterprise retrieval, always-on voice, OCR engine, arbitrary keystrokes/coordinates, dragging, unrestricted automation, durable job system, or deployment is included.
+
+## Companion placement
+
+Companion placement is independent of task mode. **Follow pointer** is available
+in **Settings > Companion position**; uncheck it to stay
+in place. Drag the stationary logo or the **Move** control in Settings, or focus **Move**
+and use arrows (10 pixels; Shift+arrow for 1 pixel). `%LOCALAPPDATA%\MSGuide\companion-position.json`
+stores only the version, follow preference and pinned physical coordinates.
+Missing preferences retain the following default. Invalid/unreadable preferences
+and save failures are reported in the placement controls, not silently accepted.
+Disconnected-monitor positions are clamped to the nearest available work area.
+Following and action-target markers remain non-activating and click-through;
+only the stationary logo accepts deliberate dragging. An action marker never
+overwrites the saved position.
+Follow-mode window sizes are converted from logical units using the destination
+monitor's DPI. Logical content size is retained separately from native window
+bounds, so repeated position updates cannot shrink the logo or response bubble.
+Cross-monitor moves snap to the destination before easing resumes; eased
+positions stay inside that monitor's work area.
+Clicking a stationary logo uses the same invocation handler as the global hotkey;
+pointer movement must exceed the system drag threshold before repositioning.
+Drag completion and lost capture never open the prompt. Action markers remain
+non-interactive. The logo uses a content-only template rather than native button
+chrome. Shared legacy controls are hosted inside the compact workspace, not a
+second normal-use window.
+
+The compact prompt's voice controls reuse `SpeechService`, the input selection,
+and the shared editable draft. They show explicit recording/transcription
+controls, append, cancellation, input level, and a microphone selector/refresh.
+Both surfaces use `SpeechControlsState` for stop-pending/unknown-input gating.
+Typing cancels stale transcription; hiding the compact prompt cancels input;
+only explicit Ask submits a reviewed transcript.
+
+## Compact camera recovery
+
+The existing local state machine and controls are reused in the compact panel.
+Submitting a camera request in Fix mode grants one camera-on action for the
+selected Teams window after exact fresh UIA validation. This is request-scoped,
+not the generic Copilot session grant. Each Windows device/app/Teams permission
+scope and Teams restart still asks explicitly. Read-only diagnosis, Settings
+inspection, post-permission Teams inspection, and local verification advance
+without Next clicks. Bounded retries observe state only; actions are never retried.
+Guide mode cannot consume camera-on authority. Stop, dismissal, mode changes,
+question edits, terminal errors, and target changes revoke it.
+The compact selector uses two native radio choices, **Guide me** and **Fix it
+for me**, with fixed labels, a selection mark, and a separate keyboard-focus
+outline. Each choice requests its exact mode rather than toggling an implicit
+current value. Re-selecting the current mode is a no-op; selecting the other
+mode cancels/revokes through the shared controller before updating selection.
+
+Meeting discovery uses the shared bounded capture worker in controls-only mode:
+depth 32, complete context required, no pixels or target cache/approval created.
+Up to six Teams candidates are inspected; the invoked window must have a camera
+control, or a unique matching meeting/prejoin is chosen. Home/chat windows without
+camera controls are not selected. A disabled camera control can identify the
+surface, but invocation still requires fresh enabled/targetable evidence.
+Incomplete reads or multiple matching meetings cannot be guessed away.
+**Change meeting** clears the old target and pending authority. Settings
+launching and control changes do not hide the camera panel or move to Details.
+Reopening with the hotkey does not restart an active camera run. **Check again** is
+still a read-only reassessment, not renewed execution approval. Fixtures end in
+Fixture complete and cannot claim real readiness.
+An unresolved read-only result has its own terminal state, retaining the visible
+card and a correctly announced **Fix camera** action without retaining targets
+or authority. Discovery cancelled by a newer draft cannot overwrite that draft.
+Verified real readiness has an explicit **Resolved · camera ready** presentation.
+**Done** clears task/draft/approval state without invoking a camera action; it
+returns to the companion, or leaves the fresh compact prompt accessible if the
+global hotkey was unavailable. **Check again** remains secondary and read-only.
+Only passed real/fixture verifications offer Done; fixtures retain their
+simulation label, and already-working results do not claim an app-performed repair.
+The prompt uses a 440-DIP preferred width and content-fit height (160–560 DIPs,
+also clamped to the available work area). Native nonactivating resize keeps its
+top-left anchored during progress; content collapse reduces height instead of
+retaining a full-size legacy panel. The current camera status/action is flattened;
+secondary progress lives under More options, while full permission scope,
+restart warning, Stop, fixture identification and errors remain outside it.
+
+The compact voice primary uses a themed vector microphone/stop/processing/warning
+icon with a 44-DIP target beside Ask, keyboard focus, stateful accessible name, and explicit
+replacement-versus-append help. Cancellation remains visible while busy or input
+status is unknown. Device controls and idle Stop audio live in Settings > Microphone options.
+After a Guide-mode user changes permissions and asks for a check, read-only
+Teams inspection and verification continue automatically; Guide mode still
+performs no camera/permission action and never restarts Teams automatically.
+
+Camera approvals revalidate the same stable UIA control identity, exact scope,
+provider, window identity/title/bounds, and observation freshness. A harmless
+control-label/layout redraw can produce a new snapshot fingerprint; MSGuide
+uses that freshly verified fingerprint for exact native lookup instead of
+mistaking it for a different selected window. Replaced/ambiguous controls,
+incomplete evidence, expired observations, and changed scopes still stop.
+An already-enabled control is not toggled; fresh observation and readiness
+verification follow, with each subsequent permission scope still separately
+approved. Failed pre-action revalidation clears authority and reports
+**Camera control needs another check**, not a claim that the user changed
+windows. No action is automatically retried.
 
 ## Generic task progress and continuation
 
@@ -111,7 +208,7 @@ The exported 200 elements prioritize actions and document/known scope markers.
 Text/context cropping is reported separately from traversal failure; it does not
 discard verified action controls. Camera `RequireComplete()` still rejects
 cropped context. Diagnostics record node count, elapsed time and the limiting
-condition without recording UI text. Hotkey conflicts keep Details visible;
+condition without recording UI text. Hotkey conflicts keep the compact prompt visible;
 the default stays Ctrl+Alt+M rather than silently assigning a different shortcut.
 
 Statuses distinguish `checkpoint`, `needs_input`, `blocked`, `no_progress`,
@@ -123,8 +220,8 @@ Capture-access denials retain a `failed` checkpoint before invocation, or an
 `unknown` outcome while checking an invoked action; uncertain actions are not
 replayed. Companion action results use their recorded step numbers, not the
 invocation count, including across continuation and the rolling history bound.
-The buddy no longer auto-hides final task states; the compact prompt and Details
-retain the plan/cursor, boundary and needed input. They share the same mode,
+The buddy no longer auto-hides final task states; the compact prompt and its shared
+workspace retain the plan/cursor, boundary and needed input. They share the same mode,
 continue/reply and Stop handlers, not separate task engines. Current evidence is disposed on
 stop; bounded task text stays only until explicit clearing/replacement/exit.
 

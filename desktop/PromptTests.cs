@@ -468,7 +468,7 @@ internal static class PromptTests
             }
             finally { companionPrompt.Close(); }
             Environment.SetEnvironmentVariable("MSGUIDE_DEVELOPER_TOOLS", "0");
-            var window = new MainWindow();
+            var window = new MainWindow(new SpeechService(), new CompanionPosition());
             try { window.CheckPromptComposer(); }
             finally { window.Close(); }
             Environment.SetEnvironmentVariable("MSGUIDE_DEVELOPER_TOOLS", "1");
@@ -497,6 +497,9 @@ public partial class MainWindow
         loaded = true;
         try
         {
+            Check(WindowStyle == WindowStyle.None && ResizeMode == ResizeMode.CanResize
+                && System.Windows.Shell.WindowChrome.GetWindowChrome(this) is
+                    { CaptionHeight: 34, UseAeroCaptionButtons: false });
             var peer = new ButtonAutomationPeer(AskPromptButton);
             Check(peer.GetName() == "Ask MSGuide" && AskPromptButton.Focusable
                 && !AskPromptButton.IsDefault && PromptBox.AcceptsReturn);
@@ -508,11 +511,26 @@ public partial class MainWindow
                 && CameraRecoveryCard.Visibility == Visibility.Collapsed
                 && InteractionModePanel.Visibility == Visibility.Visible
                 && Within(PromptBox, WorkspaceScroll)
-                && Within(CameraRecoveryCard, WorkspaceScroll)
-                && Within(SettingsExpander, WorkspaceScroll));
+                && Within(CameraRecoveryCard, companion.Prompt)
+                && Within(SettingsExpander, companion.Prompt)
+                && Within(ScreenContextExpander, companion.Prompt)
+                && companion.Prompt.SettingsButton.Content?.ToString() == "Settings"
+                && companion.Prompt.HasCameraWorkspace);
+            companion.Prompt.SettingsButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(SettingsExpander.IsExpanded && companion.Prompt.SettingsVisible && !IsVisible);
+            companion.Prompt.SettingsButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(!SettingsExpander.IsExpanded && !companion.Prompt.SettingsVisible);
             Check(CameraStatePanel.Visibility == Visibility.Collapsed
                 && CameraProgressPanel.Visibility == Visibility.Collapsed
                 && CameraIdleHint.Visibility == Visibility.Visible);
+            var position = companion.Position;
+            position.SetFollowing(false, new Native.POINT { X = 120, Y = 160 });
+            Check(FollowPointerSetting.IsChecked == false
+                && companion.Prompt.FollowPointerControl.IsChecked == false
+                && companion.Prompt.MoveControl.IsEnabled);
+            FollowPointerSetting.IsChecked = true;
+            Check(position.FollowPointer && companion.Prompt.FollowPointerControl.IsChecked == true
+                && !companion.Prompt.MoveControl.IsEnabled);
             PromptBox.Text = "";
             Check(!AskPromptButton.IsEnabled);
             PromptBox.Text = "Help me fix my camera in Teams";

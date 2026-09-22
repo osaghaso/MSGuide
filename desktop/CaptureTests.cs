@@ -5,6 +5,7 @@ using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -209,6 +210,16 @@ internal static class CaptureTests
             stage("dense-visible-controls");
             await CheckDenseControls(ct);
             checks.Add("dense-context-does-not-hide-action-controls-or-enable-background-input");
+            checks.Add("pinned-companion-native-position-keyboard-move-target-restore-no-activation");
+            stage("compact-camera-flow");
+            await CompactCameraTests.RunNativeAsync(ct);
+            checks.Add("compact-camera-automatic-fix-separate-permissions-guide-stop-no-retry");
+            stage("camera-surface-discovery");
+            await CameraWindowDiscoveryTests.RunNativeAsync(ct);
+            checks.Add("camera-discovery-owned-uia-no-pixels-disabled-control-no-action");
+            stage("camera-control-revalidation");
+            await CameraTargetRevalidationTests.RunNativeAsync(ct);
+            checks.Add("camera-revalidation-owned-layout-drift-single-toggle-replacement-rejected");
             stage("complete");
         }
         finally { demo.Hide(); demo.Close(); }
@@ -266,7 +277,9 @@ internal static class CaptureTests
             var rebound = await Task.Run(() => AutomationEvidence.FindUniqueTarget(window, snapshot.Rect,
                 element.TargetId!, element.Label, element.AutomationId, ct, snapshot.ResourceId), ct);
             Require(rebound is not null);
-            var marker = new CursorCompanionWindow();
+            var position = new CompanionPosition();
+            int openRequests = 0;
+            var marker = new CursorCompanionWindow(position, () => openRequests++);
             var outline = new OverlayWindow();
             try
             {
@@ -282,8 +295,109 @@ internal static class CaptureTests
                     && markerRect.Right >= targetRect.X + targetRect.Width / 2
                     && markerRect.Top <= targetRect.Y + targetRect.Height / 2
                     && markerRect.Bottom >= targetRect.Y + targetRect.Height / 2);
+                var pinned = new Native.POINT { X = snapshot.Rect.Left + 60, Y = snapshot.Rect.Top + 60 };
+                position.SetFollowing(false, pinned);
+                Require(!marker.CanMove && !marker.IsHitTestVisible);
+                marker.ShowIdle();
+                await Idle(ct);
+                var markerHandle = new WindowInteropHelper(marker).Handle;
+                Require(CompanionPlacement.TryPinned(pinned, 48, 48, out var expected)
+                    && marker.CanMove && marker.IsHitTestVisible
+                    && Native.GetForegroundWindow() == foreground
+                    && Native.GetWindowRect(markerHandle, out var pinnedRect) && expected.Same(pinnedRect)
+                    && (Native.GetWindowLong(markerHandle, -20) & 0x20) == 0);
+                var open = new ButtonAutomationPeer(marker.OpenControl).GetPattern(PatternInterface.Invoke) as IInvokeProvider;
+                Require(open is not null);
+                open!.Invoke();
+                await Idle(ct);
+                Require(openRequests == 1 && Native.GetForegroundWindow() == foreground
+                    && marker.OpenControl.Template.LoadContent() is ContentPresenter
+                    && marker.BorderThickness == new Thickness(0));
+                position.MoveTo(new Native.POINT { X = pinned.X + 80, Y = pinned.Y + 40 });
+                var savedPosition = position.Preference;
+                Require(marker.ShowActionTarget(snapshot.Rect, element.Box));
+                await Idle(ct);
+                Require(!marker.CanMove && !marker.IsHitTestVisible
+                    && (Native.GetWindowLong(markerHandle, -20) & 0x20) != 0
+                    && position.Preference == savedPosition && Native.GetForegroundWindow() == foreground);
+                Require(!marker.OpenControl.IsEnabled && openRequests == 1);
+                marker.ShowResponse("Synthetic stationary response");
+                await Idle(ct);
+                Require(CompanionPlacement.TryPinned(position.Anchor!.Value, 390, 154, out expected)
+                    && Native.GetWindowRect(markerHandle, out pinnedRect) && expected.Same(pinnedRect)
+                    && position.Preference == savedPosition && Native.GetForegroundWindow() == foreground);
+                position.SetFollowing(true, default);
+                Require(!marker.CanMove && !marker.IsHitTestVisible);
+                foreach (var (show, logicalSize) in new (Action Show, Size Size)[]
+                {
+                    (marker.ShowIdle, new Size(48, 48)),
+                    (marker.ShowProcessing, new Size(390, 76)),
+                    (() => marker.ShowResponse("Synthetic scaled response"), new Size(390, 154)),
+                    (marker.ShowIdle, new Size(48, 48))
+                })
+                {
+                    show();
+                    await Task.Delay(80, ct);
+                    await Idle(ct);
+                    marker.UpdateLayout();
+                    var dpi = VisualTreeHelper.GetDpi(marker);
+                    Require(Native.GetWindowRect(markerHandle, out var floating)
+                        && Math.Abs(floating.Width - Math.Ceiling(logicalSize.Width * dpi.DpiScaleX)) <= 1
+                        && Math.Abs(floating.Height - Math.Ceiling(logicalSize.Height * dpi.DpiScaleY)) <= 1
+                        && marker.LogicalContentSize == logicalSize
+                        && Native.GetForegroundWindow() == foreground && !marker.IsHitTestVisible);
+                    var logo = marker.LogoBounds;
+                    Require(logo.Left >= 0 && logo.Top >= 0
+                        && logo.Right <= marker.ActualWidth + 0.1 && logo.Bottom <= marker.ActualHeight + 0.1);
+                }
             }
             finally { marker.Stop(); outline.Close(); }
+            var promptPosition = new CompanionPosition();
+            promptPosition.SetFollowing(false,
+                new Native.POINT { X = snapshot.Rect.Left + 40, Y = snapshot.Rect.Top + 40 });
+            var prompt = new CompanionPromptWindow(_ => Task.CompletedTask, () => { },
+                position: promptPosition) { ShowActivated = false };
+            try
+            {
+                nint foreground = Native.GetForegroundWindow();
+                prompt.SetSettingsVisible(true);
+                prompt.PositionPrompt();
+                prompt.Show();
+                await Idle(ct);
+                var promptHandle = new WindowInteropHelper(prompt).Handle;
+                Require(Native.GetWindowRect(promptHandle, out var before));
+                Require(CompanionPlacement.TryPinned(promptPosition.Anchor!.Value, prompt.Width, prompt.Height, out var expected)
+                    && expected.Same(before)
+                    && Native.GetForegroundWindow() == foreground
+                    && prompt.MoveControl.IsVisible && prompt.MoveControl.ActualWidth > 0
+                    && prompt.MoveControl.TranslatePoint(new Point(0, prompt.MoveControl.ActualHeight), prompt).Y
+                        <= prompt.ActualHeight);
+                CompanionPositionTests.CheckMoveAccessibility(prompt.MoveControl);
+                Require(prompt.MoveControl.MoveWithKey(Key.Right, ModifierKeys.None)
+                    && promptPosition.Anchor is { } moved && moved.X == before.Left + 10 && moved.Y == before.Top);
+                Require(prompt.MoveControl.MoveWithKey(Key.Down, ModifierKeys.Shift)
+                    && promptPosition.Anchor is { } fine && fine.Y == before.Top + 1);
+                Require(!prompt.MoveControl.MoveWithKey(Key.Right, ModifierKeys.Control));
+                await Idle(ct);
+                Require(Native.GetWindowRect(promptHandle, out var after));
+                Require(Native.GetForegroundWindow() == foreground
+                    && after.Left == before.Left + 10 && after.Top == before.Top + 1);
+                promptPosition.SetFollowing(true, default);
+                prompt.UpdateCamera(true);
+                prompt.UpdateTask(CameraRecoveryInteractionMode.Control, null, false, true, cameraActive: true);
+                prompt.UpdateCamera(false);
+                prompt.SetSettingsVisible(false);
+                await Idle(ct);
+                Require(Native.GetWindowRect(promptHandle, out var stable)
+                    && stable.Left == after.Left && stable.Top == after.Top
+                    && stable.Width == after.Width && stable.Height <= after.Height
+                    && prompt.WorkspaceScroll is CompactScrollViewer);
+                prompt.MoveControl.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice,
+                    PresentationSource.FromVisual(prompt), Environment.TickCount, Key.Escape)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                Require(!prompt.IsVisible);
+            }
+            finally { prompt.Close(); }
             Require(Native.GetForegroundWindow() != handle);
             var result = await DesktopAction.ExecuteAsync(window, snapshot.Rect, snapshot.CapturedAt,
                 target, ct, snapshot.ResourceId);

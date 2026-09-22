@@ -14,27 +14,26 @@ public partial class MainWindow
     {
         if (MicButton is null || AddVoiceButton is null) return;
         bool hasDraft = !string.IsNullOrWhiteSpace(PromptBox.Text);
-        MicButton.Content = speech.Stopping ? "Stopping microphone..."
-            : speech.Finishing ? "Transcribing..."
-            : speech.Listening ? "Stop & transcribe"
-            : hasDraft ? "New voice question" : "Start microphone";
-        System.Windows.Automation.AutomationProperties.SetName(MicButton,
-            speech.Listening ? "Stop recording and transcribe"
-            : "Record a new voice question; replace the draft only after recognition succeeds");
-        MicButton.IsEnabled = !speech.Finishing && !speech.Stopping && !speech.InputStopUnconfirmed
-            && MicrophonePicker.SelectedItem is MicrophoneChoice;
-        AddVoiceButton.Visibility = hasDraft && !speech.Busy
+        var state = SpeechControlsState.From(speech, hasDraft, MicrophonePicker.SelectedItem is MicrophoneChoice);
+        MicButton.Content = state.RecordLabel;
+        System.Windows.Automation.AutomationProperties.SetName(MicButton, state.RecordName);
+        MicButton.IsEnabled = state.CanRecord;
+        AddVoiceButton.Visibility = state.ShowAppend
             ? Visibility.Visible : Visibility.Collapsed;
-        AddVoiceButton.IsEnabled = !speech.Busy && MicrophonePicker.SelectedItem is MicrophoneChoice;
-        MicrophoneStateText.Text = speech.InputStopUnconfirmed ? "MIC STATUS UNKNOWN"
-            : speech.Stopping ? "MIC STOPPING"
-            : speech.Finishing ? "TRANSCRIBING" : speech.Listening ? "MIC ON" : "MIC OFF";
-        MicrophonePicker.IsEnabled = !speech.Busy;
+        AddVoiceButton.IsEnabled = state.CanAppend;
+        MicrophoneStateText.Text = state.InputState;
+        MicrophonePicker.IsEnabled = state.CanSelectInput;
         RefreshMicrophonesButton.IsEnabled = MicrophonePicker.IsEnabled;
-        StopAudioButton.Content = speech.Finishing ? "Cancel transcription" : "Stop audio";
-        System.Windows.Automation.AutomationProperties.SetName(StopAudioButton,
-            speech.Finishing ? "Cancel local transcription" : "Stop dictation and playback");
-        SpeechInputPanel.Visibility = speech.Listening ? Visibility.Visible : Visibility.Collapsed;
+        StopAudioButton.Content = state.StopLabel;
+        System.Windows.Automation.AutomationProperties.SetName(StopAudioButton, state.StopName);
+        SpeechInputPanel.Visibility = state.ShowLevel ? Visibility.Visible : Visibility.Collapsed;
+        if (companion is not null)
+        {
+            companion.Prompt.Voice.Update(state, MicrophonePicker.Items.OfType<MicrophoneChoice>().ToArray(),
+                MicrophonePicker.SelectedItem as MicrophoneChoice, SpeechText.Text,
+                SpeechPreviewText.Text, SpeechInputLevel.Value);
+            companion.Prompt.UpdateDraft(PromptBox.Text, AskPromptButton.IsEnabled);
+        }
     }
 
     private void StartVoiceDraft(bool append)
@@ -89,6 +88,7 @@ public partial class MainWindow
             SpeechText.Text = "Microphone devices could not be listed. Check Sound input settings and refresh.";
             System.Windows.Automation.AutomationProperties.SetHelpText(SpeechText, SpeechText.Text);
         }
+        UpdateSpeechControls();
     }
 
     private void RefreshMicrophones_Click(object sender, RoutedEventArgs e)

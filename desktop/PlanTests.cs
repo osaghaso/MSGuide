@@ -503,10 +503,10 @@ public partial class MainWindow
             compact.ContinueTaskButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             IntegrationTests.Require(task.UserInput == "Synthetic clarification"
                 && PromptFeedbackText.Text.Contains("approve screen context", StringComparison.Ordinal));
-            compact.SwitchModeButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            compact.FixModeOption.IsChecked = true;
             IntegrationTests.Require(SelectedCameraMode == CameraRecoveryInteractionMode.Control
                 && task.ReplanRequired && compact.ModeDescription.Contains("FIX", StringComparison.Ordinal));
-            compact.SwitchModeButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            compact.GuideModeOption.IsChecked = true;
             IntegrationTests.Require(SelectedCameraMode == CameraRecoveryInteractionMode.Guide);
             compact.StopTaskButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             IntegrationTests.Require(task.Status == "cancelled" && !task.CanContinue

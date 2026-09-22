@@ -3,7 +3,8 @@ using System.Windows.Automation;
 
 namespace MSGuide.Desktop;
 
-internal sealed record DesktopActionResult(bool Invoked, bool OutcomeKnown, string Detail);
+internal sealed record DesktopActionResult(
+    bool Invoked, bool OutcomeKnown, string Detail, bool StateAlreadySatisfied = false);
 
 internal static class DesktopAction
 {

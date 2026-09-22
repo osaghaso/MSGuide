@@ -325,10 +325,10 @@ internal static class CameraRecoveryTests
             session.Reset(mode);
             session.ApplyReadOnlyAssessment(CameraRecoverySession.AssessCurrentAsync(
                 sensing, window, mode, CancellationToken.None).GetAwaiter().GetResult());
-            Check(session.State == CameraRecoveryState.Idle && session.CanSelectMode
+            Check(session.State == CameraRecoveryState.ReadOnlyAssessment && session.CanSelectMode
                 && session.Target is null && !session.CanControlTarget && !session.CanShowTarget
                 && !session.LocalVerifierPassed,
-                "an unresolved reassessment leaves modes editable and discards actionable targets");
+                "an unresolved reassessment keeps a visible terminal result, editable modes, and no action authority");
         }
     }
 

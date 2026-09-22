@@ -12,7 +12,7 @@ explicit limits; do not present it as unrestricted desktop automation.
 
 - An unlocked Windows 11 desktop. The live scenario was exercised on an ARM64
   Snapdragon PC with English-language Teams.
-- PowerShell 7, .NET SDK 10.0.303 (or the patch allowed by `global.json`),
+- PowerShell 7, .NET SDK 10.0.400 (or the patch allowed by `global.json`),
   and Windows x64 CPython 3.11.9. Use x64 Python on ARM64 Windows for these locks.
 - A working camera and a visible **Teams meeting or prejoin** window.
 - For voice: a microphone and the local Whisper English model.
@@ -74,8 +74,8 @@ Port 8765 is the default when `-Port` is omitted. If the requested port is busy,
 close the existing owned instance normally or choose another port; the launcher
 does not kill unrelated processes.
 
-`-Copilot` configures the SDK for **GPT-6 Astra**, `xhigh` reasoning and
-`long_context`, subject to model entitlement. The SDK supplies reviewed
+`-Copilot` configures the SDK for **GPT-6 Astra**, `low` reasoning and
+the `default` context tier unless overridden, subject to model entitlement. The SDK supplies reviewed
 screen-context guidance. **Camera diagnosis/actions and Whisper transcription
 remain local**; the camera state machine is not driven by an unrestricted model.
 See [provider setup](../MODEL_SETUP.md) for overrides and data handling.
@@ -85,17 +85,21 @@ See [provider setup](../MODEL_SETUP.md) for overrides and data handling.
 Prepare the Teams prejoin with its camera toggle **off**, while Windows
 device-wide camera access, app camera access, and Teams permission are **on**.
 
-1. In MSGuide, select **Fix it for me**.
-2. Type **My camera isn't working in Teams** and select **Ask MSGuide**, or
+1. Put the Teams meeting/prejoin in the foreground, press **Ctrl+Alt+M**, and
+   select **Fix it for me** in the compact prompt.
+2. Type **My camera isn't working in Teams** and select **Ask**, or
    press Enter. Typing alone must not start recovery; Shift+Enter adds a line.
-3. If asked, select the exact meeting/prejoin window. Selection triggers
-   read-only inspection automatically.
-4. Review **Approve & turn camera on**. Asking the question did not authorize
-   this action.
-5. Approve once. MSGuide reacquires and validates the observed UI Automation
-   control, invokes it once, and inspects the result.
-6. Confirm the real Teams preview appears. MSGuide should show **Camera ready**
+3. MSGuide identifies the open meeting/prejoin by its actual camera controls,
+   not the Teams home/chat window. No window choice is needed when one meeting
+   matches. It asks only for ambiguous meetings or incomplete inspection.
+4. Submitting this Fix request authorizes one camera-on action, not permission
+   changes or restart. MSGuide inspects, reacquires the exact control, invokes
+   once if needed, then verifies automatically. No Details or Next step is needed.
+5. Confirm the real Teams preview appears. MSGuide should show **Resolved · camera ready**
    only after Teams reports camera on and Windows reports active camera use.
+6. Select **Done** to clear the finished question and return to the small
+   companion. This does not turn the camera off or undo permission changes.
+   **Check again** is secondary and performs a fresh read-only check.
 
 An enabled camera button alone is not readiness. If the camera fails, the app
 must describe the blocker rather than claim success or automatically retry.
@@ -113,13 +117,18 @@ Allow**.
 3. Expect a device-wide permission diagnosis, not an immediate camera-on offer.
    Disabled child toggles must not be mistaken for policy-managed controls when
    the parent switch is off.
-4. Select **Open Camera settings**, then inspect the actual Camera privacy page.
+4. MSGuide opens Camera settings and inspects the actual Camera privacy page
+   automatically. The compact panel stays available for approvals.
 5. Review **Approve & enable Camera access**. Its disclosure must explain that
    this change affects other apps that already have camera permission.
 6. Approve that scope only. If app-level or Teams-level permission is also off,
    each next scope requires a separate approval.
-7. After permissions are on, MSGuide returns to fresh Teams inspection.
-   **Turning on the Teams camera requires its own approval.**
+7. After permissions are on, MSGuide returns to fresh Teams inspection and uses
+   the submitted Fix request's unconsumed camera-on authority. Each action is
+   revalidated; a changed Teams window revokes that authority.
+   An already-enabled setting is not toggled again. A control redrawing does
+   not count as a new selected window when its stable identity and scope still
+   match; a replaced or unavailable control stops with a specific explanation.
 8. If a Teams restart is necessary, it requires a further explicit approval;
    it can end an active meeting. Reopening the camera surface manually is an
    alternative.
@@ -134,21 +143,22 @@ Teams.
 | --- | --- |
 | **Guide me**, camera off | MSGuide identifies and shows the verified control; the user changes it and requests another check. No automatic control action. |
 | Camera already working | A fresh question recognizes camera-on plus current Windows active-use evidence and reports **Already working**. No new off-to-on transition is required. |
-| **Start over** after success | A fresh, read-only reassessment recognizes the current state. It does not toggle the camera, reuse approval, or create a false failure. |
+| **Check again** after success | A fresh, read-only reassessment recognizes the current state. It does not toggle the camera or reuse approval. An unresolved result stays in the same card; **Fix camera** explicitly requests a fresh repair. |
 | **Stop recovery** | Pending recovery is cancelled and modes become selectable. |
-| **Stop & switch** beside locked modes | The old run and approval are cleared before the other mode is selected. Completed changes are not undone. |
+| Select the other **Guide me / Fix it for me** choice | The old run and approval are cleared before that exact mode is selected. The selected mode has a visible mark; clicking it again does not stop or toggle the task. Completed changes are not undone. |
 | Edit the question | Old work/approval is cancelled and task-specific UI resets for the new draft. |
+| **Change meeting** | Clears the old observations and camera-on authority before opening the picker. A new target needs a new request or an explicit camera-on approval. |
 
 ## Voice case
 
-1. Select **Voice settings**, choose the intended microphone, then return to the
+1. Open **Settings > Microphone options**, choose the intended input, then return to the
    question. The live test used the built-in Qualcomm array; a Scarlett input
    was also available. Selecting an input in MSGuide does not change Windows'
    default input.
-2. Select **Start microphone** and say **Check my Teams camera**.
+2. Select the **microphone icon** and say **Check my Teams camera**.
 3. Watch the input meter. For a low signal, check the selected device, distance,
    volume, and hardware mute rather than assuming the recognizer is working.
-4. Select **Stop & transcribe**. The microphone closes before local Whisper
+4. Select the **stop icon**, labeled **Stop & transcribe**. The microphone closes before local Whisper
    inference. Recording is capped at 30 seconds; transcription has a 45-second
    deadline and normally takes several seconds on the tested machine.
 5. Review and correct the resulting text. Recognition may use forms such as
@@ -161,7 +171,7 @@ Repeat-recording behavior:
 | Action | Expected behavior |
 | --- | --- |
 | **New voice question** | The previous draft stays until new speech is successfully recognized, then is replaced. |
-| **Add more** | New speech is explicitly appended to the existing question. |
+| **Append** | New speech is explicitly appended to the existing question. |
 | Cancel or fail a replacement | The existing draft is retained. |
 | Type while recording/transcribing | Pending speech is cancelled so late results cannot overwrite the edits. |
 | **Cancel transcription** | Local processing is cancelled; no question is submitted. |
@@ -172,11 +182,15 @@ require human review; successful recognition is not permission to act.
 
 ## Product-shell checks
 
-- Startup shows **Your guide to getting things done at Microsoft**, a blank
-  question, and the two interaction modes.
+- Open the compact prompt with the hotkey or stationary logo. It contains the
+  question, Guide/Fix mode, microphone controls, camera workflow and Settings.
+  Camera requests must not open a separate Details window.
 - There is no normal **Advanced** section, synthetic task launcher, or demo
   framing.
 - **Settings** contains voice, connection, and privacy controls.
+- The window fits its content. The mic is beside Ask; camera progress and
+  secondary controls are under **More options**. Scope approvals, Stop, restart
+  warnings, fixture labels and unresolved errors remain in the main view.
 - **Check connection** must not cancel or overwrite a completed camera result.
 - At a small window size, the workspace can scroll to the question, task
   actions, Settings, and approvals.
@@ -192,9 +206,9 @@ require human review; successful recognition is not permission to act.
 | --- | --- |
 | Ask | Blank MSGuide question, **Fix it for me**, and a real Teams prejoin with camera off. |
 | Inspect | Type the camera question and choose the correct window if needed. |
-| Approve | The specific camera-on approval; or the separately scoped Windows permission approval if demonstrating that branch. |
+| Repair | The submitted Fix request permits camera-on once. Show a separate permission approval only if that scope is blocked; routine checks advance automatically. |
 | Verify | The real preview and **Camera ready**, not merely a green scripted indicator. |
-| Reassess | **Start over** reports **Already working** without making another change. |
+| Reassess | **Check again** reports **Already working** without making another change. |
 | Voice | Speak a new question, stop, review its local transcript, then ask. |
 
 Avoid changing permission state midway through an unrelated meeting or showing

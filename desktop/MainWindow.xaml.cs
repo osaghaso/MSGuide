@@ -40,19 +40,27 @@ public partial class MainWindow : Window
 
     public MainWindow() : this(new SpeechService()) { }
 
-    internal MainWindow(SpeechService speech)
+    internal MainWindow(SpeechService speech, CompanionPosition? companionPosition = null)
     {
         this.speech = speech;
         InitializeComponent();
-        companion = new CompanionShell(SubmitCompanionPromptAsync, ShowDetailsNearCursor,
+        companion = new CompanionShell(SubmitCompanionPromptAsync, ToggleCompactSettings,
             ContinueScreenTaskAsync, () => StopScreenTask_Click(this, new RoutedEventArgs()),
-            () => CameraSwitchMode_Click(this, new RoutedEventArgs()),
-            text => PromptBox.Text = text);
+            SelectCameraMode,
+            text => PromptBox.Text = text, companionPosition, InvokeNearCursor,
+            new CompanionVoiceActions(
+                () => Mic_Click(this, new RoutedEventArgs()),
+                () => AddVoice_Click(this, new RoutedEventArgs()),
+                () => StopSpeech_Click(this, new RoutedEventArgs()),
+                () => RefreshMicrophones_Click(this, new RoutedEventArgs()),
+                input => MicrophonePicker.SelectedItem = input,
+                () => { if (!closing) speech.Stop(); }));
         MicrophonePicker.ItemsSource = new[] { MicrophoneChoice.Default };
         MicrophonePicker.SelectedItem = MicrophoneChoice.Default;
         ConfigureScreenShareStatus();
         ConfigureProductShell();
         InitializeCameraRecovery();
+        ConfigureCompactWorkspace();
         UpdateCompactTaskUi();
         speech.Transcribed += ApplyTranscript;
         speech.StatusChanged += status =>
@@ -69,8 +77,14 @@ public partial class MainWindow : Window
             if (closing) return;
             SpeechPreviewText.Text = string.IsNullOrWhiteSpace(text) ? "" : $"Hearing: {text}";
             SpeechPreviewText.Visibility = string.IsNullOrWhiteSpace(text) ? Visibility.Collapsed : Visibility.Visible;
+            companion.Prompt.Voice.UpdateFeedback(SpeechText.Text, SpeechPreviewText.Text);
         };
-        speech.AudioLevelChanged += level => { if (!closing) SpeechInputLevel.Value = level; };
+        speech.AudioLevelChanged += level =>
+        {
+            if (closing) return;
+            SpeechInputLevel.Value = level;
+            companion.Prompt.Voice.InputLevel.Value = level;
+        };
         SourceInitialized += InitializeNative;
         Loaded += async (_, _) =>
         {
@@ -107,7 +121,7 @@ public partial class MainWindow : Window
                 { "ctrl" or "control" => 2u, "alt" => 1u, "shift" => 4u, "win" => 8u, _ => throw new FormatException() };
             if (parts.Length < 2 || !Enum.TryParse<Key>(parts[^1], true, out var key) || key == Key.None) throw new FormatException();
             hotkeyRegistered = Native.RegisterHotKey(Handle, 0x4D47, modifiers, (uint)KeyInterop.VirtualKeyFromKey(key));
-            HotkeyText.Text = hotkeyRegistered ? $"{configured} · show near cursor   |   Esc · dismiss"
+            HotkeyText.Text = hotkeyRegistered ? $"{configured} · show companion   |   Esc · dismiss"
                 : "Hotkey unavailable (already registered). Use the taskbar to reopen MSGuide.";
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
@@ -136,7 +150,7 @@ public partial class MainWindow : Window
 
     private void InvokeNearCursor()
     {
-        if (screenTask is null || !cameraRecovery.CanStart || demoTask is not null || notepadTask is not null)
+        if (cameraRecovery.CanStart && (screenTask is null || demoTask is not null || notepadTask is not null))
             CancelWork();
         speech.Stop();
         nint previousForeground = Native.GetForegroundWindow();
@@ -159,29 +173,23 @@ public partial class MainWindow : Window
     public void StartCompanionMode()
     {
         companion.Start();
-        if (hotkeyRegistered) Hide();
-        else
+        Hide();
+        if (!hotkeyRegistered)
         {
-            ShowDetailsNearCursor();
-            StatusText.Text = HotkeyText.Text;
+            companion.Prompt.ShowInTaskbar = true;
+            companion.Invoke(PromptBox.Text);
+            ShowPromptFeedback(HotkeyText.Text);
         }
-    }
-
-    private void ShowDetailsNearCursor()
-    {
-        WindowState = WindowState.Normal;
-        Show();
-        if (CompanionPlacement.TryCurrent(620, 800, out var rect))
-            Native.SetWindowPos(Handle, 0, rect.Left, rect.Top, rect.Width, rect.Height, 0x14);
-        Activate();
-        PromptBox.Focus();
-        PromptBox.CaretIndex = PromptBox.Text.Length;
     }
 
     private async Task SubmitCompanionPromptAsync(string text)
     {
         PromptBox.Text = text;
-        companion.ShowProcessing();
+        if (!CameraRecoverySession.IsCameraHelpIntent(text))
+        {
+            companion.Prompt.Hide();
+            companion.ShowProcessing();
+        }
         await SubmitPromptAsync();
     }
 
@@ -194,9 +202,9 @@ public partial class MainWindow : Window
         WindowPicker.SelectedItem = windows.FirstOrDefault(w => w.Id == invokedWindow?.Id)
             ?? windows.FirstOrDefault(w => w.Id == selected?.Id)
             ?? windows.FirstOrDefault(w => w.Title == "MSGuide Demo");
-        invokedWindow = null;
         refreshing = false;
         RefreshCameraWindows(windows);
+        invokedWindow = null;
     }
 
     private CancellationToken BeginWork(bool preserveScreenTask = false)
@@ -376,7 +384,7 @@ public partial class MainWindow : Window
                 || response.Plan is not null && !Safety.ValidPlan(response.Plan, observation))
                 throw new InvalidOperationException("Discarded stale, mismatched, or invalid response. Capture and review again.");
             var foreground = Native.GetForegroundWindow();
-            if (foreground != Handle && foreground != current.Window.Handle)
+            if (foreground != Handle && foreground != companion.PromptHandle && foreground != current.Window.Handle)
                 throw new InvalidOperationException("Focus changed to another application. Response discarded; capture again.");
             ModeText.Text = ModeLabel(response.Mode);
             AnswerText.Text = response.Instruction
@@ -567,7 +575,8 @@ public partial class MainWindow : Window
         SelectedCameraMode, screenTask,
         screenTask is { CanContinue: true } task && !DesktopAction.IsBusy
             && WindowPicker.SelectedItem is WindowChoice selected && selected.Id == task.WindowId,
-        cameraRecoverySensing is ICameraRecoveryControl);
+        cameraRecoverySensing is ICameraRecoveryControl,
+        cameraRecoveryBusy || !cameraRecovery.CanStart && !cameraRecovery.IsTerminal);
 
     private void ForgetScreenTask()
     {
@@ -622,12 +631,13 @@ public partial class MainWindow : Window
             }
         }
         else if (PreserveScreenActionApproval(
-            foreground, Handle, h.HasShown, SelectedCameraMode, h.Target))
+            foreground, foreground == companion.PromptHandle ? companion.PromptHandle : Handle,
+            h.HasShown, SelectedCameraMode, h.Target))
         {
             overlay.Hide();
             h.HasShown = false;
         }
-        else if (h.HasShown || foreground != Handle)
+        else if (h.HasShown || foreground != Handle && foreground != companion.PromptHandle)
         { ClearHighlight(); }
     }
 
@@ -820,7 +830,7 @@ public partial class MainWindow : Window
         await OpenDemoAsync();
         OpenScreenContext();
         await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-        Activate();
+        companion.Invoke(PromptBox.Text);
         Capture_Click(CaptureButton, new RoutedEventArgs());
     }
 

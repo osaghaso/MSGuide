@@ -1,7 +1,10 @@
 using System.IO;
 using System.Speech.Synthesis;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 
 namespace MSGuide.Desktop;
@@ -15,6 +18,7 @@ internal static class SpeechTests
 
     public static async Task RunAsync()
     {
+        CheckVoiceControls();
         var first = new FakeRecognizer();
         var second = new FakeRecognizer();
         var queue = new Queue<IDictationRecognizer>([first, second]);
@@ -220,6 +224,11 @@ internal static class SpeechTests
         var ui = new MainWindow(new SpeechService(uiQueue.Dequeue));
         try { ui.CheckSpeechComposer(uiInputs); }
         finally { ui.Close(); }
+        var compactInputs = Enumerable.Range(0, 5).Select(_ => new FakeRecognizer()).ToArray();
+        var compactQueue = new Queue<IDictationRecognizer>(compactInputs);
+        var compactUi = new MainWindow(new SpeechService(compactQueue.Dequeue), new CompanionPosition());
+        try { compactUi.CheckCompactSpeechComposer(compactInputs); }
+        finally { compactUi.Close(); }
         var pendingUiInput = new FakeRecognizer { AcknowledgeCancellation = false };
         var pendingUi = new MainWindow(new SpeechService(() => pendingUiInput));
         try { pendingUi.CheckPendingSpeechControls(pendingUiInput); }
@@ -231,6 +240,129 @@ internal static class SpeechTests
             try { pausedUi.CheckPausedSpeechStatus(pausedInput, replacement); }
             finally { pausedUi.Close(); }
         }
+    }
+
+    private static void CheckVoiceControls()
+    {
+        var pendingInput = new FakeRecognizer { AcknowledgeCancellation = false };
+        var processingInput = new FakeRecognizer();
+        var uncertainInput = new FakeRecognizer();
+        var blockedInput = new FakeRecognizer { StartFailure = new UnauthorizedAccessException() };
+        var queue = new Queue<IDictationRecognizer>([pendingInput, processingInput, uncertainInput, blockedInput]);
+        using var speech = new SpeechService(queue.Dequeue);
+        int records = 0, appends = 0, cancellations = 0, refreshes = 0, selections = 0;
+        var words = new List<string>();
+        speech.Transcribed += words.Add;
+        var voice = new CompanionVoiceControls(new CompanionVoiceActions(
+            () => { records++; speech.Toggle(); },
+            () => { appends++; speech.Toggle(); },
+            () => { cancellations++; speech.Stop(); },
+            () => refreshes++,
+            input => { selections++; speech.SelectInput(input); },
+            () => speech.Stop()));
+        var otherInput = new MicrophoneChoice(91, "Synthetic voice control input");
+        var choices = new[] { MicrophoneChoice.Default, otherInput };
+        void Update(bool hasDraft = true, bool hasInput = true) =>
+            voice.Update(SpeechControlsState.From(speech, hasDraft, hasInput),
+                hasInput ? choices : [], hasInput ? speech.Input : null, speech.Status, "", 0);
+        static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        var options = voice.Children.OfType<Expander>().Single();
+        var optionContent = (StackPanel)options.Content;
+        Check(!voice.RecordButton.IsEnabled && queue.Count == 4,
+            "constructing voice controls neither records nor assumes an input is available");
+        Update(hasInput: false);
+        Click(voice.RecordButton);
+        Click(voice.AppendButton);
+        Check(records == 0 && appends == 0 && queue.Count == 4
+            && !voice.RecordButton.IsEnabled && !voice.AppendButton.IsEnabled,
+            "missing input gates both voice entry points, including invoked disabled controls");
+        Update(hasDraft: false);
+        var icon = voice.RecordButton.Content as System.Windows.Shapes.Path;
+        var microphoneIcon = icon?.Data;
+        Check(icon is not null && microphoneIcon is not null
+            && BindingOperations.GetBinding(icon, Shape.StrokeProperty)?.Source == voice.RecordButton
+            && voice.RecordButton.MinWidth >= 44 && voice.RecordButton.MinHeight >= 44
+            && voice.RecordButton.IsTabStop && voice.RecordButton.Focusable
+            && voice.RecordButton.Style == voice.FindResource("PrimaryButtonStyle")
+            && AutomationProperties.GetName(voice.RecordButton).Contains("Record a new voice question", StringComparison.Ordinal)
+            && voice.AppendButton.Visibility == Visibility.Collapsed
+            && optionContent.Children.Contains(voice.StopButton) && !options.IsExpanded
+            && voice.StatusText.Text == "MIC OFF",
+            "idle voice has a themed keyboard-accessible mic hit target without redundant Stop audio or status clutter");
+        options.IsExpanded = true;
+        voice.InputPicker.SelectedItem = otherInput;
+        Click(voice.RefreshButton);
+        options.IsExpanded = false;
+        Update();
+        Check(selections == 1 && refreshes == 1 && records == 0 && appends == 0 && queue.Count == 4
+            && voice.AppendButton.Visibility == Visibility.Visible
+            && ((string)voice.RecordButton.ToolTip).Contains("Replace the current draft only after recognition succeeds", StringComparison.Ordinal)
+            && ((string)voice.AppendButton.ToolTip).Contains("append them to the current draft", StringComparison.Ordinal)
+            && optionContent.Children.OfType<TextBlock>().Any(text => text.Text.Contains("Audio stays on this device", StringComparison.Ordinal)),
+            "options, refresh, input selection and draft synchronization never opt into recording; replace and append are distinct");
+        Click(voice.AppendButton);
+        Update();
+        var stopIcon = icon!.Data;
+        Check(appends == 1 && pendingInput.Starts == 1 && speech.Listening && stopIcon != microphoneIcon
+            && voice.RecordButton.IsEnabled && !voice.InputPicker.IsEnabled && !voice.RefreshButton.IsEnabled
+            && voice.AppendButton.Visibility == Visibility.Collapsed && voice.InputLevel.Visibility == Visibility.Visible
+            && AutomationProperties.GetName(voice.RecordButton) == "Stop recording and transcribe",
+            "explicit append starts recording and the primary icon becomes stop-and-transcribe with input gating");
+        Click(voice.RecordButton);
+        Update();
+        var processingIcon = icon.Data;
+        Check(speech.Stopping && speech.Finishing && processingIcon != stopIcon && processingIcon != microphoneIcon
+            && !voice.RecordButton.IsEnabled && !optionContent.Children.Contains(voice.StopButton)
+            && voice.StopButton.IsEnabled && voice.StopButton.IsTabStop
+            && AutomationProperties.GetName(voice.RecordButton).StartsWith("Stopping microphone", StringComparison.Ordinal)
+            && AutomationProperties.GetName(voice.StopButton) == "Cancel local transcription",
+            "stopping exposes cancellation immediately outside collapsed options and never advertises recording");
+        Click(voice.RecordButton);
+        Click(voice.AppendButton);
+        Click(voice.RefreshButton);
+        Check(records == 1 && appends == 1 && refreshes == 1 && queue.Count == 3,
+            "pending microphone closure gates primary, append and device refresh callbacks");
+        Click(voice.StopButton);
+        speech.InputStopTimedOut();
+        Update();
+        Check(cancellations == 1 && speech.InputStopUnconfirmed && icon.Data != processingIcon
+            && !voice.RecordButton.IsEnabled && !voice.InputPicker.IsEnabled
+            && !optionContent.Children.Contains(voice.StopButton) && voice.StopButton.IsEnabled
+            && AutomationProperties.GetName(voice.RecordButton).StartsWith("Microphone status unknown", StringComparison.Ordinal)
+            && voice.StatusText.Text.Contains("MIC STATUS UNKNOWN", StringComparison.Ordinal)
+            && voice.StatusText.Text.Contains("Close MSGuide", StringComparison.Ordinal),
+            "unknown closure keeps a warning icon, explicit recovery and immediate audio stop without enabling another recording");
+        pendingInput.EndInput();
+        Update();
+        Click(voice.RecordButton);
+        Click(voice.RecordButton);
+        processingInput.EndInput();
+        Update();
+        Check(speech.Finishing && !speech.Stopping && icon.Data == processingIcon
+            && AutomationProperties.GetName(voice.RecordButton).StartsWith("Transcribing locally", StringComparison.Ordinal)
+            && (string)voice.StopButton.Content == "Cancel" && !optionContent.Children.Contains(voice.StopButton),
+            "confirmed microphone closure changes processing semantics without hiding cancellation");
+        Click(voice.StopButton);
+        processingInput.Result("cancelled words", 1);
+        Update();
+        Check(!speech.Busy && processingInput.Cancels == 1 && words.Count == 0 && icon.Data == microphoneIcon
+            && optionContent.Children.Contains(voice.StopButton),
+            "cancelling local processing rejects late words and restores the idle mic without restarting");
+        Click(voice.RecordButton);
+        uncertainInput.Result("Review these words", 0.2f);
+        uncertainInput.Complete();
+        Update();
+        Check(words.SequenceEqual(["Review these words"]) && !speech.Busy && icon.Data == microphoneIcon
+            && voice.StatusText.Text.Contains("Uncertain transcript", StringComparison.Ordinal)
+            && AutomationProperties.GetHelpText(voice.StatusText).Contains(speech.Status, StringComparison.Ordinal),
+            "completed uncertain text stays visibly marked for review rather than being hidden by concise status");
+        Click(voice.RecordButton);
+        Update();
+        Check(!speech.Busy && blockedInput.Starts == 1 && icon.Data != microphoneIcon
+            && voice.RecordButton.IsEnabled && queue.Count == 0
+            && AutomationProperties.GetName(voice.RecordButton).StartsWith("Retry microphone", StringComparison.Ordinal)
+            && voice.StatusText.Text.Contains("Microphone access is blocked.", StringComparison.Ordinal),
+            "input failure shows an accessible retry state and full recovery text without automatically retrying");
     }
 
     public static async Task RunSyntheticAsync()
@@ -309,6 +441,64 @@ internal static class SpeechTests
 
 public partial class MainWindow
 {
+    internal void CheckCompactSpeechComposer(SpeechTests.FakeRecognizer[] inputs)
+    {
+        loaded = true;
+        try
+        {
+            var compact = companion.Prompt;
+            var synthetic = new MicrophoneChoice(91, "Synthetic test input");
+            MicrophonePicker.ItemsSource = new[] { MicrophoneChoice.Default, synthetic };
+            MicrophonePicker.SelectedItem = MicrophoneChoice.Default;
+            UpdatePromptSubmissionUi();
+            compact.Voice.InputPicker.SelectedItem = synthetic;
+            IntegrationTests.Require(speech.Input == synthetic && Equals(MicrophonePicker.SelectedItem, synthetic)
+                && inputs.All(input => input.Starts == 0) && !compact.CanSubmit);
+            compact.Voice.RecordButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            inputs[0].Level(23);
+            inputs[0].Preview("Synthetic preview");
+            IntegrationTests.Require(speech.Listening && inputs[0].Starts == 1
+                && !compact.CanSubmit && !compact.Voice.InputPicker.IsEnabled
+                && compact.Voice.InputLevel.Value == 23
+                && compact.Voice.PreviewText.Text.Contains("Synthetic preview"));
+            compact.SubmitAsync().GetAwaiter().GetResult();
+            IntegrationTests.Require(speech.Listening && inputs[0].Finishes == 0 && cameraRecovery.CanStart);
+            compact.Voice.RecordButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            inputs[0].Result("Check my Teams camera", 0.2f);
+            inputs[0].Complete();
+            IntegrationTests.Require(PromptBox.Text == "Check my Teams camera"
+                && compact.DraftControl.Text == PromptBox.Text && compact.CanSubmit
+                && compact.Voice.StatusText.Text.Contains("MIC OFF")
+                && compact.Voice.StatusText.Text.Contains("Uncertain transcript")
+                && AutomationProperties.GetName(compact.Voice.RecordButton).Contains("replace the draft")
+                && compact.Voice.AppendButton.Visibility == Visibility.Visible && cameraRecovery.CanStart);
+            compact.Voice.AppendButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            inputs[1].Result("please", 0.9f);
+            inputs[1].Complete();
+            IntegrationTests.Require(PromptBox.Text == "Check my Teams camera please"
+                && compact.DraftControl.Text == PromptBox.Text);
+            compact.Voice.RecordButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            compact.DraftControl.Text = "Typed in the compact prompt";
+            inputs[2].Result("late discarded words", 1);
+            inputs[2].Complete();
+            IntegrationTests.Require(PromptBox.Text == "Typed in the compact prompt"
+                && inputs[2].Cancels == 1 && !speech.Busy);
+            compact.Voice.RecordButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            compact.Voice.RecordButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            IntegrationTests.Require(!compact.CanSubmit && !compact.Voice.RecordButton.IsEnabled);
+            compact.Voice.StopButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            inputs[3].Result("cancelled transcription", 1);
+            IntegrationTests.Require(compact.DraftControl.Text == "Typed in the compact prompt"
+                && !speech.Busy && inputs[3].Cancels == 1);
+            compact.Voice.RecordButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            compact.DismissPrompt();
+            inputs[4].Result("hidden transcription", 1);
+            IntegrationTests.Require(!speech.Busy && inputs[4].Cancels == 1
+                && compact.DraftControl.Text == PromptBox.Text && cameraRecovery.CanStart);
+        }
+        finally { loaded = false; }
+    }
+
     internal void CheckPausedSpeechStatus(SpeechTests.FakeRecognizer input, string replacement)
     {
         loaded = true;
@@ -356,18 +546,23 @@ public partial class MainWindow
             MicButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             StopAudioButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             IntegrationTests.Require(MicrophoneStateText.Text == "MIC STOPPING"
-                && !MicrophonePicker.IsEnabled && !MicButton.IsEnabled);
+                && !MicrophonePicker.IsEnabled && !MicButton.IsEnabled
+                && !companion.Prompt.Voice.RecordButton.IsEnabled
+                && companion.Prompt.Voice.StatusText.Text.Contains("MIC STOPPING"));
             StopAudioButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             speech.InputStopTimedOut();
             input.Result("Cancelled replacement", 1);
             IntegrationTests.Require(MicrophoneStateText.Text == "MIC STATUS UNKNOWN"
                 && !MicrophonePicker.IsEnabled && !RefreshMicrophonesButton.IsEnabled
                 && !MicButton.IsEnabled && !AddVoiceButton.IsEnabled && !AskPromptButton.IsEnabled
-                && PromptBox.Text == "Retained typed draft");
+                && PromptBox.Text == "Retained typed draft"
+                && !companion.Prompt.CanSubmit && !companion.Prompt.Voice.InputPicker.IsEnabled
+                && companion.Prompt.Voice.StatusText.Text.Contains("MIC STATUS UNKNOWN"));
             input.EndInput();
             IntegrationTests.Require(MicrophoneStateText.Text == "MIC OFF"
                 && MicrophonePicker.IsEnabled && MicButton.IsEnabled && AskPromptButton.IsEnabled
-                && PromptBox.Text == "Retained typed draft");
+                && PromptBox.Text == "Retained typed draft"
+                && companion.Prompt.CanSubmit && companion.Prompt.Voice.InputPicker.IsEnabled);
         }
         finally { loaded = false; }
     }

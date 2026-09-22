@@ -41,7 +41,7 @@ public partial class MainWindow
         try
         {
             if (demo is null) throw new InvalidOperationException("Open this companion's demo first.");
-            demoTask = new DemoTaskSession(demo, Handle,
+            demoTask = new DemoTaskSession(demo, companion.Prompt.IsVisible ? companion.PromptHandle : Handle,
                 ControlMode.IsChecked == true ? InteractionMode.Control : InteractionMode.Guide);
             TaskPlanText.Text = (demoTask.Mode == InteractionMode.Guide ? "GUIDE ME · you click\n" : "DO IT FOR ME · local semantic UI actions\n") + demoTask.Plan;
             TaskStatusText.Text = "Review the plan. No actions have been authorized yet.";
@@ -191,7 +191,7 @@ public partial class MainWindow
                 throw new InvalidOperationException("Notepad control awaits native acceptance. For synthetic testing only, launch with MSGUIDE_ENABLE_EXPERIMENTAL_NOTEPAD_CONTROL=1; otherwise choose Guide me.");
             if (WindowPicker.SelectedItem is not WindowChoice selected)
                 throw new InvalidOperationException("Select your blank Notepad window in the window chooser below first.");
-            notepadTask = new(new NotepadEditor(selected, Handle),
+            notepadTask = new(new NotepadEditor(selected, companion.Prompt.IsVisible ? companion.PromptHandle : Handle),
                 ControlMode.IsChecked == true ? InteractionMode.Control : InteractionMode.Guide, DraftBox.Text);
             TaskPlanText.Text = (notepadTask.Mode == InteractionMode.Guide ? "GUIDE ME · you type\n" : "DO IT FOR ME · one local text insertion\n") + notepadTask.Plan;
             TaskStatusText.Text = "Review target and exact text, approve, then Start. No existing text was read. Keep MSGuide foreground for control insertion.";

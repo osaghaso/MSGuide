@@ -9,7 +9,7 @@ using System.Windows.Media.Imaging;
 namespace MSGuide.Desktop;
 
 internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
-    : ICameraRecoverySensing, ICameraRecoveryControl
+    : ICameraRecoverySensing, ICameraRecoveryControl, ICameraWindowDiscovery
 {
     private const string TeamsPermissionId = "MSTeams_8wekyb3d8bbwe_ToggleSwitch";
     private const string SystemPermissionId = CameraRecoveryPinnedTargets.DeviceCameraToggle;
@@ -30,11 +30,35 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     private sealed record ControlRead(WindowChoice Window, Native.RECT Rect, ElementInfo[] Elements);
     private sealed record TargetCache(
         string Id, WindowChoice Window, Native.RECT Rect, ElementInfo Element,
-        CameraRecoveryTargetKind Kind);
+        CameraRecoveryTargetKind Kind)
+    {
+        internal DateTimeOffset ObservedAt { get; } = DateTimeOffset.UtcNow;
+    }
     private sealed record TeamsCameraControl(
         TeamsCameraControlState State, ElementInfo Element);
 
     public CameraRecoverySensingMode Mode => CameraRecoverySensingMode.Connected;
+
+    public async Task<CameraSurfaceFinding> InspectCameraSurfaceAsync(
+        WindowChoice window, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsTeams(window)) return CameraSurfaceFinding.Incomplete;
+        try
+        {
+            using var observation = await CaptureService.InspectCameraControls(window, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            return observation.Valid()
+                ? CameraWindowDiscovery.Assess(observation.Elements)
+                : CameraSurfaceFinding.Incomplete;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or UnauthorizedAccessException
+            or COMException or Win32Exception)
+        {
+            DiagnosticLog.Record("camera_surface_unavailable", new { errorType = ex.GetType().Name });
+            return CameraSurfaceFinding.Incomplete;
+        }
+    }
 
     public void Reset()
     {
@@ -297,17 +321,12 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
                 : ReadControls(current.Window, cancellationToken, maxDepth: 32);
         }
         catch (InvalidOperationException) { refreshed = null; }
-        var element = refreshed?.Elements.SingleOrDefault(
-            candidate => candidate.TargetId == current.Id);
-        if (refreshed is null || element is null
-            || element.TargetId != current.Id
-            || !TargetIsOff(element, current.Kind)
-            || !element.IsEnabled
-            || !element.Targetable)
+        var match = RevalidateTarget(current, refreshed);
+        if (match.Finding != CameraTargetFinding.Ready || match.Element is not { } element || refreshed is null)
         {
             lock (gate) target = null;
             return Task.FromResult(new CameraTargetPresentation(
-                false, "The camera target changed. Inspect the current Teams or Settings window again."));
+                false, match.Detail));
         }
 
         overlay.PointAt(refreshed.Rect, element.Box);
@@ -339,14 +358,14 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         var result = await DesktopAction.RunBounded((token, beginInvocation) =>
         {
             var action = ActivateTarget(current, token, beginInvocation);
-            return new(action.Invoked, action.OutcomeKnown, action.Detail);
+            return new(action.Invoked, action.OutcomeKnown, action.Detail, action.StateAlreadySatisfied);
         }, cancellationToken);
         if (result is { Invoked: true, OutcomeKnown: true } && !cancellationToken.IsCancellationRequested
             && current.Kind == CameraRecoveryTargetKind.TeamsCameraButton)
         {
             lock (gate) teamsCameraEnabledAt = DateTimeOffset.UtcNow;
         }
-        return new(result.Invoked, result.OutcomeKnown, result.Detail);
+        return new(result.Invoked, result.OutcomeKnown, result.Detail, result.StateAlreadySatisfied);
     }
 
     public async Task<TeamsRestartResult> RestartTeamsAsync(
@@ -456,6 +475,14 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     private static CameraTargetControlResult ActivateTarget(
         TargetCache current, CancellationToken cancellationToken, Func<bool> beginInvocation)
     {
+        var previousDpi = Native.SetThreadDpiAwarenessContext(new nint(-4));
+        try { return ActivateTargetCore(current, cancellationToken, beginInvocation); }
+        finally { Native.SetThreadDpiAwarenessContext(previousDpi); }
+    }
+
+    private static CameraTargetControlResult ActivateTargetCore(
+        TargetCache current, CancellationToken cancellationToken, Func<bool> beginInvocation)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         var permission = ReadPermission();
         if (permission.State == CameraPermissionState.Managed
@@ -465,63 +492,74 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         ControlRead? refreshed = CameraRecoveryPinnedTargets.IsPermission(current.Kind)
             ? FindCameraSettings(cancellationToken)
             : ReadControls(current.Window, cancellationToken, maxDepth: 32);
-        var expected = refreshed?.Elements.SingleOrDefault(
-            element => element.TargetId == current.Id);
-        if (refreshed is null || expected is null
-            || !TargetIsOff(expected, current.Kind)
-            || !expected.IsEnabled || !expected.Targetable)
-            return new CameraTargetControlResult(
-                false, true, "The verified camera target changed before the approved action.");
+        var match = RevalidateTarget(current, refreshed);
+        if (match.Finding == CameraTargetFinding.AlreadyEnabled)
+            return new(false, true, match.Detail, StateAlreadySatisfied: true);
+        if (match.Finding != CameraTargetFinding.Ready || match.Element is not { } expected || refreshed is null)
+            return new(false, true, match.Detail);
         if (CameraRecoveryPinnedTargets.IsPermission(current.Kind))
         {
             var next = AssessSettingsPermissions(refreshed.Elements, policyManaged: false);
-            if (next.Target?.Kind != current.Kind || next.Target.ObservationId != current.Id)
+            if (next.Target?.Kind != current.Kind || next.Target.ObservationId != expected.TargetId)
                 return new(false, true, "The permission scope changed. Inspect settings and approve the new scope separately.");
         }
 
         var raw = AutomationEvidence.FindUniqueTarget(
-            refreshed.Window, refreshed.Rect, current.Id, expected.Label,
+            refreshed.Window, refreshed.Rect, expected.TargetId!, expected.Label,
             expected.AutomationId, cancellationToken);
         if (raw is null)
             return new CameraTargetControlResult(
                 false, true, "The exact accessible camera control could not be reacquired.");
 
-        try
+        if (raw.Current.IsPassword || raw.Current.IsOffscreen || !raw.Current.IsEnabled
+            || !Safety.Fresh(current.ObservedAt, DateTimeOffset.UtcNow)
+            || !refreshed.Window.Matches()
+            || !Native.GetWindowRect(refreshed.Window.Handle, out var finalRect)
+            || !refreshed.Rect.Same(finalRect)
+            || Native.Title(refreshed.Window.Handle) != refreshed.Window.Title
+            || !AutomationEvidence.MatchesTargetId(refreshed.Window, finalRect, raw, expected.TargetId!))
+            return new(false, true, "The exact camera window or control changed before invocation.");
+        if (raw.TryGetCurrentPattern(TogglePattern.Pattern, out var togglePattern)
+            && togglePattern is TogglePattern toggle
+            && toggle.Current.ToggleState == ToggleState.Off)
         {
-            if (raw.Current.IsPassword || raw.Current.IsOffscreen || !raw.Current.IsEnabled
-                || !refreshed.Window.Matches()
-                || !Native.GetWindowRect(refreshed.Window.Handle, out var finalRect)
-                || !refreshed.Rect.Same(finalRect))
-                return new(false, true, "The exact camera window or control changed before invocation.");
-            if (raw.TryGetCurrentPattern(TogglePattern.Pattern, out var togglePattern)
-                && togglePattern is TogglePattern toggle
-                && toggle.Current.ToggleState == ToggleState.Off)
-            {
-                if (!beginInvocation()) return new(false, true, "The camera action was cancelled before invocation.");
-                toggle.Toggle();
-                return new CameraTargetControlResult(
-                    true, true, "The approved camera toggle action was invoked once.");
-            }
-            if (current.Kind == CameraRecoveryTargetKind.TeamsCameraButton
-                && CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(expected.Label)
-                && raw.TryGetCurrentPattern(InvokePattern.Pattern, out var invokePattern)
-                && invokePattern is InvokePattern invoke)
-            {
-                if (!beginInvocation()) return new(false, true, "The camera action was cancelled before invocation.");
-                invoke.Invoke();
-                return new CameraTargetControlResult(
-                    true, true, "The approved Teams camera-on action was invoked once.");
-            }
+            if (!beginInvocation()) return new(false, true, "The camera action was cancelled before invocation.");
+            toggle.Toggle();
             return new CameraTargetControlResult(
-                false, true, "The exact camera control no longer exposed its approved action pattern.");
+                true, true, "The approved camera toggle action was invoked once.");
         }
-        catch (Exception ex) when (
-            ex is ElementNotAvailableException or InvalidOperationException or COMException)
+        if (current.Kind == CameraRecoveryTargetKind.TeamsCameraButton
+            && CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(raw.Current.Name)
+            && raw.TryGetCurrentPattern(InvokePattern.Pattern, out var invokePattern)
+            && invokePattern is InvokePattern invoke)
         {
+            if (!beginInvocation()) return new(false, true, "The camera action was cancelled before invocation.");
+            invoke.Invoke();
             return new CameraTargetControlResult(
-                true, false,
-                "The approved action returned an unknown outcome. MSGuide will not retry it.");
+                true, true, "The approved Teams camera-on action was invoked once.");
         }
+        return new CameraTargetControlResult(
+            false, true, "The exact camera control no longer exposed its approved action pattern.");
+    }
+
+    private static CameraTargetMatch RevalidateTarget(TargetCache approved, ControlRead? current)
+    {
+        var result = current is null
+            ? new CameraTargetMatch(CameraTargetFinding.Unavailable, null,
+                "The Camera privacy page could not be verified again. No action was started.")
+            : CameraTargetRevalidation.Match(approved.Window, approved.Rect, approved.Element,
+                approved.Kind, approved.ObservedAt, current.Window, current.Rect, current.Elements, DateTimeOffset.UtcNow);
+        DiagnosticLog.Record("camera_target_revalidation", new
+        {
+            scope = approved.Kind.ToString(),
+            finding = result.Finding.ToString(),
+            sameWindow = current?.Window.Id == approved.Window.Id,
+            sameBounds = current?.Rect.Same(approved.Rect),
+            sameControl = result.Element?.ControlId == approved.Element.ControlId,
+            fingerprintChanged = result.Element is { } element && element.TargetId != approved.Id,
+            labelChanged = result.Element is { } named && named.Label != approved.Element.Label
+        });
+        return result;
     }
 
     private static bool IsTeams(WindowChoice window) =>
@@ -530,19 +568,28 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
     private static ControlRead ReadControls(
         WindowChoice window, CancellationToken cancellationToken, int maxDepth = 18)
     {
+        var previousDpi = Native.SetThreadDpiAwarenessContext(new nint(-4));
+        try { return ReadControlsCore(window, cancellationToken, maxDepth); }
+        finally { Native.SetThreadDpiAwarenessContext(previousDpi); }
+    }
+
+    private static ControlRead ReadControlsCore(
+        WindowChoice window, CancellationToken cancellationToken, int maxDepth)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         if (!window.Matches()
             || Native.IsHungAppWindow(window.Handle)
             || !Native.GetWindowRect(window.Handle, out var rect))
             throw new InvalidOperationException("The selected window is unavailable.");
+        string title = Native.Title(window.Handle);
         var read = CaptureService.ReadAutomation(
             window, rect, cancellationToken, maxDepth);
         cancellationToken.ThrowIfCancellationRequested();
         if (!window.Matches()
             || !Native.GetWindowRect(window.Handle, out var after)
-            || !rect.Same(after))
+            || !rect.Same(after) || Native.Title(window.Handle) != title)
             throw new InvalidOperationException("The selected window changed during inspection.");
-        return new(window, rect, read.RequireComplete());
+        return new(window with { Title = title }, rect, read.RequireComplete());
     }
 
     private static ControlRead? FindCameraSettings(CancellationToken cancellationToken)
@@ -580,13 +627,10 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         IEnumerable<ElementInfo> elements)
     {
         var controls = elements.Where(element =>
-                element.Role is "button" or "checkbox"
+                CameraRecoveryPinnedTargets.IsTeamsCameraElement(element)
                 && element.IsEnabled
                 && element.Targetable
-                && (CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(element.Label)
-                    || CameraRecoveryPinnedTargets.IsTeamsTurnCameraOff(element.Label)
-                    || CameraRecoveryPinnedTargets.IsTeamsCameraToggle(element.Label)
-                        && element.ToggleState is "off" or "on"))
+                )
             .ToArray();
         if (controls.Length > 1)
             throw new InvalidOperationException(
@@ -599,22 +643,6 @@ internal sealed class LiveCameraRecoverySensing(OverlayWindow overlay)
         return new TeamsCameraControl(
             off ? TeamsCameraControlState.Off : TeamsCameraControlState.On, control);
     }
-
-    private static bool TargetIsOff(
-        ElementInfo element, CameraRecoveryTargetKind kind) =>
-        kind switch
-        {
-            CameraRecoveryTargetKind.PackagedTeamsPermission
-                or CameraRecoveryTargetKind.DeviceCameraPermission
-                or CameraRecoveryTargetKind.AppCameraPermission =>
-                CameraRecoveryPinnedTargets.IsPermissionTarget(element.AutomationId, kind)
-                && element.ToggleState == "off",
-            CameraRecoveryTargetKind.TeamsCameraButton =>
-                CameraRecoveryPinnedTargets.IsTeamsTurnCameraOn(element.Label)
-                || CameraRecoveryPinnedTargets.IsTeamsCameraToggle(element.Label)
-                    && element.ToggleState == "off",
-            _ => false
-        };
 
     private static CameraPermissionEvidence ReadPermission()
     {

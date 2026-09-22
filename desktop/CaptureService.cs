@@ -53,7 +53,14 @@ public static class CaptureService
     private static int busy;
     internal static Task WhenIdle { get; private set; } = Task.CompletedTask;
 
-    public static async Task<Snapshot> Capture(WindowChoice window, CancellationToken ct, bool includeImage = true)
+    public static Task<Snapshot> Capture(WindowChoice window, CancellationToken ct, bool includeImage = true) =>
+        CaptureBounded(window, ct, includeImage, cameraControls: false);
+
+    internal static Task<Snapshot> InspectCameraControls(WindowChoice window, CancellationToken ct) =>
+        CaptureBounded(window, ct, includeImage: false, cameraControls: true);
+
+    private static async Task<Snapshot> CaptureBounded(
+        WindowChoice window, CancellationToken ct, bool includeImage, bool cameraControls)
     {
         ct.ThrowIfCancellationRequested();
         if (DesktopAction.IsBusy)
@@ -68,7 +75,7 @@ public static class CaptureService
             Snapshot? result = null;
             try
             {
-                result = CaptureCore(window, captureToken, includeImage);
+                result = CaptureCore(window, captureToken, includeImage, cameraControls);
                 captureToken.ThrowIfCancellationRequested();
                 return result;
             }
@@ -96,7 +103,7 @@ public static class CaptureService
         }
     }
 
-    private static Snapshot CaptureCore(WindowChoice window, CancellationToken ct, bool includeImage)
+    private static Snapshot CaptureCore(WindowChoice window, CancellationToken ct, bool includeImage, bool cameraControls)
     {
         var previousDpi = Native.SetThreadDpiAwarenessContext(new nint(-4));
         byte[]? png = null;
@@ -129,8 +136,10 @@ public static class CaptureService
                 }
                 if (png.Length > 2_000_000) throw new InvalidOperationException("PNG exceeds the 2 MB limit; select a smaller window.");
             }
-            var (elements, text, note, complete) = ReadAutomation(window, rect, ct,
-                maxDepth: AutomationEvidence.ScanDepthLimit);
+            var read = ReadAutomation(window, rect, ct,
+                maxDepth: cameraControls ? 32 : AutomationEvidence.ScanDepthLimit);
+            if (cameraControls) read.RequireComplete();
+            var (elements, text, note, complete) = read;
             ct.ThrowIfCancellationRequested();
             if (!window.Matches() || !Native.GetWindowRect(window.Handle, out var after) || !rect.Same(after))
                 throw new InvalidOperationException("Window changed during capture. Capture and review again.");

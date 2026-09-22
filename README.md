@@ -25,7 +25,7 @@ limits and separate Notepad acceptance remain documented in
 Use an unlocked Windows 10/11 interactive desktop with:
 
 - **PowerShell 7** (`pwsh`), not Windows PowerShell 5.1. The launcher uses modern .NET `ProcessStartInfo.ArgumentList` and `Environment` APIs.
-- **.NET SDK 10.0.303** (or a compatible patch allowed by `global.json`) for WPF.
+- **.NET SDK 10.0.400** (or a compatible patch allowed by `global.json`) for WPF.
 - **Windows x64 CPython 3.11.9**, available as `python` for the checked-in Python locks. ARM64 Windows can use x64 Python; a native ARM64 Python lock is not claimed.
 
 From the project root in PowerShell 7:
@@ -41,7 +41,7 @@ No virtual-environment activation is required. The launcher expects the root's v
 
 Keep direct dependency intent in `requirements.txt` / `requirements-dev.txt`. Regenerate locks intentionally after manifest changes using `scripts\lock_python_dependencies.py` with pip 26.2.1; the helper converts native pip lock output using the standard library. Do not weaken TLS validation to resolve package-source problems. NuGet lock files cover the desktop and capture probe, and launcher builds use locked restore.
 
-[scripts/Start-MSGuide.ps1](scripts/Start-MSGuide.ps1) builds the desktop, starts a single-worker loopback API on **port 8765**, checks readiness, and opens the companion. Readiness has a 60-second budget, leaving headroom beyond the provider's 30-second startup deadline; failures identify the readiness stage and diagnostic log. Normal launch shows a click-through Windows-logo buddy beside the pointer. Press `Ctrl+Alt+M` to open the interactive compact prompt with current Guide/Fix mode, retained plan/boundary, clarification reply, continuation, and Stop. **Details** still holds manual capture review and expanded controls; the buddy itself stays click-through and non-activating.
+[scripts/Start-MSGuide.ps1](scripts/Start-MSGuide.ps1) builds the desktop, starts a single-worker loopback API on **port 8765**, checks readiness, and opens the companion. Readiness has a 60-second budget, leaving headroom beyond the provider's 30-second startup deadline; failures identify the readiness stage and diagnostic log. Press `Ctrl+Alt+M`, or click the stationary logo, to open the compact prompt. Camera recovery, permission approvals, voice, Settings, manual screen review, and task progress all use this one scrollable view; there is no separate Details step.
 
 An approved generic observation requests a structured **plan segment**: up to **32 ordered steps**, ending at suggested completion or an explicit resource, information, permission, observation, unsupported-operation, or plan-limit boundary. The entire plan is validated before its first action. In **Fix it for me**, one model call can drive multiple steps using fresh local UIA checks, not one model call per click. Execution continues without an eight-action or two-minute pause and verifies every action. After a segment makes safe progress, `plan_limit` and `observation` boundaries automatically refresh the same approved resource and request the next segment. The 32-step response limit is not an execution checkpoint. A changed resource, missing/changed target, incomplete evidence, required input/permission, unsupported operation, cancellation, no progress, or unknown outcome still stops the run. An empty plan never triggers repeated automatic planning. **Review & continue** is for resumable interruptions, not routine step counts; suggested completion still requires review. The existing 10,000-decision protocol ceiling remains a safeguard against pathological runs.
 
@@ -50,7 +50,59 @@ A task retains its original request, plan/cursor, task/step IDs, last 16 action 
 The normal hotkey remains **Ctrl+Alt+M**. Other keys require an explicit
 `MSGUIDE_HOTKEY` override; they are not a new default. Close an older MSGuide copy
 before relaunching an updated build. If registration conflicts, the new copy
-keeps Details visible instead of hiding with no usable hotkey.
+keeps the compact prompt visible with a taskbar entry instead of hiding with no usable hotkey.
+
+**Settings > Companion position** contains the **Follow pointer**
+option. Turn it off to pin the companion in place. Drag the pinned logo or the
+**Move** control in Settings to reposition it; focus **Move** and use arrow
+keys for keyboard movement (Shift+arrow moves one pixel). The choice and position
+are saved locally on this PC, with off-screen positions brought onto an available
+monitor. This is independent of **Guide me / Fix it for me**. An approved action
+can still show its click-through target marker, then return to the pinned position.
+Only this display preference and coordinates are saved, not prompts or approvals.
+Click the stationary logo to open the same prompt as **Ctrl+Alt+M**; dragging
+repositions it without opening the prompt. The logo has no rectangular button
+frame. The following logo and action markers remain click-through.
+
+The compact prompt has a 44-DIP **microphone icon** beside Ask that becomes a stop icon
+while recording, with clear text/tooltips and screen-reader labels. **Append**
+explicitly adds to a draft; cancellation stays immediately available while
+processing or input closure is uncertain. The input meter, warnings, and
+**Settings > Microphone options** retain input selection/refresh and idle audio controls. It shares the same draft
+and local speech lifecycle as the rest of the app. Opening the prompt never starts recording;
+closing it cancels pending voice input. Transcription never submits the question.
+
+For **Fix it for me**, submitting a Teams camera request authorizes one
+freshly revalidated camera-on action for the selected meeting/prejoin. MSGuide
+inspects first, opens Camera settings if needed, and continues through local
+checks automatically; there are no routine Next buttons. Device-wide camera
+access, user-app access, Teams permission, and Teams restart still require
+separate approvals in the compact view. Permission-on and camera-on alone do not
+prove readiness. Stop, dismissal, edits, mode changes, and changing the selected
+Teams window revoke pending camera-on authority. Ambiguous windows, unsupported
+surfaces, policy blocks, and unknown outcomes require a handoff, not retries.
+**Guide me** still leaves changes to the user.
+Both modes are shown as direct, mutually exclusive choices with a visible
+selection mark. Click the mode you want; selecting the already-active mode does
+nothing. Choosing the other mode stops pending work and clears its approvals
+before switching. It never submits the draft or restarts a repair automatically.
+
+MSGuide identifies the meeting/prejoin by a fresh, complete read of its camera
+controls, rather than selecting Teams' home/chat window by title. A disabled
+camera can identify the meeting without authorizing any action. The invoked
+window is preferred only when its camera surface is verified; otherwise the
+unique matching meeting is selected. Multiple matching meetings or incomplete
+reads still require clarification. The compact prompt fits its content rather
+than holding a full-size workspace open, while retaining its position during
+status changes. Read-only **Check again** results stay in the
+same camera card. **Fix camera** starts a fresh, separately requested repair.
+The current action, permission scope, Stop, and any restart/error warning stay
+in the main view; secondary progress and controls are under **More options**.
+Verified completion shows **Resolved · camera ready** with **Done** as the main
+action and **Check again** secondary. Done clears the finished question and
+returns to the small companion without changing the camera or its permissions.
+Already-working results still say no change was needed; fixtures say Fixture
+complete, never real resolution.
 
 Generic Fix-mode actions are presented **in the foreground**: the target is
 outlined and the Windows-logo marker moves onto it before invocation. The app
@@ -106,9 +158,9 @@ The easiest real Clicky-style test is:
 1. Start with `.\scripts\Start-MSGuide.ps1 -Copilot`. The full workspace stays hidden and a small Windows-logo buddy follows the pointer.
 2. Put Calculator or another supported desktop app in the foreground, move the pointer near the control you want help with, and press `Ctrl+Alt+M`.
 3. Ask a concrete question in the compact prompt, such as `Where do I clear this calculation?`, then press Enter. The prompt disappears, the buddy shows its thinking state, and the foreground app is captured under the launch-time screen-context grant.
-4. In **Guide me**, follow the descriptive plan yourself. Choose **Fix it for me** in the compact prompt or Details to use the launch grant. A mode change revokes old queued authority. Fix mode reacquires each exact fresh UIA target, invokes once, and observes the result. Reopen the compact prompt to review/continue, answer a clarification, or stop the retained task; no Details window is required. Suggested completion is not proof.
+4. In **Guide me**, follow the descriptive plan yourself. Choose **Fix it for me** in the compact prompt to use the launch grant. A mode change revokes old queued authority. Fix mode reacquires each exact fresh UIA target, invokes once, and observes the result. Reopen the compact prompt to review/continue, answer a clarification, or stop the retained task. Suggested completion is not proof.
 
-For the deterministic developer harness, start with `.\scripts\Start-MSGuide.ps1 -DeveloperTools`, open **Details**, expand **Developer tools**, and choose **Start demo · capture locally**.
+For the deterministic developer harness, start with `.\scripts\Start-MSGuide.ps1 -DeveloperTools`, open the compact prompt, expand **Developer tools**, and choose **Start demo · capture locally**.
 2. Inspect the actual image and UI Automation text/boxes. Leave screenshot sharing off, check explicit consent, then click **Send approved snapshot**.
 3. Briefly switch to the demo to see the target. The manual developer harness retains its explicit action button; `-Copilot` sessions act automatically only in Fix mode. The
    click-through outline includes the floating Windows-logo marker requested for
@@ -145,9 +197,9 @@ downloads models automatically; a missing model fails visibly with no silent
 fallback to another recognizer.
 
 Open **Voice settings**, choose the intended **Microphone**, then return to the
-question and select **Start microphone**.
-With an existing draft, that button becomes **New voice question** and replaces
-the old text only after new speech is recognized. Use **Add more** to explicitly
+question and select the **microphone icon**.
+With an existing draft, it is labeled **Replace with voice** and replaces
+the old text only after new speech is recognized. Use **Append** to explicitly
 append. Failed or cancelled replacement recordings retain the old draft; typing
 while recording cancels pending speech so it cannot overwrite your edits.
 The input meter shows incoming audio. **Stop & transcribe** closes the microphone

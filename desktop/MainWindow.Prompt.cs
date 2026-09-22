@@ -25,6 +25,7 @@ public partial class MainWindow
         PromptFeedbackText.Text = text;
         PromptFeedbackText.Visibility = Visibility.Visible;
         System.Windows.Automation.AutomationProperties.SetHelpText(PromptFeedbackText, text);
+        companion?.Prompt.SetFeedback(text);
     }
 
     internal static bool IsPromptSubmitKey(Key key, ModifierKeys modifiers) =>
@@ -77,8 +78,6 @@ public partial class MainWindow
             return;
         }
 
-        companion.ShowResponse("Open Details to use the guided Teams camera recovery workflow.");
-        ShowDetailsNearCursor();
         promptRequestActive = true;
         await StartCameraRecoveryAsync(fromPrompt: true);
     }
