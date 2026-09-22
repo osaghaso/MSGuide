@@ -5,6 +5,14 @@ namespace MSGuide.Desktop;
 
 public static class Native
 {
+    public const uint DisplayAffinityNone = 0;
+    public const uint DisplayAffinityExcludeFromCapture = 0x11;
+    public static bool ShareableDemo =>
+        string.Equals(Environment.GetEnvironmentVariable("MSGUIDE_ALLOW_SCREEN_SHARE"), "1",
+            StringComparison.Ordinal);
+    public static uint MSGuideDisplayAffinity =>
+        ShareableDemo ? DisplayAffinityNone : DisplayAffinityExcludeFromCapture;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {
@@ -32,6 +40,7 @@ public static class Native
     [DllImport("user32.dll")] public static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll")] public static extern nint GetShellWindow();
     [DllImport("user32.dll")] public static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(nint hwnd);
     [DllImport("user32.dll")] public static extern nint WindowFromPoint(POINT point);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern nint SendMessage(nint hwnd, int message, nint wParam, nint lParam);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint hwnd, out uint processId);
@@ -64,27 +73,42 @@ public static class Native
         return text.ToString();
     }
 
+    public static string WindowClass(nint hwnd)
+    {
+        var text = new StringBuilder(256);
+        GetClassName(hwnd, text, text.Capacity);
+        return text.ToString();
+    }
+
     public static bool NormalWindow(nint hwnd)
     {
         if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd) || hwnd == GetShellWindow()
             || GetWindow(hwnd, 4) != 0 || (GetWindowLong(hwnd, -20) & 0x80) != 0) return false;
         if (DwmGetWindowAttribute(hwnd, 14, out var cloaked, sizeof(int)) == 0 && cloaked != 0) return false;
-        var name = new StringBuilder(128);
-        GetClassName(hwnd, name, name.Capacity);
-        return name.ToString() is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
+        return WindowClass(hwnd) is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
             && !string.IsNullOrWhiteSpace(Title(hwnd));
     }
 }
 
-public sealed record WindowChoice(nint Handle, uint ProcessId, string Title)
+public sealed record WindowChoice(nint Handle, uint ProcessId, string Title, string ClassName)
 {
+    public WindowChoice(nint handle, uint processId, string title)
+        : this(handle, processId, title, Native.WindowClass(handle)) { }
+
     public string Id => $"{ProcessId}:{Handle.ToInt64():X}";
+    public bool IsMicrosoftTeamsWindow =>
+        Title.Contains("Microsoft Teams", StringComparison.OrdinalIgnoreCase);
     public override string ToString() => Title;
+    internal bool SameIdentity(uint processId, string className) =>
+        processId == ProcessId && ClassName.Length > 0
+        && string.Equals(className, ClassName, StringComparison.Ordinal);
+
     public bool Matches()
     {
         Native.GetWindowThreadProcessId(Handle, out var pid);
-        return pid == ProcessId && Native.NormalWindow(Handle) && Native.Title(Handle) == Title;
+        return SameIdentity(pid, Native.WindowClass(Handle)) && Native.NormalWindow(Handle);
     }
+
     public static List<WindowChoice> List(nint companion, nint overlay)
     {
         var windows = new List<WindowChoice>();
@@ -93,7 +117,7 @@ public sealed record WindowChoice(nint Handle, uint ProcessId, string Title)
             if (hwnd != companion && hwnd != overlay && Native.NormalWindow(hwnd))
             {
                 Native.GetWindowThreadProcessId(hwnd, out var pid);
-                windows.Add(new(hwnd, pid, Native.Title(hwnd)));
+                windows.Add(new(hwnd, pid, Native.Title(hwnd), Native.WindowClass(hwnd)));
             }
             return true;
         }, 0);

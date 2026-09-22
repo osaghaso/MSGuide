@@ -9,6 +9,7 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ApplyAccessibilityTheme();
         bool integration = e.Args.Contains("--integration-test"), self = e.Args.Contains("--self-test");
         bool capture = e.Args.Contains("--capture-test");
         bool control = e.Args.Contains("--control-test");
@@ -16,6 +17,7 @@ public partial class App : Application
         bool native = e.Args.Contains("--native-diagnostic");
         bool notepad = e.Args.Contains("--notepad-test");
         bool notepadGuide = e.Args.Contains("--notepad-guide-test");
+        DiagnosticLog.Record("desktop_started", new { version = "0.2.0" });
         if (integration || self || capture || control || controlComponent || native || notepad || notepadGuide)
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -50,7 +52,67 @@ public partial class App : Application
                     await NotepadTests.RunNative(notepadHandle, checks, value => stage = value,
                         notepadGuide ? InteractionMode.Guide : InteractionMode.Control);
                 }
-                else { stage = "self-test"; SelfTests.Run(); checks.Add("desktop-safety"); NotepadTests.Run(checks); }
+                else
+                {
+                    stage = "self-test";
+                    SelfTests.Run();
+                    checks.Add("desktop-safety");
+                    CaptureTests.RunEvidenceChecks();
+                    checks.Add("action-priority-evidence-bounds-browser-resource-identity");
+                    NotepadTests.Run(checks);
+                    stage = "camera-state-fixtures";
+                    CameraRecoveryTests.Run();
+                    checks.Add("camera-fixture-consent-state-readiness-boundaries");
+                    CompactCameraTests.RunConsentChecks();
+                    checks.Add("camera-request-consent-single-use-permission-scope-cancellation");
+                    await CameraWindowDiscoveryTests.RunAsync();
+                    checks.Add("teams-meeting-camera-discovery-not-home-bounded-ambiguous-cancel");
+                    await CameraTargetRevalidationTests.RunAsync();
+                    checks.Add("camera-revalidation-stable-control-exact-scope-freshness-already-enabled");
+                    stage = "prompt-composer";
+                    PromptTests.Run();
+                    checks.Add("prompt-submit-keyboard-idle-ui");
+                    CompanionModeTests.Run();
+                    checks.Add("explicit-mode-radio-selection-idempotent-stop-revoke-unavailable");
+                    CompactLayoutTests.Run();
+                    checks.Add("compact-content-fit-permission-scope-stop-restart-warning-accessible");
+                    CameraCompletionTests.Run();
+                    checks.Add("camera-resolved-done-clears-task-no-action-fixture-distinction");
+                    stage = "companion-position";
+                    CompanionPositionTests.Run();
+                    checks.Add("companion-pin-follow-drag-position-persistence-recovery-and-accessibility");
+                    stage = "screen-task-loop";
+                    await PromptTests.RunTaskLoopAsync();
+                    checks.Add("screen-task-progress-checkpoint-outcomes-supersession");
+                    stage = "screen-plan-segments";
+                    await PlanTests.RunAsync(checks);
+                    stage = "native-action-lifecycle";
+                    await PromptTests.RunNativeLifecycleAsync();
+                    checks.Add("bounded-native-action-unknown-late-return-no-retry");
+                    checks.Add("visible-target-presentation-before-invocation-no-background-fallback");
+                    stage = "guidance-client-deadline";
+                    await PromptTests.RunClientDeadlineAsync();
+                    checks.Add("guidance-client-remaining-freshness-cancellation");
+                    stage = "speech-lifecycle";
+                    await SpeechTests.RunAsync();
+                    checks.Add("speech-drain-uncertainty-cancellation-input-feedback");
+                    checks.Add("compact-voice-shared-draft-input-choice-stop-cancel-dismiss-no-auto-submit");
+                    checks.Add("microphone-cancel-stop-timeout-late-ack-second-input-gating");
+                    WhisperTests.Run();
+                    checks.Add("whisper-bounded-memory-capture");
+                    if (Environment.GetEnvironmentVariable("MSGUIDE_WHISPER_SYNTHETIC_TEST") == "1")
+                    {
+                        stage = "whisper-synthetic-input";
+                        await WhisperTests.RunSyntheticAsync();
+                        checks.Add("whisper-synthetic-transcription");
+                    }
+                    if (Environment.GetEnvironmentVariable("MSGUIDE_SPEECH_SYNTHETIC_TEST") == "1")
+                    {
+                        stage = "speech-synthetic-input";
+                        await SpeechTests.RunSyntheticAsync();
+                        checks.Add("speech-synthetic-memory-input");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -73,7 +135,34 @@ public partial class App : Application
             Shutdown(failure.Length == 0 ? 0 : 1);
             return;
         }
-        MainWindow = new MainWindow();
-        MainWindow.Show();
+        var mainWindow = new MainWindow();
+        MainWindow = mainWindow;
+        mainWindow.Show();
+        mainWindow.StartCompanionMode();
+    }
+
+    private void ApplyAccessibilityTheme()
+    {
+        if (!SystemParameters.HighContrast) return;
+        Resources["CanvasBrush"] = SystemColors.WindowBrush;
+        Resources["SurfaceBrush"] = SystemColors.ControlBrush;
+        Resources["SurfaceRaisedBrush"] = SystemColors.ControlBrush;
+        Resources["SurfaceHoverBrush"] = SystemColors.HighlightBrush;
+        Resources["InputBrush"] = SystemColors.WindowBrush;
+        Resources["BorderBrush"] = SystemColors.ActiveBorderBrush;
+        Resources["BorderStrongBrush"] = SystemColors.HighlightBrush;
+        Resources["TextBrush"] = SystemColors.WindowTextBrush;
+        Resources["MutedTextBrush"] = SystemColors.WindowTextBrush;
+        Resources["AccentBrush"] = SystemColors.HighlightBrush;
+        Resources["AccentStrongBrush"] = SystemColors.HighlightBrush;
+        Resources["AccentHoverBrush"] = SystemColors.HighlightBrush;
+        Resources["AccentSoftBrush"] = SystemColors.ControlBrush;
+        Resources["AccentTextBrush"] = SystemColors.HighlightTextBrush;
+        Resources["SuccessBrush"] = SystemColors.WindowTextBrush;
+        Resources["SuccessSoftBrush"] = SystemColors.WindowBrush;
+        Resources["WarningBrush"] = SystemColors.WindowTextBrush;
+        Resources["WarningSoftBrush"] = SystemColors.WindowBrush;
+        Resources["DangerBrush"] = SystemColors.WindowTextBrush;
+        Resources["DangerSoftBrush"] = SystemColors.WindowBrush;
     }
 }

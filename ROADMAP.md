@@ -1,6 +1,6 @@
 # Remaining acceptance gates
 
-The product direction now includes **Guide me** and permission-scoped **Do it for me**. The local dual-mode fixture and an [experimental Notepad adapter](docs/NOTEPAD_TASK.md) are implemented. Notepad writes default off pending native acceptance. Next: pass user-assisted foreground/Stop/takeover tests and prove the selected blank-Notepad task in both modes. General desktop control and model-generated actions remain unimplemented.
+The product direction now includes **Guide me** and permission-scoped **Do it for me**. The local dual-mode fixture, an [experimental Notepad adapter](docs/NOTEPAD_TASK.md), and a first generic selected-window action slice are implemented. An explicit Copilot launch authorizes the generic slice to perform one stable-ID-reacquired UIA `invoke`, `toggle`, `select`, `expand`, or `collapse` per response without another prompt; the model selects reviewed evidence but has no execution tool. Next: pass user-assisted foreground/Stop/takeover tests and broaden only from measured app-specific evidence. Typing, scrolling, coordinate input, ambient observation, and general desktop control remain unimplemented.
 
 The current implementation is summarized in [SUMMARY.md](SUMMARY.md); detailed progress is in [PLAN.md](PLAN.md). This roadmap is not a production commitment or a claim of completed UX validation.
 
@@ -24,7 +24,7 @@ Validate setup on a clean Windows machine and record exact resolved dependencies
 
 Before any internal-data pilot, obtain approved identity/data handling, implement server-validated enterprise authentication and permission-aware retrieval, and test access isolation. None is supplied by `MSGUIDE_MODE=demo` or model credentials.
 
-Keep real actions disabled until downstream authorization, least privilege, exact preview/confirmation binding, idempotency, cancellation semantics, and audit requirements are implemented and reviewed. The current action API only simulates effects; the desktop does not use it.
+Keep enterprise/downstream actions disabled until authorization, least privilege, exact preview/confirmation binding, idempotency, cancellation semantics, and audit requirements are implemented and reviewed. The backend action API still only simulates effects and the desktop does not use it. The local UIA slice is a separate per-action boundary and is not evidence that enterprise action requirements are complete.
 
 ## 5. Consider a controlled pilot only after the gates pass
 

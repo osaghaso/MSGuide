@@ -52,7 +52,18 @@ The executable is a Windows GUI application, so use its exit code and JSON repor
 
 [tests/local_client.py](../tests/local_client.py) wraps `httpx.ASGITransport` directly and runs application lifespan. Tests do not use Starlette's legacy TestClient/httpx constructor path, avoiding that compatibility issue without requiring a downgrade. Provider tests in [tests/test_model_provider.py](../tests/test_model_provider.py) use mocked transport and synthetic images; they are not live-model evaluations.
 
-[requirements.txt](../requirements.txt) and [requirements-dev.txt](../requirements-dev.txt) pin direct requirements only. A complete transitive lock and clean-machine reproducibility validation remain unimplemented. This workspace now has a Git repository, but current changes are uncommitted; these checks are working-tree validation, not a commit/PR validation.
+[requirements.txt](../requirements.txt) and [requirements-dev.txt](../requirements-dev.txt)
+retain direct dependency intent. Portable `requirements.lock.txt` (runtime) and
+`requirements-dev.lock.txt` (runtime plus tests) record the tested project closure
+and wheel hashes without workstation-specific mirror URLs, targeting Windows x64
+CPython 3.11.9. Follow [setup](../README.md): create the venv, then install with
+`.\venv\Scripts\python -m pip install --require-hashes --only-binary=:all: -r requirements-dev.lock.txt`.
+Ordinary installation needs no experimental lock support. ARM64 Windows can use
+x64 Python. NuGet restores use the checked-in package locks and `--locked-mode`.
+Regenerate locks intentionally after direct manifest changes using pip 26.2.1
+and `scripts\lock_python_dependencies.py`; do not weaken TLS validation. Clean locked-install
+and CI validation are separate from the historical working-tree results above;
+the existence of lockfiles alone is not proof of either.
 
 ## Run the real desktop harness
 

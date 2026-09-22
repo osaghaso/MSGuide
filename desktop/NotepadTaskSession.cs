@@ -40,7 +40,8 @@ internal sealed class NotepadTaskSession
 
     internal void Validate()
     {
-        if (stopped || clock() >= expires) throw new InvalidOperationException("Task stopped or expired. Prepare and approve a new plan.");
+        if (DesktopAction.IsBusy || stopped || clock() >= expires)
+            throw new InvalidOperationException("Task stopped, expired, or a native action is still returning. Prepare and approve a new plan after native work finishes.");
         editor.Validate();
     }
 

@@ -125,7 +125,7 @@ internal static class IntegrationTests
                 // Consent is explicit in ApiClient's GuidanceRequest. Backend demo accepts UIA only.
                 var observation = evidence.Observation(false);
                 Require(observation.ImageBase64 is null);
-                var response = await api.Guide(observation, "Help me find the build error", ct);
+                var response = await api.Guide(observation, "Help me find the build error", ct, planSegments: false);
                 Require(evidence.Valid() && Safety.Matches(response, evidence.Id, window.Id) && response.Mode == "demo");
                 Require(response.Status == (state < 3 ? "next_step" : "completed"));
                 if (state == 3)
