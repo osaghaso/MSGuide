@@ -277,9 +277,13 @@ The main Pause banner also distinguishes pending shutdown, unknown microphone
 state and confirmed inactivity. Late audio notifications update that banner only
 while the same paused UI still owns it, never a newer task or status message.
 Whisper model/factory load, processor construction and inference have separate
-content-free timing events. No factory reuse or native speedup is claimed.
+content-free timing events. One CPU factory is loaded lazily and retained until
+app exit. The existing inference gate serializes recordings; each uses a fresh
+processor and clears audio only after native cleanup. App exit cancels pending
+transcription and waits for cleanup before disposing the factory.
 Set `MSGUIDE_WHISPER_SYNTHETIC_TEST=1` for real local Whisper transcription of
-synthetic speech and silence. These use memory only, with no speaker output,
+synthetic speech and silence, cold/warm factory reuse, cancellation and terminal
+shutdown. These use memory only, with no speaker output,
 microphone input, audio file, or remote call. The older
 `MSGUIDE_SPEECH_SYNTHETIC_TEST=1` checks the legacy Windows test adapter only;
 it is not proof of Whisper accuracy.

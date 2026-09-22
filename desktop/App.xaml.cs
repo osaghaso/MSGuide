@@ -155,6 +155,12 @@ public partial class App : Application
         mainWindow.StartCompanionMode();
     }
 
+    protected override void OnExit(ExitEventArgs e)
+    {
+        try { WhisperSpeechModel.ShutdownAsync().GetAwaiter().GetResult(); }
+        finally { base.OnExit(e); }
+    }
+
     private void ApplyAccessibilityTheme()
     {
         if (!SystemParameters.HighContrast) return;

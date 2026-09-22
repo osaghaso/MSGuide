@@ -205,9 +205,13 @@ During shutdown, **MIC STOPPING** remains visible and recording/input changes st
 disabled until hardware closure is acknowledged. After a three-second missing-ack
 deadline, **MIC STATUS UNKNOWN** remains latched; a late confirmed closure can
 clear the gate but cannot revive cancelled speech. A permanently stuck driver
-may require closing the app. Model-load/factory, processor-creation and inference
-timings are recorded separately without audio or transcript content. No factory
-cache was added, and native performance was not benchmarked by the fake tests.
+may require closing the app. The CPU model loads lazily once and stays in memory
+until exit; each recording still uses a fresh processor, with serialized inference
+and audio clearing after native cleanup. Exit cancels queued/active transcription
+and waits for cleanup before disposing the model. Model-load/factory,
+processor-creation and inference timings are recorded separately without audio or
+transcript content. The opt-in native synthetic check covers cold/warm reuse,
+cancellation and shutdown; fake tests alone do not measure native performance.
 
 ## Privacy and limits
 

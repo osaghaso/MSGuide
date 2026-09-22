@@ -128,6 +128,37 @@ remains available and supports `max`, but its reported context window is
 `MSGUIDE_COPILOT_REASONING_EFFORT`, and `MSGUIDE_COPILOT_CONTEXT_TIER` only with
 values supported by the selected model.
 
+### Planning latency comparison
+
+Run the synthetic comparison using the existing authenticated Copilot executable:
+
+```powershell
+$env:COPILOT_CLI_PATH = (Get-Command copilot.exe -CommandType Application).Source
+.\venv\Scripts\python -m scripts.benchmark_planning --models gpt-6-astra gpt-5.4-mini --repeats 3 --output "$env:TEMP\msguide-planning-benchmark.json"
+```
+
+This makes at most 12 sequential planning requests with public synthetic controls
+and an optional generated image; it never captures the desktop or executes actions.
+It checks the ordered actions, exact input, grounding and resource boundary.
+The report separates planning from runtime startup/cleanup and exits nonzero if
+any sample fails. Failed requests are not counted as successful speedups.
+
+The initial three-sample-per-mode comparison with SDK 1.0.13 found:
+
+| Model | UIA-only median | With generated image median | Correct plans |
+| --- | --- | --- | --- |
+| `gpt-6-astra` | 19.44 s | 18.25 s | 6/6 |
+| `gpt-5.4-mini` | 13.83 s (rejected) | 14.61 s (rejected) | 0/6 |
+
+All mini requests ended with `invalid_result`; keep Astra rather than trade
+correctness for rejected responses. One small workflow and three samples per
+mode do not establish an overall speedup or a UIA-only latency advantage.
+`-Copilot -UiaOnly` remains an explicit option for tasks fully described by
+accessible controls/text; omit it for visual tasks. Final-page completion and
+real desktop capture/execution latency are outside this benchmark.
+
+### Provider lifecycle
+
 An integrator must:
 
 1. Build a `CopilotProviderConfig` with an explicit model and an absolute SDK
