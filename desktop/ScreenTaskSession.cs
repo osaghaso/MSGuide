@@ -170,7 +170,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
         Func<Observation, TaskProgress, CancellationToken, Task<Guidance>> guide,
         Func<Observation, TargetInfo, CancellationToken, Task<DesktopActionResult>> execute,
         bool allowExecution, Action changed, CancellationToken cancellationToken,
-        Func<TimeSpan, CancellationToken, Task>? delayForTest = null)
+        Func<TimeSpan, CancellationToken, Task>? delayForTest = null, bool includePlanningImages = true)
     {
         if (!CanContinue) throw new InvalidOperationException("This task cannot continue without manual review or a new request.");
         if (UserInput.Length > 1000) throw new InvalidOperationException("Continuation input exceeds 1000 characters.");
@@ -247,7 +247,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
                     if (attempt > 1) await delay(TimeSpan.FromMilliseconds(250), refresh.Token);
                     try
                     {
-                        var next = await Observe(true, refresh.Token);
+                        var next = await Observe(includePlanningImages, refresh.Token);
                         if (!observedIds.Add(next.Id))
                             throw new InvalidOperationException("Automatic replanning reused an observation.");
                         rejection = !next.AutomationComplete ? "incomplete_observation"
@@ -286,7 +286,7 @@ internal sealed class ScreenTaskSession(string prompt, string windowId)
         try
         {
             if (UserInput.Length > 0) replanRequired = true;
-            var observation = await Observe(Step == 1 || replanRequired, cancellationToken);
+            var observation = await Observe(includePlanningImages && (Step == 1 || replanRequired), cancellationToken);
             if (!observation.AutomationComplete && allowExecution)
             {
                 SetStatus("blocked", "The selected app did not finish exposing its accessible controls in time. Switch to Guide mode or retry after the app settles; no task action was accepted.");

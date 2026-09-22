@@ -13,6 +13,8 @@ internal static class WhisperSpeechModel
     internal const int MaxPcmBytes = SampleRate * 2 * 30;
     internal const long ModelSizeBytes = 487614201;
     private static readonly SemaphoreSlim InferenceGate = new(1, 1);
+    private static readonly CancellationTokenSource ShutdownCancellation = new();
+    private static WhisperFactory? factory;
 
     internal static string ModelPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -20,6 +22,7 @@ internal static class WhisperSpeechModel
 
     internal static void EnsureAvailable()
     {
+        ObjectDisposedException.ThrowIf(ShutdownCancellation.IsCancellationRequested, typeof(WhisperSpeechModel));
         if (!File.Exists(ModelPath))
             throw new FileNotFoundException(
                 "The local Whisper speech model is missing. Run scripts\\Install-MSGuideSpeechModel.ps1 -AcceptDownload to install it.");
@@ -28,14 +31,28 @@ internal static class WhisperSpeechModel
                 "The local Whisper speech model is incomplete. Run scripts\\Install-MSGuideSpeechModel.ps1 -AcceptDownload to repair it.");
     }
 
+    internal static async Task ShutdownAsync()
+    {
+        ShutdownCancellation.Cancel();
+        await InferenceGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            factory?.Dispose();
+            factory = null;
+        }
+        finally { InferenceGate.Release(); }
+    }
+
     // Takes ownership. Neither PCM nor converted samples survive this operation.
     internal static async Task<IReadOnlyList<WhisperSegment>> TranscribeAsync(
-        byte[] pcm, CancellationToken cancellationToken, Action? inferenceStarting = null)
+        byte[] pcm, CancellationToken cancellationToken, Action<WhisperFactory>? inferenceStarting = null)
     {
         float[]? samples = null;
         bool entered = false;
         try
         {
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, ShutdownCancellation.Token);
+            cancellationToken = lifetime.Token;
             cancellationToken.ThrowIfCancellationRequested();
             if (pcm.Length > MaxPcmBytes || (pcm.Length & 1) != 0)
                 throw new ArgumentException("Expected at most 30 seconds of 16 kHz mono PCM16 audio.", nameof(pcm));
@@ -48,12 +65,16 @@ internal static class WhisperSpeechModel
             entered = true;
             cancellationToken.ThrowIfCancellationRequested();
             EnsureAvailable();
-            var loadClock = Stopwatch.StartNew();
-            using var factory = WhisperFactory.FromPath(ModelPath, new WhisperFactoryOptions { UseGpu = false });
-            DiagnosticLog.Record("whisper_model_loaded", new { elapsedMs = loadClock.ElapsedMilliseconds });
+            if (factory is null)
+            {
+                // ponytail: one CPU model per process; the inference gate also protects its lifetime.
+                var loadClock = Stopwatch.StartNew();
+                factory = WhisperFactory.FromPath(ModelPath, new WhisperFactoryOptions { UseGpu = false });
+                DiagnosticLog.Record("whisper_model_loaded", new { elapsedMs = loadClock.ElapsedMilliseconds });
+            }
             cancellationToken.ThrowIfCancellationRequested();
             var processorClock = Stopwatch.StartNew();
-            await using var processor = factory.CreateBuilder()
+            var processor = factory.CreateBuilder()
                 .WithLanguage("en")
                 .WithNoContext()
                 .WithThreads(Math.Min(Environment.ProcessorCount, 6))
@@ -62,9 +83,11 @@ internal static class WhisperSpeechModel
                 .WithProbabilities()
                 .WithoutStringPool()
                 .Build();
+            // App exit may synchronously wait for shutdown on the UI thread.
+            await using var processorLifetime = processor.ConfigureAwait(false);
             DiagnosticLog.Record("whisper_processor_created", new { elapsedMs = processorClock.ElapsedMilliseconds });
             var segments = new List<WhisperSegment>();
-            inferenceStarting?.Invoke();
+            inferenceStarting?.Invoke(factory);
             var inferenceClock = Stopwatch.StartNew();
             bool finished = false;
             try

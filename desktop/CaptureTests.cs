@@ -320,9 +320,25 @@ internal static class CaptureTests
         finally { shell.Stop(); }
     }
 
+    private sealed class LookupContext : TextBlock
+    {
+        internal int HelpTextReads;
+        protected override AutomationPeer OnCreateAutomationPeer() => new LookupPeer(this);
+        private sealed class LookupPeer(LookupContext owner) : TextBlockAutomationPeer(owner)
+        {
+            protected override string GetHelpTextCore()
+            {
+                owner.HelpTextReads++;
+                return "Synthetic lookup context.";
+            }
+        }
+    }
+
     private static async Task CheckDenseControls(CancellationToken ct)
     {
         var panel = new Grid();
+        var lookupContext = new LookupContext { Text = "Synthetic lookup context" };
+        panel.Children.Add(lookupContext);
         for (int index = 0; index < 250; index++)
             panel.Children.Add(new TextBlock
             {
@@ -369,9 +385,17 @@ internal static class CaptureTests
             var target = new TargetInfo(element.Label, element.Box, element.Confidence,
                 element.TargetId, element.AutomationId, element.FrameworkId, Action: element.Action,
                 ControlId: element.ControlId);
+            Require(lookupContext.HelpTextReads > 0);
+            lookupContext.HelpTextReads = 0;
             var rebound = await Task.Run(() => AutomationEvidence.FindUniqueTarget(window, snapshot.Rect,
                 element.TargetId!, element.Label, element.AutomationId, ct, snapshot.ResourceId), ct);
             Require(rebound is not null);
+            var byName = await Task.Run(() => AutomationEvidence.FindUniqueTarget(window, snapshot.Rect,
+                element.TargetId!, element.Label, null, ct, snapshot.ResourceId), ct);
+            Require(byName is not null);
+            var wrongTarget = await Task.Run(() => AutomationEvidence.FindUniqueTarget(window, snapshot.Rect,
+                "uia-not-the-reviewed-target", element.Label, element.AutomationId, ct, snapshot.ResourceId), ct);
+            Require(wrongTarget is null && invocations == 0 && lookupContext.HelpTextReads == 0);
             var marker = new CursorCompanionWindow();
             var outline = new OverlayWindow();
             try

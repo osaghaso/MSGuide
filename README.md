@@ -81,6 +81,14 @@ external messages can contain private screen content or credentials.
 
 - `-Port 8766`: choose a different free port (1024–65535); existing processes are never stopped to free a port.
 - `-SkipBuild`: reuse an existing desktop binary; omit after source changes.
+- `-Configuration Release`: build and run the optimized desktop. The default
+  remains `Debug`; `-SkipBuild` reuses the selected configuration's binary.
+- `-Copilot -UiaOnly`: opt into text/UI Automation-only generic task planning,
+  including automatic replans. No screenshot is captured or uploaded on that
+  path. Use it only when accessible controls/text describe the task; omit
+  `-UiaOnly` for images, charts, canvas content, or other visual questions.
+  Incomplete controls still block execution. Manual capture review and local
+  camera diagnosis keep their existing behavior.
 - `-IntegrationTest`: run the synthetic desktop harness instead of normal UI; forces the deterministic provider. See [how to run validation](docs/VALIDATION.md).
 - `-CaptureTest`: test real demo-window capture and API guidance without requiring foreground activation. This does not test overlay interaction.
 - `-Copilot`: use the persistent GitHub Copilot SDK provider for the generic
@@ -138,6 +146,16 @@ For the deterministic developer harness, start with `.\scripts\Start-MSGuide.ps1
 Editing the prompt replaces the old task. Changing the selected window or moving/resizing it invalidates current evidence. Evidence still expires after 60 seconds: SDK/API/desktop guidance waits use the **remaining** lifetime, with 5/3/1 seconds reserved respectively. They do not extend evidence validity. Native actions are caller-bounded to eight seconds; a hung COM call cannot be interrupted safely and blocks new actions until it returns or MSGuide is restarted.
 
 The initial plan request and automatic same-window replans can share an approved screenshot; steps inside a page's segment and post-action checks stay **local UIA-only**, reusing suitable post-action evidence for the next binding. Verification retries observations, not actions: up to six reads within a shared 30-second deadline. Incomplete controls, a page changing during capture, or temporarily missing page identity can be re-inspected while loading; they never authorize the next action. Invalid/denied observations still stop immediately. Persistent inspection failures remain unknown with their actual reason, not a misleading timeout message. Semantic actions require their expected effect; only `invoke` can use a stable screen change, which is not causal or goal proof. Confirmed page changes automatically replace the old plan using fresh complete evidence; real input/permission/new-window handoffs still stop. Logical `controlId` survives label/position changes for verification; the separate `targetId` still binds the exact reviewed state before invocation.
+
+For optimized execution, first launch with
+`.\scripts\Start-MSGuide.ps1 -Copilot -Configuration Release`.
+On repeat launches with unchanged sources, add `-SkipBuild`; add `-UiaOnly`
+for suitable text/control tasks. Close the old copy before relaunching.
+Screenshot planning remains the default. Do not shorten
+freshness, action, or verification deadlines to reduce latency: they bound
+failures, not intentional sleeps. Target lookup now filters candidates using
+cached automation IDs or a minimal name read before fetching exact live target
+details; page identity, uniqueness, and pre-action safety checks are unchanged.
 
 Queued execution requires a stable selected-window resource scope. Native applications are bound to the explicitly selected HWND, process, class, and title; a title or window change stops queued execution. Supported English Microsoft Edge and Chrome windows use the stricter binding between the active native `RootWebArea` document and canonical displayed browser address. Browsers may omit `http://` or `https://` in that field; the scheme is not guessed. Auxiliary browser document wrappers are not mistaken for separate pages. Capture and target lookup stay inside the verified page, not browser tabs or side panes. The combined identity is hashed locally and rechecked before actions; ambiguous, unsupported, or changed page identity still stops execution. New windows are never selected automatically; only an explicit user selection at a `resource` boundary can rebind the task, discard its old plan, and authorize fresh capture and replanning. SDK sessions remain isolated, and remaining plan/history is untrusted context, not cached execution authority.
 

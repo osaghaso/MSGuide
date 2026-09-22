@@ -228,6 +228,7 @@ internal static class PlanTests
 
     private static async Task RunAutomaticNavigationAsync(List<string> checks)
     {
+        foreach (bool includeImages in new[] { true, false })
         foreach (string boundary in new[] { "queued", "observation", "completion_candidate" })
         {
             int page = 0, calls = 0, images = 0;
@@ -246,7 +247,7 @@ internal static class PlanTests
                 calls++;
                 IntegrationTests.Require(calls == page + 1 && progress.TaskId == task.Id
                     && progress.Step == page + 1 && progress.Status == "running" && progress.UserInput.Length == 0
-                    && observation.ImageBase64 == Convert.ToBase64String(new byte[] { (byte)page }));
+                    && observation.ImageBase64 == (includeImages ? Convert.ToBase64String(new byte[] { (byte)page }) : null));
                 if (page > 0)
                     IntegrationTests.Require(progress.ReplanReason == "resource_changed"
                         && progress.Plan?.ResourceId == ResourceFor(page - 1) && progress.PlanCursor == 1
@@ -262,8 +263,8 @@ internal static class PlanTests
                 page++;
                 return Task.FromResult(new DesktopActionResult(true, true, "Returned."));
             }, true, () => IntegrationTests.Require(task.Status is "running" or "review_required"),
-                CancellationToken.None, NoDelay);
-            IntegrationTests.Require(page == 3 && calls == 4 && images == 4 && task.ActionsTaken == 3
+                CancellationToken.None, NoDelay, includePlanningImages: includeImages);
+            IntegrationTests.Require(page == 3 && calls == 4 && images == (includeImages ? 4 : 0) && task.ActionsTaken == 3
                 && task.Status == "review_required" && task.Plan?.ResourceId == ResourceFor(3)
                 && task.History.All(step => step.Outcome == "screen_changed"));
         }
@@ -295,6 +296,7 @@ internal static class PlanTests
             && legacy.Status == "review_required");
         checks.Add("page-navigation-and-legacy-recapture-continue-without-manual-approval");
         checks.Add("old-page-queued-actions-and-completion-guesses-never-cross-page-boundaries");
+        checks.Add("uia-only-planning-omits-images-on-initial-capture-and-every-page-replan");
 
         foreach (string rejection in new[] { "none", "incomplete", "unverified", "changing" })
         {
@@ -516,12 +518,18 @@ internal static class PlanTests
             IntegrationTests.Require(guides == 1 && guided.ActionsTaken == 0 && guided.Plan?.Steps.Length == 1
                 && guided.Status == "needs_input" && guided.ReplanRequired);
         }
-        var incomplete = new ScreenTaskSession("Do not execute partial grounding", Window.Id);
-        await incomplete.RunAsync((_, _) => Task.FromResult(Screen(0) with { AutomationComplete = false }),
-            (_, _, _) => throw new InvalidOperationException("Incomplete executable context was shared."),
-            (_, _, _) => throw new InvalidOperationException("Incomplete evidence executed."),
-            true, () => { }, CancellationToken.None, NoDelay);
-        IntegrationTests.Require(incomplete.Status == "blocked" && incomplete.ActionsTaken == 0);
+        foreach (bool includeImages in new[] { true, false })
+        {
+            var incomplete = new ScreenTaskSession("Do not execute partial grounding", Window.Id);
+            await incomplete.RunAsync((image, _) =>
+            {
+                IntegrationTests.Require(image == includeImages);
+                return Task.FromResult(Screen(0) with { AutomationComplete = false });
+            }, (_, _, _) => throw new InvalidOperationException("Incomplete executable context was shared."),
+                (_, _, _) => throw new InvalidOperationException("Incomplete evidence executed."),
+                true, () => { }, CancellationToken.None, NoDelay, includePlanningImages: includeImages);
+            IntegrationTests.Require(incomplete.Status == "blocked" && incomplete.ActionsTaken == 0);
+        }
         var unverified = new ScreenTaskSession("Do not label missing identity as navigation", Window.Id);
         await unverified.RunAsync((_, _) => Task.FromResult(Screen(0) with { ResourceId = null }),
             (observed, progress, _) => Task.FromResult(Reply(observed, progress,

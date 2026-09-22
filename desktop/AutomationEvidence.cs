@@ -398,7 +398,9 @@ internal static class AutomationEvidence
     {
         cancellationToken.ThrowIfCancellationRequested();
         var privacy = CaptureCache();
-        var details = CaptureCache(details: true);
+        var names = CaptureCache();
+        names.Add(AutomationElement.NameProperty);
+        bool matchByName = string.IsNullOrWhiteSpace(automationId);
         var root = AutomationElement.FromHandle(window.Handle).GetUpdatedCache(privacy);
         if (root.Cached.ProcessId != (int)window.ProcessId) return null;
         if (resourceId?.StartsWith("browser-", StringComparison.Ordinal) == true)
@@ -410,7 +412,7 @@ internal static class AutomationEvidence
         else if (resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken)) return null;
         var walker = TreeWalker.RawViewWalker;
         var clock = Stopwatch.StartNew();
-        int visited = 0;
+        int visited = 0, nameReads = 0;
         bool incomplete = false, duplicate = false;
         AutomationElement? match = null;
         void Walk(AutomationElement node, int depth)
@@ -429,10 +431,15 @@ internal static class AutomationEvidence
                 return;
             }
             if (value.IsPassword || value.IsOffscreen) return;
-            var named = node.GetUpdatedCache(details).Cached;
-            if (named.IsPassword || named.IsOffscreen) return;
-            bool candidate = string.IsNullOrWhiteSpace(automationId)
-                ? named.Name == label : named.AutomationId == automationId;
+            // ponytail: identify candidates cheaply; only exact candidates need live target details.
+            bool candidate = value.AutomationId == automationId;
+            if (matchByName)
+            {
+                nameReads++;
+                var named = node.GetUpdatedCache(names).Cached;
+                if (named.IsPassword || named.IsOffscreen) return;
+                candidate = named.Name == label;
+            }
             if (candidate && MatchesTargetId(window, rect, node, targetId))
             {
                 if (match is not null) { duplicate = true; return; }
@@ -449,8 +456,11 @@ internal static class AutomationEvidence
         // Unlike FindAll, traversal has node/depth/time ceilings. Individual COM calls
         // can still hang; the action caller contains one late native worker.
         Walk(root, 0);
-        return incomplete || duplicate || clock.ElapsedMilliseconds >= ScanMilliseconds
-            || resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken) ? null : match;
+        bool rejected = incomplete || duplicate || clock.ElapsedMilliseconds >= ScanMilliseconds
+            || resourceId is not null && !ResourceMatches(window, resourceId, cancellationToken);
+        DiagnosticLog.Record("uia_target_lookup", new
+        { visited, nameReads, matchByName, rejected, matched = !rejected && match is not null, elapsedMs = clock.ElapsedMilliseconds });
+        return rejected ? null : match;
     }
 
     internal static AutomationProbeDiagnostic Probe(WindowChoice window, Native.RECT rect, CancellationToken ct)

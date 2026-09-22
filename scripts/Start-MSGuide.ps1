@@ -5,7 +5,9 @@ param(
     [switch]$IntegrationTest,
     [switch]$CaptureTest,
     [switch]$SkipBuild,
+    [ValidateSet('Debug', 'Release')][string]$Configuration = 'Debug',
     [switch]$Copilot,
+    [switch]$UiaOnly,
     [switch]$CameraFixture,
     [switch]$Shareable,
     [switch]$DeveloperTools
@@ -16,10 +18,11 @@ if ($IntegrationTest -and $CaptureTest) { throw 'Choose one test mode.' }
 if ($Copilot -and ($IntegrationTest -or $CaptureTest)) {
     throw 'Copilot mode is for the interactive app, not deterministic test harnesses.'
 }
+if ($UiaOnly -and !$Copilot) { throw '-UiaOnly requires -Copilot for automatic task planning.' }
 $root = Split-Path $PSScriptRoot -Parent
 $python = Join-Path $root 'venv/Scripts/python.exe'
 $project = Join-Path $root 'desktop/MSGuide.Desktop.csproj'
-$desktop = Join-Path $root 'desktop/bin/Debug/net10.0-windows10.0.19041.0/MSGuide.Desktop.exe'
+$desktop = Join-Path $root "desktop\bin\$Configuration\net10.0-windows10.0.19041.0\MSGuide.Desktop.exe"
 if (!(Test-Path $python)) { throw 'Set up the Python environment first; see README.md.' }
 if (!(Get-Command dotnet -ErrorAction SilentlyContinue)) { throw '.NET 10 SDK is required.' }
 $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
@@ -32,7 +35,7 @@ $client = $null
 $http = $null
 try {
     if (!$SkipBuild) {
-        & dotnet build $project --nologo -p:RestoreLockedMode=true
+        & dotnet build $project --configuration $Configuration --nologo -p:RestoreLockedMode=true
         if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed.' }
     }
     if (!(Test-Path $desktop)) { throw 'Desktop binary missing. Run without -SkipBuild.' }
@@ -58,6 +61,7 @@ try {
         $info.Environment['MSGUIDE_DIAGNOSTIC_LOG'] = $backendLog
         $info.Environment['MSGUIDE_DESKTOP_LOG'] = $desktopLog
         $info.Environment['MSGUIDE_MODE'] = 'demo'
+        $info.Environment['MSGUIDE_UIA_ONLY'] = if ($UiaOnly) { '1' } else { '0' }
         $info.Environment['PYTHONUTF8'] = '1'
         $info.Environment['MSGUIDE_DEVELOPER_TOOLS'] =
             if ($DeveloperTools -or $IntegrationTest -or $CaptureTest) { '1' } else { '0' }
@@ -135,6 +139,9 @@ try {
         throw "Local API startup failed: $failure; stage=$readinessStage; lastError=$readinessError. See $backendLog for provider startup diagnostics."
     }
     Write-Host "MSGuide ready at $url (local single-user mode). Diagnostic logs: $logDirectory"
+    if ($UiaOnly) {
+        Write-Host 'UIA-only task planning: screenshots are off. Omit -UiaOnly for tasks requiring visual context.'
+    }
     if ($Shareable) {
         Write-Warning 'Shareable demo mode is on. MSGuide can appear when you share the full screen.'
     }

@@ -515,7 +515,7 @@ public partial class MainWindow : Window
         {
             await task.RunAsync(CaptureStep, GuideStep, ExecuteStep,
                 sessionAutomationApproved && SelectedCameraMode == CameraRecoveryInteractionMode.Control,
-                Changed, ct);
+                Changed, ct, includePlanningImages: Environment.GetEnvironmentVariable("MSGUIDE_UIA_ONLY") != "1");
         }
         finally
         {

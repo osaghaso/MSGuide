@@ -14,12 +14,23 @@ provisioning or Developer Mode is needed.
 
 ## Build and start
 
+For an optimized desktop, use
+`.\scripts\Start-MSGuide.ps1 -Copilot -Configuration Release` from the repository
+root. Add `-SkipBuild` only after that configuration has been built from the
+current sources; add `-UiaOnly` only for tasks fully described by accessible text
+and controls. Close the old desktop copy before relaunching.
+
 Build with `dotnet build desktop/MSGuide.Desktop.csproj` from the repository root using the installed .NET 10 SDK. Run `dotnet run --project desktop/MSGuide.Desktop.csproj` from the authenticated launcher's environment, or launch `desktop/bin/Debug/net10.0-windows/MSGuide.Desktop.exe` from that environment. The parent launcher owns starting the backend and generating the ephemeral token.
 
 - `MSGUIDE_LOCAL_TOKEN`: required for `/v1` calls; inherited from the launcher, never embedded or persisted by this client.
 - `MSGUIDE_API_URL`: default `http://127.0.0.1:8000`. Only a literal loopback HTTP origin or `localhost` is accepted; localhost is pinned to 127.0.0.1. Proxies and redirects are disabled to prevent forwarding the token.
 - `MSGUIDE_HOTKEY`: optional, default `Ctrl+Alt+M`; examples `Ctrl+Shift+G` or `Alt+Shift+M`. Normal launch keeps the full workspace hidden and shows a click-through Windows-logo buddy 35 pixels right and 25 pixels below the pointer. The hotkey remembers the foreground app and opens a compact prompt beside the pointer. Its thinking and response bubble tracks the pointer at roughly 60 FPS, flips at screen edges, and never intercepts clicks. **Details** opens the full workspace for manual review, settings, and action approval. A registration conflict is reported in Details.
 - Expected backend: `GET /health` with status `ok`, version `0.2.0`, mode `demo`/`model`; authenticated `POST /v1/sessions` and `POST /v1/guidance`. No legacy assist/action routes are called.
+- `MSGUIDE_UIA_ONLY=1`: set by the launcher's explicit `-Copilot -UiaOnly` option.
+  Omits screenshots from initial generic task planning and all replans, without
+  changing local verification or manual screenshot review. The default is
+  screenshot-assisted planning; use it for visual questions. This option does
+  not make incomplete controls executable or add a pixel/keyboard fallback.
 
 ## Try the supported workflow
 
@@ -115,6 +126,9 @@ browser-elided HTTP(S) prefixes without claiming a guessed transport scheme.
 Both the native document and canonical displayed address are hashed into the
 scope. Auxiliary browser document wrappers are ignored, and capture/target
 lookup are confined to the verified page rather than tabs or side panes.
+Target lookup uses cached automation IDs, or a privacy-checked minimal name
+read when no ID exists, before reading exact live target details for candidates.
+It still scans to prove uniqueness and rechecks the page and target before input.
 Only opaque identities leave this check; raw addresses are not logged.
 Changed page identities trigger automatic replanning; unidentified/ambiguous
 pages and unsupported browser layouts cannot authorize another action.

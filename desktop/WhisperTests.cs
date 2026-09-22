@@ -5,6 +5,7 @@ using System.IO;
 using System.Speech.AudioFormat;
 using System.Speech.Synthesis;
 using NAudio.Wave;
+using Whisper.net;
 
 namespace MSGuide.Desktop;
 
@@ -212,16 +213,21 @@ internal static class WhisperTests
     public static async Task RunSyntheticAsync()
     {
         WhisperSpeechModel.EnsureAvailable();
-        string[] phrases = ["Please open the meeting settings.", "Check my Teams camera."];
-        string[][] expectedWords = [["open", "meeting", "settings"], ["check", "teams", "camera"]];
+        string[] phrases = ["Please open the meeting settings.", "Please open the meeting settings.", "Check my Teams camera."];
+        string[][] expectedWords = [["open", "meeting", "settings"], ["open", "meeting", "settings"], ["check", "teams", "camera"]];
+        WhisperFactory? firstFactory = null;
         for (int i = 0; i < phrases.Length; i++)
         {
             byte[] pcm = Synthesize(phrases[i]);
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
             var watch = Stopwatch.StartNew();
-            var segments = await Task.Run(() => WhisperSpeechModel.TranscribeAsync(pcm, deadline.Token));
+            var segments = await Task.Run(() => WhisperSpeechModel.TranscribeAsync(pcm, deadline.Token, factory =>
+            {
+                firstFactory ??= factory;
+                Check(ReferenceEquals(firstFactory, factory), "warm recordings reuse the loaded model");
+            }));
             string text = string.Join(" ", segments.Select(segment => segment.Text));
-            Console.WriteLine($"Whisper public synthetic phrase {i + 1}: {text} ({watch.Elapsed.TotalSeconds:F2}s).");
+            Console.WriteLine($"Whisper public synthetic phrase {i + 1} ({(i == 0 ? "cold" : "warm")}): {text} ({watch.Elapsed.TotalSeconds:F2}s).");
             string[] words = text.Split([' ', '.', ',', '!', '?', ';', ':'], StringSplitOptions.RemoveEmptyEntries)
                 .Select(word => new string(word.Where(char.IsLetter).ToArray())).ToArray();
             Check(expectedWords[i].All(expected => words.Contains(expected, StringComparer.OrdinalIgnoreCase)),
@@ -256,7 +262,7 @@ internal static class WhisperTests
         bool observed = false, inferenceStarted = false;
         try
         {
-            await Task.Run(() => WhisperSpeechModel.TranscribeAsync(cancellable, cancellation.Token, () =>
+            await Task.Run(() => WhisperSpeechModel.TranscribeAsync(cancellable, cancellation.Token, _ =>
             {
                 inferenceStarted = true;
                 cancellation.CancelAfter(TimeSpan.FromMilliseconds(500));
@@ -266,6 +272,52 @@ internal static class WhisperTests
         Check(inferenceStarted && observed && cancellable.All(value => value == 0),
             "native in-flight cancellation waits for cleanup and clears PCM");
         Console.WriteLine($"Whisper synthetic cancellation: cleaned up ({cancellationWatch.Elapsed.TotalSeconds:F2}s).");
+        await RunFactoryShutdownAsync(firstFactory!);
+    }
+
+    private static async Task RunFactoryShutdownAsync(WhisperFactory firstFactory)
+    {
+        byte[] activePcm = CreateTone(0.02f, 1), queuedPcm = CreateTone(0.02f, 1);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var active = Task.Run(() => WhisperSpeechModel.TranscribeAsync(activePcm, deadline.Token, factory =>
+        {
+            Check(ReferenceEquals(firstFactory, factory), "cancellation preserves the warm model");
+            entered.SetResult();
+            Check(release.Wait(TimeSpan.FromSeconds(10)), "shutdown regression releases the active processor");
+        }));
+        Task? shutdown = null;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var queued = WhisperSpeechModel.TranscribeAsync(queuedPcm, deadline.Token);
+            shutdown = WhisperSpeechModel.ShutdownAsync();
+            Check(!shutdown.IsCompleted && !active.IsCompleted && activePcm.Any(value => value != 0),
+                "shutdown waits for the active processor without clearing its audio");
+            bool cancelled = false;
+            try { await queued.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (OperationCanceledException) { cancelled = true; }
+            Check(cancelled && queuedPcm.All(value => value == 0),
+                "shutdown cancels queued inference and clears its audio");
+        }
+        finally { release.Set(); }
+        bool activeCancelled = false;
+        try { await active.WaitAsync(TimeSpan.FromSeconds(10)); }
+        catch (OperationCanceledException) { activeCancelled = true; }
+        await shutdown!.WaitAsync(TimeSpan.FromSeconds(10));
+        await WhisperSpeechModel.ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        bool disposed = false;
+        try { firstFactory.CreateBuilder(); }
+        catch (ObjectDisposedException) { disposed = true; }
+        Check(disposed && activeCancelled && activePcm.All(value => value == 0),
+            "idempotent shutdown disposes the model only after processor and audio cleanup");
+        byte[] latePcm = CreateTone(0.02f, 1);
+        bool lateCancelled = false;
+        try { await WhisperSpeechModel.TranscribeAsync(latePcm, CancellationToken.None); }
+        catch (OperationCanceledException) { lateCancelled = true; }
+        Check(lateCancelled && latePcm.All(value => value == 0), "shutdown cannot reload the model");
+        Console.WriteLine("Whisper warm model reuse, cancellation and shutdown: passed.");
     }
 
     private static byte[] Synthesize(string phrase)
